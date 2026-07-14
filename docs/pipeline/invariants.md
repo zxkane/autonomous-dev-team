@@ -7302,6 +7302,21 @@ now additionally requires `$_AGGREGATE_HAS_P0P1_FAIL == "true"`; R1's
 have run", not "is the terminal floor failing", so the broader
 `_AGGREGATE_SUBSTANTIVE_FAIL` remains correct there).
 
+**This gate's correctness depends on receiving a genuine severity, which the
+codex path did not until [INV-132] (issue #481)**: `_aggregate_has_p0p1_fail`
+above is fed the per-agent `AGENT_HIGHEST_SEVERITY[i]` values the severity
+filter computed — and pre-#481, that computation ALWAYS scored a codex
+agent's RAW stdout capture (which always echoes the prompt's own untagged
+checklist ahead of the agent's findings), collapsing to `none` regardless of
+the agent's actual tags. `none` counts as P0/P1-class here BY DESIGN (an
+unscoreable finding must never be excluded from the terminal floor) — so a
+codex-sourced P2-only round was misclassified as `none` and satisfied this
+gate every round, tripping the breaker on a false "P0/P1 floor is still
+failing" report even though every actual finding was `[P2]`. [INV-132] fixes
+the UPSTREAM input (which text gets scored), not this gate's logic — the gate
+was always correct given a genuine severity; it simply never received one on
+the codex path.
+
 **Trip behavior**, gated in this order:
 
 1. Check current issue labels for `stalled` FIRST — if already stalled (e.g.
@@ -8119,5 +8134,44 @@ _Triage (issue #236): [machine-checked: tests/unit/test-base-branch-conf.sh]_
 - [INV-14](#inv-14-config-lookup-honors-symlink-vendor-pattern) / [INV-65] — the same `${BASH_SOURCE[0]:-$0}`-anchored conf-lookup machinery `resolve_base_branch` is layered on top of (`lib-config.sh`).
 - [`dispatcher-flow.md`](dispatcher-flow.md#conf-schema-base_branch--configurable-base-branch-issue-478-inv-131) § Conf schema: `BASE_BRANCH` — the conf-key documentation, resolution chain, and byte-identical-default guarantee in narrative form.
 - [`skills/autonomous-review/references/merge-conflict-resolution.md`](../../skills/autonomous-review/references/merge-conflict-resolution.md) — the agent-facing rebase procedure, rephrased to reference "the base branch (`$BASE_BRANCH`, default `main`)" instead of asserting a literal `main`.
+
+---
+
+## INV-132: the pre-aggregation severity filter always scores a RENDERED verdict body when one exists — the raw per-CLI stdout capture is a fallback ONLY for a resolution path that produced no body at all
+
+_Triage (issue #481): [machine-checked: tests/unit/test-review-convergence-rules.sh, tests/unit/test-lib-review-codex.sh]_
+
+**Rule**: [INV-127]'s and [INV-129]'s severity ratchet (`_review_extract_highest_severity`, `lib-review-severity.sh`) scores whichever text the wrapper hands it at the call site in `autonomous-review.sh`, immediately before the pre-aggregation filter loop. That call site MUST select the text by **resolution channel**, not by agent identity: prefer `AGENT_VERDICT_BODIES[i]` (the rendered findings body — artifact-rendered for an artifact-resolved agent, comment-fallback-rendered otherwise) whenever it is non-empty, for EVERY agent including codex. The raw per-CLI stdout capture (`AGENT_CODEX_LOGS[i]`) is consulted ONLY when `AGENT_VERDICT_BODIES[i]` is empty — a codex agent resolved purely via the legacy stdout-classify path with no rendered body at all — and even then the echoed prompt is stripped first (`_codex_review_strip_prompt_echo`, `adapters/codex.sh`) before scoring.
+
+**Why (the bug this closes)**: pre-fix, the call site branched on `AGENT_NAMES[i] == "codex"` FIRST — any codex member with a captured stdout file (`AGENT_CODEX_LOGS[i]` non-empty and readable) was ALWAYS scored from that raw capture, even when its verdict had actually been resolved from a clean, schema-validated verdict ARTIFACT (`AGENT_VERDICT_SOURCES[i] == "artifact"`) whose rendered body (`AGENT_VERDICT_BODIES[i]`) already sat there, artifact-clean, ready to score. `build_review_prompt` renders a large NUMBERED checklist/instruction block (`## Review Checklist`, `1. [ ] Design canvas created...`, etc.) ahead of any codex agent's own output; `codex exec`/`codex review`'s stdout capture always echoes that block back verbatim before the agent's real findings. `_review_extract_highest_severity`'s per-finding fail-safe scan — deliberately added by [issue #449] to stop a correctly-tagged low-severity finding from masking a genuinely untagged sibling — sees those untagged numbered checklist lines and collapses the WHOLE scan to `none`, regardless of what severity tags the agent's actual findings carried.
+
+`none` always blocks (`shouldBlockFinding`'s fail-safe default), so on the codex path:
+- [INV-129]'s ratchet never demoted a `fail` to `pass`, no matter how many rounds ran — the ratchet was structurally inert for every codex review.
+- `_aggregate_has_p0p1_fail` treats `none` as P0/P1-class (by design — an unscoreable finding must never be excluded from the terminal floor), so [INV-127]'s round-cap counter advanced even on a P2-only round and eventually tripped with a false "the review still finds a P0/P1 blocking finding" report — the exact false-stall failure mode [INV-129] was written to close, reopened by feeding its own gate poisoned input.
+
+**Fix — call-site input selection, not a scanner change**:
+
+```bash
+if [[ -n "${AGENT_VERDICT_BODIES[$_i]:-}" ]]; then
+  _sev_text="${AGENT_VERDICT_BODIES[$_i]}"
+elif [[ "${AGENT_NAMES[$_i]}" == "codex" && -n "${AGENT_CODEX_LOGS[$_i]:-}" && -f "${AGENT_CODEX_LOGS[$_i]}" ]]; then
+  _sev_text=$(_codex_review_strip_prompt_echo "${AGENT_CODEX_LOGS[$_i]}")
+fi
+```
+
+This is a no-op for every non-codex agent (they already scored `AGENT_VERDICT_BODIES[i]`; the new first branch matches identically) and for a codex agent resolved via the artifact or comment-fallback channel (both populate `AGENT_VERDICT_BODIES[i]` before this loop runs). It changes behavior ONLY for a codex agent whose body is non-empty but whose raw stdout was ALSO non-empty — the exact case the bug lived in.
+
+**`_codex_review_strip_prompt_echo` (`adapters/codex.sh`)** — the hardened fallback for the residual case where a codex agent has no rendered body at all: reuses the SAME finding-boundary grammar `_codex_review_stdout_is_malformed` ([INV-73]) already established for its `_echo_region` extraction (fenced blocks stripped; boundary = the first genuine finding line — direct/numbered/bulleted/bold `[P0]`-`[P3]`, or a JSON `severity`/`priority` key or value). Everything FROM that boundary onward is returned (the agent's own authored output); everything strictly before it (the echoed prompt) is dropped. When NO such boundary exists anywhere in the capture — a short, well-formed review with no prompt scaffolding echoed at all — the original text is returned UNCHANGED (fail-safe: never guess a boundary that isn't there). Empty/missing/unreadable input echoes empty, rc 0 always (fail-safe under `set -euo pipefail`, mirroring every other `_codex_review_*` helper's contract).
+
+**Deliberately unchanged**: `_review_extract_highest_severity`'s scan semantics — its per-finding fail-safe (an untagged numbered line collapses the whole scan to `none`) is exactly correct behavior; the defect was feeding it the wrong text, not a flaw in how it scores the text it's given. No non-codex agent's behavior changes. `shouldBlockFinding` and `_aggregate_has_p0p1_fail` are untouched.
+
+**Status**: **ENFORCED** (closes #481).
+**Test**: `tests/unit/test-review-convergence-rules.sh` — TC-SEVEXT-001..010 (call-site selection: artifact body scores correctly, regression pin that the OLD whole-stdout scan of the same fixture still collapses to `none`, the stripped-stdout fallback recovers the correct severity, a no-boundary capture passes through unchanged, the R3 untagged-finding fail-safe is unmodified, `_aggregate_has_p0p1_fail` does not advance on the fixed extraction, non-codex agents are unaffected, wiring pins for the branch order and the helper call, and a simulated 5-round P2-only codex loop demotes at round 5 without ever advancing INV-127's counter). `tests/unit/test-lib-review-codex.sh` — TC-CXSTRIP-001..004 (`_codex_review_strip_prompt_echo`: strips a real-shaped echo capture down to its findings, passes a no-boundary capture through unchanged, fail-safe on empty/missing/empty-arg, and a genuine review's leading prose is dropped without affecting the severity result). Fixture: `tests/unit/fixtures/codex-review-stdout-echo-p2-only.txt` (CLI header + echoed numbered checklist + two genuine `[P2]`-tagged findings — the exact reproduction shape from the issue).
+
+**Cross-references**:
+- [INV-127](#inv-127-a-review-side-divergent-findings-non-convergence-review_convergence_cap-consecutive-failed-substantive-rounds-where-the-severity-ratchet-s-own-p0p1-floor-is-still-failing-is-detected-and-halted--the-breaker-transitions-reviewing--stalled-then-posts-one-structured-reasonreview-round-cap-report-gated-on-an-already-stalled-skip-does-not-gate-on-may_stall_now-mirroring-inv-122s-own-rationale) — the gate this invariant's fix un-poisons: `_aggregate_has_p0p1_fail` was correctly implemented but fed `none` for every codex review, so it could never see the true severity.
+- [INV-129](#inv-129-review_round-is-a-head-agnostic-series-of-consecutive-decided-failed-substantive-rounds--the-severity-ratchets-blocking-floor-loosens-across-an-active-devreview-loop-new-commit-every-round-not-only-against-a-frozen-head) — the ratchet this invariant's fix reactivates on the codex path; INV-129's own head-agnostic round counter was correct all along, but the ratchet it feeds never had a real severity to loosen against.
+- [INV-73](#inv-73-a-codex-review-prompt-echo--startup-trace-stdout-is-malformed-never-a-blocking-p1-fail--retry-or-drop-not-a-phantom-veto) — the finding-boundary/echo-region grammar `_codex_review_strip_prompt_echo` reuses verbatim from `_codex_review_stdout_is_malformed`'s own established boundary logic.
+- [INV-78](#inv-78-review-verdicts-resolve-from-a-typed-artifact-file-first-comment-scraping-is-an-explicitly-logged-fallback-a-malformed-artifact-is-loud-never-a-silent-absent) — the verdict-artifact channel whose rendered body (`AGENT_VERDICT_BODIES[i]`, populated from `_verdict_body_from_artifact_json`) this invariant's call site now prefers unconditionally.
 
 ---

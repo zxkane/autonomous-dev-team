@@ -428,6 +428,70 @@ _codex_review_classify_stdout() {
   return 0
 }
 
+# ===========================================================================
+# Issue #481 (R2): strip the echoed prompt from a codex review stdout capture
+# before scoring it for severity.
+# ===========================================================================
+# `_review_extract_highest_severity` (lib-review-severity.sh) is a per-finding
+# fail-safe scan: ANY numbered line with no `[P0]`-`[P3]` tag collapses the
+# WHOLE scan to `none` (deliberately — issue #449's own fix for a tagged
+# low-severity finding masking a genuine untagged one). `build_review_prompt`
+# always echoes a large NUMBERED checklist/instructions block ahead of a
+# codex agent's own output (`1. [ ] Design canvas created...`, `## Review
+# Checklist`, etc.), so scoring the RAW capture always hits that fail-safe
+# and reports `none` regardless of what the agent actually tagged. This
+# helper strips the echo so only the agent's own authored text is scored —
+# used ONLY on the legacy fallback path (autonomous-review.sh prefers the
+# already-rendered `AGENT_VERDICT_BODIES[i]` when one exists; see the R1 call
+# site there).
+
+# _codex_review_strip_prompt_echo <stdout-file>
+#
+# Echoes <stdout-file>'s content with the echoed-prompt LEADING region
+# removed, so only codex's own authored output remains. Reuses the SAME
+# FINDING-BOUNDARY grammar `_codex_review_stdout_is_malformed`'s `_echo_region`
+# (INV-73) already established, but INVERTED: instead of keeping the prefix
+# BEFORE the first finding, this keeps everything FROM the first finding
+# onward. A finding line is direct/numbered/bulleted/bold `[P0]`-`[P3]`, or a
+# JSON severity/priority key or value, matched outside any fenced code block —
+# the boundary between the echoed prompt and the agent's real output.
+#
+# When the capture has NO recognizable boundary at all (a short, well-formed
+# review with no prompt scaffolding echoed; the WHOLE file is the echo region)
+# OR is missing/empty/unreadable, this echoes the ORIGINAL content UNCHANGED —
+# fail-safe: never silently drop real output because no boundary was found. A
+# no-boundary capture is exactly the case where the strip awk prints nothing,
+# so the empty-result fallback below covers it. rc 0 ALWAYS (fail-safe under
+# `set -euo pipefail`).
+_codex_review_strip_prompt_echo() {
+  local f="${1:-}"
+  local original=""
+  if [[ -n "$f" && -f "$f" && -r "$f" ]]; then
+    original=$(cat -- "$f" 2>/dev/null || true)  # fail-safe: a read error yields empty, never a crash
+  fi
+  [[ -n "$original" ]] || { printf '%s' "$original"; return 0; }
+
+  # Keep only the lines FROM the first finding-boundary line onward (the
+  # agent's own authored output) — everything before it is the echoed prompt.
+  # `body` never turns on when the capture has no boundary, so `_stripped` is
+  # then empty and the fallback returns `original` unchanged.
+  local _stripped
+  _stripped=$(awk '
+    !infence && /^[[:space:]]*([0-9]+[.)][[:space:]]*)?([-*>][[:space:]]*)*(\*\*[[:space:]]*)?\[P[0123]\]/ { body=1 }
+    !infence && /"(severity|priority)"[[:space:]]*:/ { body=1 }
+    !infence && /["'"'"'[:space:]]P[0123]["'"'"']/ { body=1 }
+    /^[[:space:]]*```/ { infence = !infence }
+    body { print }
+  ' "$f" 2>/dev/null) || _stripped=""
+
+  if [[ -z "$_stripped" ]]; then
+    printf '%s' "$original"
+  else
+    printf '%s' "$_stripped"
+  fi
+  return 0
+}
+
 # _codex_review_compose_body <verdict> <stdout-file>
 #
 # Composes the human body the wrapper hands to post-verdict.sh when codex did NOT

@@ -1318,6 +1318,152 @@ for _sev in "${_i129_mixed_severities[@]}"; do
 done
 assert_eq "TC-INV129-036f R1's ratchet round reaches 6 across the mixed P1/P2 series" "6" "$_i129_mixed_round"
 
+# ===========================================================================
+echo
+echo "=== TC-SEVEXT-001..007: codex severity call-site input selection (issue #481, INV-132) ==="
+# ===========================================================================
+# The severity filter's per-agent text selection (autonomous-review.sh, right
+# before _review_extract_highest_severity) is call-site logic, not a pure
+# lib function — these tests exercise the SAME building blocks
+# (_codex_review_strip_prompt_echo + _review_extract_highest_severity)
+# directly, plus a wiring pin confirming the wrapper's own selection order.
+
+CX_ECHO_P2_FIXTURE="$FIXTURES/codex-review-stdout-echo-p2-only.txt"
+assert_file_exists "TC-SEVEXT setup: codex echo+P2-only fixture exists" "$CX_ECHO_P2_FIXTURE"
+
+# TC-SEVEXT-001/002: the reproduction scenario. Scoring the artifact-rendered
+# body (what R1's fix now selects when AGENT_VERDICT_BODIES[i] is non-empty)
+# yields P2; scoring the RAW stdout capture (the pre-fix behavior) yields
+# `none` — pinning that the OLD behavior is a real, reproducible failure mode
+# this fixture triggers, not a hypothetical.
+_sevext_art_json='{"schema_version":1,"verdict":"FAIL","blockingFindings":[{"title":"minor nit","severity":"P2"},{"title":"another nit","severity":"P2"}],"runId":"abc","agent":"codex"}'
+_sevext_art_body=$(_verdict_body_from_artifact_json "$_sevext_art_json")
+assert_eq "TC-SEVEXT-001 artifact-rendered body (R1's preferred source) scores P2" "P2" \
+  "$(_review_extract_highest_severity "$_sevext_art_body")"
+assert_eq "TC-SEVEXT-002 regression pin: the OLD whole-raw-stdout scan of the SAME scenario's capture still collapses to none (proves the bug is real, not hypothetical)" "none" \
+  "$(_review_extract_highest_severity "$(cat "$CX_ECHO_P2_FIXTURE")")"
+
+# TC-SEVEXT-003: the legacy fallback path (no rendered body at all) strips
+# the echo first, then scores — recovering P2 instead of none.
+assert_eq "TC-SEVEXT-003 fallback path (no verdict body): stripped stdout scores P2" "P2" \
+  "$(_review_extract_highest_severity "$(_codex_review_strip_prompt_echo "$CX_ECHO_P2_FIXTURE")")"
+
+# TC-SEVEXT-004: a capture with no recognizable echo boundary at all is
+# scored as-is (fail-safe passthrough) — pinned via the strip helper's own
+# no-boundary contract (already covered by TC-CXSTRIP-002 below); here we
+# confirm the DOWNSTREAM severity result is unaffected for a short clean
+# review with a real embedded tag.
+TMP_SEVEXT004=$(mktemp)
+printf '%s\n' 'A short clean review of the diff.' '' '[P3] tests/x.test.ts:1 — consider an edge case.' '' 'Summary: 1 non-blocking finding.' > "$TMP_SEVEXT004"
+assert_eq "TC-SEVEXT-004 no-echo-boundary capture: stripped == original, still scores P3" "P3" \
+  "$(_review_extract_highest_severity "$(_codex_review_strip_prompt_echo "$TMP_SEVEXT004")")"
+rm -f "$TMP_SEVEXT004"
+
+# TC-SEVEXT-005 (R3 pin): a genuinely untagged finding in the (already
+# echo-free) verdict body still extracts as `none` — the scanner itself is
+# unmodified by this fix.
+_sevext_untagged_body=$'1. missing null check\n2. off-by-one error'
+assert_eq "TC-SEVEXT-005 [R3] untagged numbered body still extracts none (scanner unmodified)" "none" \
+  "$(_review_extract_highest_severity "$_sevext_untagged_body")"
+
+# TC-SEVEXT-006: with extraction fixed, a P2-only round's (fail, severity)
+# pair never counts as INV-127 terminal-floor evidence — the same
+# `_aggregate_has_p0p1_fail` gate TC-036b already pins, restated here as the
+# direct consequence of the extraction fix for a codex-sourced P2.
+assert_eq "TC-SEVEXT-006 codex P2-only round: _aggregate_has_p0p1_fail is false (INV-127 does not advance)" "false" \
+  "$(_aggregate_has_p0p1_fail fail P2)"
+
+# TC-SEVEXT-007: regression pin — a non-codex agent's selection is untouched
+# (it already scored AGENT_VERDICT_BODIES[i]; the fix's new first branch is a
+# no-op for it, same outcome as before).
+assert_eq "TC-SEVEXT-007 non-codex agent: verdict-body scoring unchanged" "P1" \
+  "$(_review_extract_highest_severity '[P1] a real blocking finding')"
+
+# TC-SEVEXT-008: wiring pin — the wrapper's call site checks
+# AGENT_VERDICT_BODIES[i] non-empty BEFORE the codex-stdout branch (source
+# order, not merely presence of both branches).
+sevext_wire_region=$(awk '/^_any_severity_demotion=false$/{f=1} f{print} f && /^  AGENT_HIGHEST_SEVERITY\[\$_i\]=/{exit}' "$WRAPPER")
+assert_contains "TC-SEVEXT-008a wrapper's severity-source selection checks AGENT_VERDICT_BODIES[_i] first" \
+  "$sevext_wire_region" 'if [[ -n "${AGENT_VERDICT_BODIES[$_i]:-}" ]]; then'
+assert_contains "TC-SEVEXT-008b codex-stdout branch calls the echo-stripping helper (not a bare cat)" \
+  "$sevext_wire_region" '_codex_review_strip_prompt_echo "${AGENT_CODEX_LOGS[$_i]}"'
+
+# ===========================================================================
+echo
+echo "=== TC-CXSTRIP-001..004: _codex_review_strip_prompt_echo (adapters/codex.sh, issue #481) ==="
+# ===========================================================================
+
+# TC-CXSTRIP-001: real-shaped echo capture — assert the load-bearing
+# PROPERTIES (an exact multi-line comparison is fragile to compose inline):
+# no checklist lines survive, and the real findings do.
+_cxstrip_result=$(_codex_review_strip_prompt_echo "$CX_ECHO_P2_FIXTURE")
+assert_eq "TC-CXSTRIP-001a stripped result contains no numbered checklist line" "" \
+  "$(grep -o '1\. \[ \] Design canvas created' <<<"$_cxstrip_result")"
+assert_contains "TC-CXSTRIP-001b stripped result still contains the real [P2] finding" \
+  "$_cxstrip_result" '[P2] src/handler.ts:88'
+assert_contains "TC-CXSTRIP-001c stripped result still contains the second [P2] finding" \
+  "$_cxstrip_result" '[P2] src/other.ts:42'
+
+TMP_CXSTRIP002=$(mktemp)
+printf '%s\n' 'A short clean review with no blocking findings.' '' 'Summary: looks good to merge.' > "$TMP_CXSTRIP002"
+assert_eq "TC-CXSTRIP-002 capture with no recognizable boundary is returned UNCHANGED" \
+  "$(cat "$TMP_CXSTRIP002")" "$(_codex_review_strip_prompt_echo "$TMP_CXSTRIP002")"
+rm -f "$TMP_CXSTRIP002"
+
+TMP_CXSTRIP003=$(mktemp)
+assert_eq "TC-CXSTRIP-003a empty file → empty, rc 0 (fail-safe)" "" \
+  "$(_codex_review_strip_prompt_echo "$TMP_CXSTRIP003")"
+rm -f "$TMP_CXSTRIP003"
+assert_eq "TC-CXSTRIP-003b missing file → empty, rc 0 (fail-safe)" "" \
+  "$(_codex_review_strip_prompt_echo /nonexistent/path/$$)"
+assert_eq "TC-CXSTRIP-003c empty arg → empty, rc 0 (fail-safe)" "" \
+  "$(_codex_review_strip_prompt_echo "")"
+
+# TC-CXSTRIP-004: a genuine review with leading prose (no prompt scaffolding,
+# just the agent's own preamble) before its first tagged finding. The
+# boundary is the finding line itself (by design — the helper's contract is
+# "keep from the first genuine finding line onward", not "detect an echo
+# specifically"); stripping harmless leading prose before a real finding
+# never affects severity scoring, since only TAGGED findings are scored. The
+# load-bearing property is that the finding survives with its tag intact.
+TMP_CXSTRIP004=$(mktemp)
+printf '%s\n' \
+  'I reviewed the scoped diff for PR #253 (the INV-73 codex prompt-echo guard).' \
+  '' \
+  'Findings:' \
+  '' \
+  '[P1] lib-review-codex.sh:162 — quotes the `Prefix EACH blocking finding` marker' \
+  'text in this finding description, but this is a real review, not an echo.' \
+  '' \
+  'Summary: 1 blocking finding (P1).' > "$TMP_CXSTRIP004"
+assert_eq "TC-CXSTRIP-004 real finding + tag survive stripping (severity result unaffected)" "P1" \
+  "$(_review_extract_highest_severity "$(_codex_review_strip_prompt_echo "$TMP_CXSTRIP004")")"
+rm -f "$TMP_CXSTRIP004"
+
+# ===========================================================================
+echo
+echo "=== TC-SEVEXT-009..010: simulated 5-round P2-only codex loop demotes at round 5 ==="
+# ===========================================================================
+# The acceptance-criteria scenario: a codex-sourced P2-only finding, scored
+# via the FIXED extraction path, across a 5-round new-head progression.
+# Mirrors TC-INV129-032/033's round-progression shape but scores the
+# reproduction fixture's actual text at each step instead of a bare literal.
+
+_sevext5_marker=""
+_sevext5_round=0
+for _h in cxhead1 cxhead2 cxhead3 cxhead4 cxhead5; do
+  _sevext5_round=$(_review_round_next_count "$_sevext5_marker")
+  _sevext5_marker=$(_review_round_marker 481 "$_h" "$_sevext5_round")
+done
+assert_eq "TC-SEVEXT-009 5-round new-head-every-round progression reaches round 5" "5" "$_sevext5_round"
+
+_sevext5_sev=$(_review_extract_highest_severity "$_sevext_art_body")
+assert_eq "TC-SEVEXT-010a extraction from the artifact-rendered codex body is P2" "P2" "$_sevext5_sev"
+assert_eq "TC-SEVEXT-010b at round 5, that P2 demotes fail→pass (INV-129 loop convergence, extraction now correctly fed)" "pass" \
+  "$(_review_apply_severity_filter fail "$_sevext_art_body" "$_sevext5_round")"
+assert_eq "TC-SEVEXT-010c INV-127's counter never advanced across the 5-round P2-only series (per-round pair check)" "false" \
+  "$(_aggregate_has_p0p1_fail fail "$_sevext5_sev")"
+
 echo
 echo "=== Summary ==="
 echo "Passed: $PASS"
