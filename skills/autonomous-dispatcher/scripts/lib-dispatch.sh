@@ -899,8 +899,10 @@ mark_stalled() {
   # dispatcher-side false positives and do NOT consume MAX_RETRIES.
   local counted_dispatcher_crashes=$(( dispatcher_crashes - false_positives ))
   # [INV-123]: no_pr_attempts is an additional named term below.
+  # [INV-134] @-mention the issue AUTHOR (github: falls back to REPO_OWNER).
+  local _mention; _mention="$(issue_mention_login "$issue_num")"
   itp_post_comment "$issue_num" \
-    "Issue has exceeded the maximum retry limit (${MAX_RETRIES} failed attempts: ${agent_failures} agent failures + ${no_pr_attempts} no-PR retry attempts + ${counted_dispatcher_crashes} dispatcher-detected crashes; ${false_positives} dispatcher false positives suppressed per #99). Marking as stalled. @${REPO_OWNER} please investigate manually."
+    "Issue has exceeded the maximum retry limit (${MAX_RETRIES} failed attempts: ${agent_failures} agent failures + ${no_pr_attempts} no-PR retry attempts + ${counted_dispatcher_crashes} dispatcher-detected crashes; ${false_positives} dispatcher false positives suppressed per #99). Marking as stalled. ${_mention:+@}${_mention} please investigate manually."
 }
 
 # ---------------------------------------------------------------------------
@@ -1770,8 +1772,9 @@ handle_completed_session_routing() {
       # cap=0 → unbounded (operator opt-in to bounce-forever).
       if [ "$_limit" -gt 0 ] && [ "$_flip_count" -ge "$_limit" ]; then
         log "  issue #${issue_num} non-substantive review failure (cause=${_cause}) reached REVIEW_RETRY_LIMIT=${_limit} — stalling"
+        local _mention; _mention="$(issue_mention_login "$issue_num")"  # [INV-134]
         itp_post_comment "$issue_num" \
-          "Persistent review-failure-non-substantive on session \`${session_id}\` (cause=\`${_cause}\`, flips=${_flip_count}/${_limit}). Marking stalled. @${REPO_OWNER} please investigate the upstream review dependency (bot/CI/transport)."
+          "Persistent review-failure-non-substantive on session \`${session_id}\` (cause=\`${_cause}\`, flips=${_flip_count}/${_limit}). Marking stalled. ${_mention:+@}${_mention} please investigate the upstream review dependency (bot/CI/transport)."
         mark_stalled "$issue_num"
         return 0
       fi
@@ -1832,8 +1835,9 @@ handle_completed_session_routing() {
         if itp_list_comments "$issue_num" 2>/dev/null \
             | jq -r "[.[].body | select(contains(\"${_np_notice_marker}\"))] | length" \
             2>/dev/null | grep -q '^0$'; then
+          local _mention; _mention="$(issue_mention_login "$issue_num")"  # [INV-134]
           itp_post_comment "$issue_num" \
-            "Substantive review failure on completed session \`${session_id}\` is **not resolvable by the autonomous dev agent**: its scoped token hit \`Resource not accessible by integration\` on a PR-metadata edit, or the finding requires a maintainer / post-merge action. Marking stalled — no further \`dev-new\` will be dispatched. @${REPO_OWNER} please apply the PR-body / metadata change manually, or split the post-merge criterion into a follow-up. (\`${_np_notice_marker}\`)"
+            "Substantive review failure on completed session \`${session_id}\` is **not resolvable by the autonomous dev agent**: its scoped token hit \`Resource not accessible by integration\` on a PR-metadata edit, or the finding requires a maintainer / post-merge action. Marking stalled — no further \`dev-new\` will be dispatched. ${_mention:+@}${_mention} please apply the PR-body / metadata change manually, or split the post-merge criterion into a follow-up. (\`${_np_notice_marker}\`)"
         fi
         mark_stalled "$issue_num"
         return 0
@@ -1852,8 +1856,9 @@ handle_completed_session_routing() {
         if itp_list_comments "$issue_num" 2>/dev/null \
             | jq -r "[.[].body | select(contains(\"${_np_notice_marker}\"))] | length" \
             2>/dev/null | grep -q '^0$'; then
+          local _mention; _mention="$(issue_mention_login "$issue_num")"  # [INV-134]
           itp_post_comment "$issue_num" \
-            "Substantive review failure on completed session \`${session_id}\`, but PR HEAD \`${_np_current_head}\` is unchanged since the last review and a prior fresh dev session already ran against it without producing a new commit. The finding appears un-actionable by the dev agent. Marking stalled — no further \`dev-new\` will be dispatched. @${REPO_OWNER} please investigate. (\`${_np_notice_marker}\`)"
+            "Substantive review failure on completed session \`${session_id}\`, but PR HEAD \`${_np_current_head}\` is unchanged since the last review and a prior fresh dev session already ran against it without producing a new commit. The finding appears un-actionable by the dev agent. Marking stalled — no further \`dev-new\` will be dispatched. ${_mention:+@}${_mention} please investigate. (\`${_np_notice_marker}\`)"
         fi
         mark_stalled "$issue_num"
         return 0
@@ -1885,8 +1890,9 @@ handle_completed_session_routing() {
         if itp_list_comments "$issue_num" 2>/dev/null \
             | jq -r "[.[].body | select(contains(\"${_na_marker}\"))] | length" \
             2>/dev/null | grep -q '^0$'; then
+          local _mention; _mention="$(issue_mention_login "$issue_num")"  # [INV-134]
           itp_post_comment "$issue_num" \
-            "Substantive review failure on completed session \`${session_id}\` is **not resolvable by the autonomous dev agent**: the review classified every blocking finding as requiring a human or a privileged token the agent's scoped token lacks (e.g. a \`.github/workflows\` edit needs the \`workflows\` scope, or a CODEOWNERS / maintainer-owned change — [INV-92]). Marking stalled — no \`dev-new\` will be dispatched (\`reason=non_actionable_finding\`). @${REPO_OWNER} please apply the change manually, grant the required scope, or split the criterion into a maintainer follow-up. (\`${_na_marker}\`)"
+            "Substantive review failure on completed session \`${session_id}\` is **not resolvable by the autonomous dev agent**: the review classified every blocking finding as requiring a human or a privileged token the agent's scoped token lacks (e.g. a \`.github/workflows\` edit needs the \`workflows\` scope, or a CODEOWNERS / maintainer-owned change — [INV-92]). Marking stalled — no \`dev-new\` will be dispatched (\`reason=non_actionable_finding\`). ${_mention:+@}${_mention} please apply the change manually, grant the required scope, or split the criterion into a maintainer follow-up. (\`${_na_marker}\`)"
         fi
         mark_stalled "$issue_num"
         return 0
@@ -2050,6 +2056,7 @@ handle_completed_session_routing() {
         # the transition has landed (C4′/C5/C7 eligibility-gated unit). Exactly ONE
         # terminal comment (NOT mark_stalled's "@owner retry exhausted" — C4).
         # Reuse `stalled`; no new label (R5).
+        local _mention; _mention="$(issue_mention_login "$issue_num")"  # [INV-134]
         itp_post_comment "$issue_num" "$(cat <<CBREPORT
 ${_cb_marker}
 ## ⛔ Convergence circuit-breaker tripped — halting a non-converging dev↔review loop (\`reason=non-convergence\`, [INV-105])
@@ -2080,7 +2087,7 @@ $(if [ -n "$_cb_verdict_body" ]; then printf '  > %s\n' "${_cb_verdict_body:0:60
 - [ ] Close the issue, or split the un-satisfiable part into a maintainer follow-up.
 
 **To resume: fix per the checklist above, then REMOVE the \`stalled\` label (the \`autonomous\` label is retained; removal re-arms the pipeline and resets the retry counter, INV-05).**
-@${REPO_OWNER}
+${_mention:+@}${_mention}
 CBREPORT
 )"
         return 0
@@ -2209,8 +2216,9 @@ CBREPORT
         if ! itp_post_comment "$issue_num" "$_attempt_marker" 2>/dev/null \
            && ! itp_post_comment "$issue_num" "$_attempt_marker" 2>/dev/null; then
           log "  WARNING: failed to post the no-progress attempt marker for issue #${issue_num} HEAD ${_np_current_head} after retry — N=1 no-progress bound degraded for this HEAD (MAX_RETRIES remains the backstop)."
+          local _mention; _mention="$(issue_mention_login "$issue_num")"  # [INV-134]
           itp_post_comment "$issue_num" \
-            "⚠️ Dispatched a fresh dev session for the substantive review failure, but could not record the per-HEAD no-progress attempt tracker for \`${_np_current_head}\` (GitHub API rejected the hidden marker comment twice). The per-HEAD one-retry bound ([INV-85]) is degraded for this HEAD; the issue is still bounded by \`MAX_RETRIES\`. @${REPO_OWNER} no action needed unless the issue churns dev retries against an unchanged HEAD." 2>/dev/null \
+            "⚠️ Dispatched a fresh dev session for the substantive review failure, but could not record the per-HEAD no-progress attempt tracker for \`${_np_current_head}\` (GitHub API rejected the hidden marker comment twice). The per-HEAD one-retry bound ([INV-85]) is degraded for this HEAD; the issue is still bounded by \`MAX_RETRIES\`. ${_mention:+@}${_mention} no action needed unless the issue churns dev retries against an unchanged HEAD." 2>/dev/null \
             || log "  WARNING: operator notice for the degraded no-progress tracker also failed to post for issue #${issue_num}."
         fi
       fi
@@ -3592,8 +3600,9 @@ _same_head_verdict_aware_recovery() {
     if itp_list_comments "$issue_num" 2>/dev/null \
         | jq -r "[.[].body | select(contains(\"${_na_marker}\"))] | length" \
         2>/dev/null | grep -q '^0$'; then
+      local _mention; _mention="$(issue_mention_login "$issue_num")"  # [INV-134]
       itp_post_comment "$issue_num" \
-        "PR ${pr_ref} HEAD \`${current_head}\` was reviewed with a FAILED verdict that classified every blocking finding as **not resolvable by the autonomous dev agent** (requires a human or a privileged token the agent's scoped token lacks, [INV-92]), and ${_cause_desc}. Marking stalled — no \`dev-new\` will be dispatched. @${REPO_OWNER} please apply the change manually. (\`${_na_marker}\`)"
+        "PR ${pr_ref} HEAD \`${current_head}\` was reviewed with a FAILED verdict that classified every blocking finding as **not resolvable by the autonomous dev agent** (requires a human or a privileged token the agent's scoped token lacks, [INV-92]), and ${_cause_desc}. Marking stalled — no \`dev-new\` will be dispatched. ${_mention:+@}${_mention} please apply the change manually. (\`${_na_marker}\`)"
     fi
     mark_stalled "$issue_num"
     return 0
@@ -3625,8 +3634,9 @@ _same_head_verdict_aware_recovery() {
     # progress — mark_stalled, never the residual park (a park here would
     # freeze count_retries forever with no way for MAX_RETRIES to trip).
     log "  issue #${issue_num} ${cause} same-HEAD branch: non-substantive re-review budget already spent for HEAD ${current_head} — marking stalled ([INV-125])"
+    local _mention; _mention="$(issue_mention_login "$issue_num")"  # [INV-134]
     itp_post_comment "$issue_num" \
-      "PR ${pr_ref} HEAD \`${current_head}\` already consumed its one bounded non-substantive re-review for this HEAD (\`${_ns_marker}\`) with no progress. Marking stalled rather than parking indefinitely. @${REPO_OWNER} please investigate."
+      "PR ${pr_ref} HEAD \`${current_head}\` already consumed its one bounded non-substantive re-review for this HEAD (\`${_ns_marker}\`) with no progress. Marking stalled rather than parking indefinitely. ${_mention:+@}${_mention} please investigate."
     mark_stalled "$issue_num"
     return 0
     ;;
@@ -3646,8 +3656,9 @@ _same_head_verdict_aware_recovery() {
     if [ "${_budget_spent:-1}" != "0" ]; then
       # [INV-125] Part 2: budget already spent — mark_stalled, never the park.
       log "  issue #${issue_num} ${cause} same-HEAD branch: dev-new recovery budget already spent for HEAD ${current_head} — marking stalled ([INV-125])"
+      local _mention; _mention="$(issue_mention_login "$issue_num")"  # [INV-134]
       itp_post_comment "$issue_num" \
-        "PR ${pr_ref} HEAD \`${current_head}\` already consumed its one bounded self-heal/crash-recovery \`dev-new\` for this HEAD with no progress. Marking stalled rather than parking indefinitely. @${REPO_OWNER} please investigate."
+        "PR ${pr_ref} HEAD \`${current_head}\` already consumed its one bounded self-heal/crash-recovery \`dev-new\` for this HEAD with no progress. Marking stalled rather than parking indefinitely. ${_mention:+@}${_mention} please investigate."
       mark_stalled "$issue_num"
       return 0
     fi
@@ -4133,8 +4144,9 @@ _liveness_post_marker() {
   itp_post_comment "$issue_num" "$marker_text" 2>/dev/null && return 0
   itp_post_comment "$issue_num" "$marker_text" 2>/dev/null && return 0
   log "  WARNING: issue #${issue_num} liveness watchdog: failed to post the bookkeeping marker after retry — the no-op counter may reset to count=1 next tick (degraded, not a crash; [INV-128])."
+  local _mention; _mention="$(issue_mention_login "$issue_num")"  # [INV-134]
   itp_post_comment "$issue_num" \
-    "⚠️ The liveness watchdog could not record its bookkeeping marker for issue #${issue_num} this tick (GitHub API rejected the comment twice). The no-op counter may reset next tick — a transient degradation, not a stall. If this issue was JUST transitioned to \`stalled\`, the resume-cutoff marker may be missing; please verify before removing the label. @${REPO_OWNER}" \
+    "⚠️ The liveness watchdog could not record its bookkeeping marker for issue #${issue_num} this tick (GitHub API rejected the comment twice). The no-op counter may reset next tick — a transient degradation, not a stall. If this issue was JUST transitioned to \`stalled\`, the resume-cutoff marker may be missing; please verify before removing the label. ${_mention:+@}${_mention}" \
     2>/dev/null \
     || log "  WARNING: issue #${issue_num} liveness watchdog: operator notice for the degraded marker write also failed to post."
   return 1
@@ -4319,6 +4331,7 @@ _liveness_evaluate_issue() {
       # `_liveness_post_report` can return 1 on persistent failure, and a
       # bare call would abort this function (and the whole tick) rather
       # than degrade gracefully to "the report is missing this tick."
+      local _mention; _mention="$(issue_mention_login "$issue_num")"  # [INV-134]
       _liveness_post_report "$issue_num" "$(cat <<TIER1REPORT
 No observable progress for **${count}** ticks on issue #${issue_num} (\`reason=liveness-no-progress\`, [INV-128]):
 - Label: \`${active_label}\`
@@ -4326,7 +4339,7 @@ No observable progress for **${count}** ticks on issue #${issue_num} (\`reason=l
 - Non-idempotent comment count: ${non_idem_count}
 - Marker digest: \`${marker_digest:-<none>}\`
 
-@${REPO_OWNER} this issue may need attention. If this is a legitimate slow wait, any observable change (a comment, a label edit, or a push) resets the clock. Without one, this issue transitions to \`stalled\` after **${stall}** total unchanged ticks.
+${_mention:+@}${_mention} this issue may need attention. If this is a legitimate slow wait, any observable change (a comment, a label edit, or a push) resets the clock. Without one, this issue transitions to \`stalled\` after **${stall}** total unchanged ticks.
 TIER1REPORT
 )" || true
       ;;
@@ -4404,6 +4417,7 @@ TIER1REPORT
       # docstring). Kept as a single-sourced constant purely so the report's
       # heading text has one place to edit, not because a mismatch here
       # could reopen a cutoff bug the way it could pre-round-8.
+      local _mention; _mention="$(issue_mention_login "$issue_num")"  # [INV-134]
       _liveness_post_report "$issue_num" "$(cat <<TIER2REPORT
 ${_LIVENESS_TIER2_HEADING} (\`reason=liveness-timeout\`, [INV-128])
 
@@ -4422,7 +4436,7 @@ This issue's observable state (label + PR head + non-idempotent comments + marke
 - Transitioned to \`stalled\` (\`autonomous\` is retained — removing \`stalled\` re-arms via Step 2 and resets the retry counter, [INV-05]).
 - Posted this one-time report.
 
-@${REPO_OWNER} please investigate — this is the class-level backstop (a specific breaker for this park shape may not exist yet). To resume: fix per the evidence above, then remove the \`stalled\` label.
+${_mention:+@}${_mention} please investigate — this is the class-level backstop (a specific breaker for this park shape may not exist yet). To resume: fix per the evidence above, then remove the \`stalled\` label.
 TIER2REPORT
 )" || true
       ;;

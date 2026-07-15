@@ -245,6 +245,14 @@ _GH_VIEW_PAYLOAD='{"title":"T","state":"CLOSED","labels":[]}'
 out="$(itp_github_read_task 42 body)"
 assert_eq "absent body -> empty string (never null)" '{"body":""}' "$(jq -c . <<<"$out")"
 
+# [INV-134] author field — normalized from .author.login, absent → "".
+_GH_VIEW_PAYLOAD='{"title":"T","state":"OPEN","labels":[],"author":{"login":"issue-filer"}}'
+out="$(itp_github_read_task 42 author)"
+assert_eq "author -> .author.login as a plain string" '{"author":"issue-filer"}' "$(jq -c . <<<"$out")"
+_GH_VIEW_PAYLOAD='{"title":"T","state":"OPEN","labels":[]}'
+out="$(itp_github_read_task 42 author)"
+assert_eq "absent author -> empty string (never null)" '{"author":""}' "$(jq -c . <<<"$out")"
+
 echo ""
 echo "=== LEAF FIELD PROJECTION: FIELDS_CSV controls exactly the returned keys ==="
 _GH_VIEW_PAYLOAD='{"title":"t","body":"b","state":"OPEN","labels":[{"name":"autonomous"}]}'

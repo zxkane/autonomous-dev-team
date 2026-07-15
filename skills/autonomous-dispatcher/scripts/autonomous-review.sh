@@ -1934,6 +1934,7 @@ if [[ "${E2E_ACTIVE:-false}" == "true" ]]; then
         "An operator must fix the external prerequisite (e.g. grant a missing deploy-role permission), then push a new commit to re-arm review" \
         "docs/pipeline/errors.md#transient-class-class-transient-best-effort-not-operator-actionable" \
         transient 2>/dev/null || true)
+      _mention="$(issue_mention_login "$ISSUE_NUMBER")"  # [INV-134]
       itp_post_comment "$ISSUE_NUMBER" "$(cat <<GATEBREAKREPORT
 ${_gf_marker}
 ## ⛔ Same-HEAD E2E-gate circuit-breaker tripped — halting repeated re-dispatch (\`reason=same-head-gate-failure\`, [#453])
@@ -1968,7 +1969,7 @@ ${_gf_envelope}
 **To resume: fix per the checklist above, then push a new commit and REMOVE
 the \`stalled\` label (the \`autonomous\` label is retained; removal re-arms
 the pipeline).**
-@${REPO_OWNER}
+${_mention:+@}${_mention}
 GATEBREAKREPORT
 )" 2>/dev/null || true
       exit 0
@@ -4293,8 +4294,9 @@ if [[ "$PASSED_VERDICT" == "true" ]]; then
   else
     log "ERROR: Failed to submit PR approval for PR #${PR_NUMBER}."
     log "Falling back to manual review notification."
+    _mention="$(issue_mention_login "$ISSUE_NUMBER")"  # [INV-134] @-mention the issue author
     itp_post_comment "$ISSUE_NUMBER" \
-      "Review PASSED but formal PR approval failed (permission issue?). @${REPO_OWNER} please approve and merge PR #${PR_NUMBER} manually.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
+      "Review PASSED but formal PR approval failed (permission issue?). ${_mention:+@}${_mention} please approve and merge PR #${PR_NUMBER} manually.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
     itp_transition_state "$ISSUE_NUMBER" "reviewing" "approved" 2>/dev/null || true
     log "Issue #${ISSUE_NUMBER} marked as approved. Manual merge required due to approval failure."
     exit 0
@@ -4311,9 +4313,10 @@ if [[ "$PASSED_VERDICT" == "true" ]]; then
   if [[ "$HAS_NO_AUTO_CLOSE" == "true" ]]; then
     log "Issue has 'no-auto-close' label — skipping auto-merge."
 
-    # Notify project owner to merge manually
+    # Notify the issue author to merge manually ([INV-134]).
+    _mention="$(issue_mention_login "$ISSUE_NUMBER")"
     itp_post_comment "$ISSUE_NUMBER" \
-      "Review PASSED — this issue has the 'no-auto-close' label. @${REPO_OWNER} please review and merge PR #${PR_NUMBER} when ready.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
+      "Review PASSED — this issue has the 'no-auto-close' label. ${_mention:+@}${_mention} please review and merge PR #${PR_NUMBER} when ready.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
 
     # Update labels: remove reviewing, add approved (keep no-auto-close and autonomous)
     itp_transition_state "$ISSUE_NUMBER" "reviewing" "approved" 2>/dev/null || true
@@ -4606,6 +4609,7 @@ else
         # make the crash-cleanup EXIT trap re-add pending-dev on top of an
         # already-landed stall.
         RESULT_PARSED=true
+        _mention="$(issue_mention_login "$ISSUE_NUMBER")"  # [INV-134]
         itp_post_comment "$ISSUE_NUMBER" "$(cat <<ROUNDCAPREPORT
 ${_rc_marker}
 ## ⛔ Review-round-cap circuit-breaker tripped — halting repeated re-dispatch (\`reason=review-round-cap\`, [#449])
@@ -4633,7 +4637,7 @@ for the next finding without the review converging.
 either fix the remaining P0/P1 issue(s) yourself or push a targeted commit,
 and REMOVE the \`stalled\` label (the \`autonomous\` label is retained;
 removal re-arms the pipeline).
-@${REPO_OWNER}
+${_mention:+@}${_mention}
 ROUNDCAPREPORT
 )" 2>/dev/null || true
         log "Issue #${ISSUE_NUMBER} moved to stalled (INV-127 review-round-cap breaker)."

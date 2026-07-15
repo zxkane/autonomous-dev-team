@@ -8261,3 +8261,32 @@ The same reasoning drove a second, independent bug in the FIRST drafted fix (rev
 - [INV-129](#inv-129-review_round-is-a-head-agnostic-series-of-consecutive-decided-failed-substantive-rounds--the-severity-ratchets-blocking-floor-loosens-across-an-active-devreview-loop-new-commit-every-round-not-only-against-a-frozen-head) — the ratchet whose demotion decision this invariant gates on the codex stdout-fallback lane specifically.
 
 ---
+
+## INV-134: human-notice comments @-mention the ISSUE AUTHOR (resolved through the provider seam), never a hardcoded `@${REPO_OWNER}` — with a github-only fallback to `REPO_OWNER` and NO mention at all on non-github providers
+
+_Triage (issue #236): [machine-checked: tests/unit/test-issue-mention-login.sh, tests/unit/test-w1b-read-task-contracts.sh, tests/unit/test-itp-gitlab.sh]_
+
+**Rule**: every dispatcher / review-wrapper comment that asks a **human to act** — the retry-exhaustion stall notice (`mark_stalled`), the persistent-non-substantive / bot-unfixable / no-progress / non-actionable-finding stall notices, the convergence and review-round-cap and same-HEAD-E2E-gate circuit-breaker reports, the liveness watchdog's tier-1/tier-2 escalations, and the review wrapper's "approval failed — merge manually" / "`no-auto-close` — merge manually" notifications — resolves its @-mention target through `issue_mention_login ISSUE` (`lib-issue-provider.sh`) and renders it as `${_mention:+@}${_mention}`. A literal `@${REPO_OWNER}` MUST NOT appear in any comment/report body.
+
+**`issue_mention_login ISSUE`** returns the login to @-mention:
+
+1. Read the issue AUTHOR via the abstract seam: `itp_read_task ISSUE author | jq -r '.author // empty'` (provider-portable — `author` is the issue-CREATOR login string, GitHub `.author.login` / GitLab `.author.username`, [W1b] contract §3.1).
+2. Author present → return it (the person who filed the issue actually cares about it — the correct single notify target on BOTH GitHub and GitLab).
+3. Author unresolved (empty field, or `read_task` failure) AND `ISSUE_PROVIDER=github` → fall back to `$REPO_OWNER`. On GitHub the repo owner IS a single canonical login, so this preserves the historical @-mention target byte-for-byte.
+4. Author unresolved AND `ISSUE_PROVIDER≠github` (gitlab, …) → return **EMPTY**. `REPO_OWNER` on GitLab is the **group/namespace** (often a TEAM, not a person); `@${REPO_OWNER}` there would ping a whole group or notify no one. An un-mentioned notice is strictly better, so callers render `${login:+@}${login}` and the mention drops cleanly (no dangling bare `@`).
+
+**Why**: the pipeline is deployed against BOTH GitHub and GitLab (provider abstraction, [INV-88]/[INV-89]). `REPO_OWNER` is the repo/project NAMESPACE, not a person — on GitLab it is routinely a group. Hardcoding `@${REPO_OWNER}` in a "please merge this manually" notice therefore mis-notifies (pings a group, or a login that does not exist) on exactly the deployments the provider layer exists to support. The issue author is the one human guaranteed to be a real individual account and to care about this specific issue, so it is the correct notify target — and it is already reachable through the same `itp_read_task` seam every other issue read uses, at zero extra API cost on the cold "a human must intervene" paths where these notices fire.
+
+**Never aborts**: `issue_mention_login` is a courtesy notify-target resolver, not a correctness gate — a `read_task` failure degrades to the same path as an absent author (github → `REPO_OWNER`, else empty) under the callers' `set -euo pipefail`, and never aborts the tick.
+
+**Producer**: `issue_mention_login` (`lib-issue-provider.sh`), consuming `itp_read_task`'s new `author` field (github leaf `itp_github_read_task`, gitlab leaf `itp_gitlab_read_task`). The github leaf appends `author` to its `gh issue view --json` field set **only when `author` is requested** (the same on-demand pattern `comments` already uses), so callers that request the pre-[INV-134] field sets emit byte-identical argv and every existing golden-trace / parity gh-stub ships unchanged — the `author` field adds NO test-surface churn to the read_task-argv-matching suites (enumerated in `docs/test-cases/issue-author-mention.md`).
+**Consumer**: the ~17 human-notice comment sites in `lib-dispatch.sh` (13) and `autonomous-review.sh` (4). `lib-issue-provider.sh` is the shared home because the review wrapper does NOT source `lib-dispatch.sh` but DOES source `lib-issue-provider.sh` — the only layer reachable from every mention site.
+**Scope**: only the @-mention text in POSTED human-notification comments changes. Two deliberate exclusions: (a) all auth/token-scoping uses of `REPO_OWNER` (`gh-app-token.sh`, `lib-auth.sh`, `dispatcher-tick.sh`, the `REPO_OWNER/REPO_NAME` splits) are UNCHANGED — those name the repo namespace for API calls and never carry a leading `@`; (b) the review-agent PROMPT prose bullet "Corrections or clarifications from the repo owner (`@${REPO_OWNER}`)" in `autonomous-review.sh`'s `build_review_prompt` is descriptive text fed to the review agent, NOT a posted comment — it never renders as an @-mention that pings anyone, so it is left byte-unchanged and the wiring-guard test explicitly excludes it.
+**Status**: **ENFORCED**.
+**Test**: `tests/unit/test-issue-mention-login.sh` (github/gitlab `author` leaf normalization incl. absent→`""`; helper resolution: author-present both providers, github-absent→`REPO_OWNER`, gitlab-absent→empty, read_task-failure degrades not aborts; wiring guard: no `@${REPO_OWNER}` literal survives in either wrapper). Author-field leaf coverage also in `tests/unit/test-w1b-read-task-contracts.sh` (github) and `tests/unit/test-itp-gitlab.sh` TC-WB-041b (gitlab).
+
+**Cross-references**:
+- [INV-88](#inv-88-the-issue-tracker-provider-seam-itp_-verbs-forward-to-itp_issue_provider_-leaves-selected-by-a-single-env-var-with-a-declarative-caps-manifest-read-not-sourced) / [INV-89] — the Issue-Tracker Provider seam this invariant reads the author through and branches its fallback on (`ISSUE_PROVIDER`).
+- [INV-90](#inv-90-itp_list_comments-returns-a-normalized-idauthorauthorkindbodycreatedat-array-rest-sourced-so-authorkind-is-authoritative) — the sibling normalized comment array; `author` here is the ISSUE-level creator login, distinct from a comment author.
+
+---
