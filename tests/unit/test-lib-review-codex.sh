@@ -214,6 +214,40 @@ cls13=$(
 )
 assert_eq "TC-CXRS-CLS-13 no abort under set -euo pipefail (turn-marker clean-response path)" "rc=0|pass" "$cls13"
 
+# TC-CXRS-CLS-14 [issue #490, review round 1]: the blankline-hijack-notag
+# fixture — a genuine [P1] finding, then a blank-line-preceded quoted `codex`
+# marker, then an entirely UNTAGGED trailing sentence (no [P2]/[P3] survives
+# in the tail either). Pre-round-1-fix, this function classified `pass`
+# directly from the tail-only scan — the corroborated severity filter
+# (lib-review-severity.sh) only ever demotes an EXISTING `fail`, so it never
+# even ran, producing the false PASS the issue describes. Post-fix, the
+# classifier itself corroborates against the wider region before settling on
+# `pass` and now returns `fail`.
+assert_eq "TC-CXRS-CLS-14 hijack fixture with an UNTAGGED tail → fail (region corroboration, #490 round-1 regression)" \
+  "fail" "$(_codex_review_classify_stdout "$FIXTURES/codex-review-stdout-turns-blankline-hijack-notag.txt")"
+
+# TC-CXRS-CLS-14b — the ORIGINAL hijack fixture (whose tail still carries a
+# masked [P2]) is unaffected — it already classified `fail` via the tail scan
+# alone before this amendment; the region corroboration path is a no-op here.
+assert_eq "TC-CXRS-CLS-14b original hijack fixture (tail retains a masked [P2]) → still fail" \
+  "fail" "$(_codex_review_classify_stdout "$FIXTURES/codex-review-stdout-turns-blankline-hijack.txt")"
+
+# TC-CXRS-CLS-14c — a genuinely clean turn-marker capture (no tag anywhere in
+# tail OR region) still classifies `pass` — the amendment does not
+# over-correct into a blanket `fail` for every turn-marker capture.
+assert_eq "TC-CXRS-CLS-14c clean turn-marker capture (no tag in tail or region) → still pass" \
+  "pass" "$(_codex_review_classify_stdout "$FIXTURES/codex-review-stdout-turns-clean-response.txt")"
+
+# TC-CXRS-CLS-14d — runs under set -euo pipefail without aborting on the new
+# notag-hijack code path.
+cls14d=$(
+  set -euo pipefail
+  source "$LIB"
+  out=$(_codex_review_classify_stdout "$FIXTURES/codex-review-stdout-turns-blankline-hijack-notag.txt")
+  echo "rc=$?|$out"
+)
+assert_eq "TC-CXRS-CLS-14d no abort under set -euo pipefail (region-corroboration path)" "rc=0|fail" "$cls14d"
+
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== TC-CXRS-BODY: _codex_review_compose_body ==="

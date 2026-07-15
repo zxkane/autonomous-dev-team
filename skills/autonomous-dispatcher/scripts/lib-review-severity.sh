@@ -148,6 +148,185 @@ _review_apply_severity_filter() {
   return 0
 }
 
+# _review_region_has_terminal_tag <region-text>
+#
+# rc-boolean (rc 0 = a `[P0]` or `[P1]` literal tag is present somewhere in
+# <region-text>; rc 1 = it is not). Pure substring scan — deliberately NOT
+# `_review_extract_highest_severity`'s per-finding extraction, which has its
+# OWN fail-safe: any numbered `N. ...` line with no `[P0]`-`[P3]` tag
+# anywhere collapses the WHOLE scan to `none` (correct for a FINDINGS list,
+# [issue #449]'s own fix for a masked untagged finding). `<region-text>`
+# (`_codex_review_full_response_region`) is NOT a findings list — it
+# includes reasoning/tool-call turns, which routinely contain ordinary
+# numbered prose with no severity concept at all (e.g. codex reciting the
+# review checklist: "1. Design canvas: found in docs/designs/"). Applying
+# the findings-list fail-safe to that prose would collapse the region's
+# extraction to `none` for a great many ORDINARY clean reviews — and `none`
+# is itself P0/P1-class per this file's own vocabulary — permanently
+# defeating corroboration (never demotes, even for a genuinely clean P2-only
+# review) far beyond the narrow, accepted residual this fix documents. A
+# bare tag-presence scan sidesteps that fail-safe entirely: it only answers
+# "is there textual evidence of a terminal-floor tag in the wider region",
+# which is exactly the corroboration question, without inheriting a
+# fail-safe designed for a different (findings-list) shape of text.
+#
+# Fail-closed on empty/unset input (rc 0 — treated as "cannot rule out a
+# terminal tag") rather than fail-open: this helper's ONLY consumer refuses
+# a demotion on rc 0, so an unreadable/empty region text must never silently
+# permit a demotion it could not actually verify. In practice this never
+# fires on the codex-stdout-fallback lane: `_codex_review_full_response_
+# region` shares its header/first-marker validation with the tail helper
+# and its own fail-safe returns the ORIGINAL (non-empty) capture whenever
+# structure is missing, so a call site that already extracted a real
+# severity from the tail always has non-empty region text too.
+_review_region_has_terminal_tag() {
+  local region_text="${1:-}"
+  [[ -n "$region_text" ]] || return 0
+  grep -qE '\[P[01]\]' <<<"$region_text" 2>/dev/null
+}
+
+# _review_region_terminal_severity <region-text>
+#
+# Echoes the highest-priority terminal-floor tag (`P0` > `P1`) literally
+# present in <region-text>, or `none` if neither appears. Companion to
+# `_review_region_has_terminal_tag` for callers that need the SPECIFIC tag
+# (e.g. for `AGENT_HIGHEST_SEVERITY` reporting) rather than a bare
+# yes/no — callers should gate on `_review_region_has_terminal_tag` first;
+# this function's `none` fall-through exists only so a direct call is still
+# well-defined, not as an invitation to skip the gate. Pure; rc 0 always.
+_review_region_terminal_severity() {
+  local region_text="${1:-}"
+  if grep -qF '[P0]' <<<"$region_text" 2>/dev/null; then
+    printf 'P0\n'
+  elif grep -qF '[P1]' <<<"$region_text" 2>/dev/null; then
+    printf 'P1\n'
+  else
+    printf 'none\n'
+  fi
+  return 0
+}
+
+# _review_apply_severity_filter_corroborated <verdict> <tail-text> <region-text> <round>
+#
+# Issue #490: the codex-stdout-fallback lane's ONLY input to
+# `_review_apply_severity_filter` is `<tail-text>` — the structurally
+# stripped text strictly after the LAST turn marker
+# (`_codex_review_strip_prompt_echo`, [INV-132]). Final-response content that
+# QUOTES tool/reviewed-file output can legitimately contain a line of the
+# exact turn-marker shape (column-0, exact word, unfenced,
+# blank-line-preceded); such a quoted line wins the LAST-marker search and
+# discards every finding before it, including a genuine `[P0]`/`[P1]`. Three
+# prior hardening rounds narrowed the marker heuristic itself and each
+# produced the same adjacent hole — an unstructured text interleave has no
+# textual marker discipline with a floor. The fix changes the demotion
+# SEMANTICS instead: require agreement between two independent scans before
+# ever trusting a demotion on this lane.
+#
+# `<tail-text>` is the same narrow, LAST-marker-bounded text
+# `_review_apply_severity_filter` already scores (`S_tail`).
+# `<region-text>` is the WIDER region from the FIRST codex-role turn marker
+# to EOF — every codex-role turn (reasoning, tool-call, AND final-response
+# turns), never just the final response
+# (`_codex_review_full_response_region`, `adapters/codex.sh`).
+#
+# Behavior: identical to `_review_apply_severity_filter` EXCEPT when it is
+# about to demote (S_tail does not block at <round>): in that case, ALSO
+# require `_review_region_has_terminal_tag` to be FALSE for `<region-text>`.
+# If a `[P0]`/`[P1]` tag IS present in the region, the demotion is refused —
+# the agent's verdict stays `fail` for this round — because a genuine
+# terminal-floor finding is structurally guaranteed to be somewhere in the
+# wider region (the region starts at the FIRST codex-role turn, immediately
+# after the echoed prompt — nothing on this lane can ever precede it, so a
+# quoted marker deeper in the transcript can only ever EXCLUDE a real
+# finding from the narrower tail, never from this region).
+#
+# Consequence — never a false PASS, sometimes an extra non-converging round:
+#   - the hijack shape: S_tail=P2 (the discarded [P1] sits before the quoted
+#     marker), region contains a literal `[P1]` → refused → stays `fail`
+#     (fail-closed; the scenario this fix exists for).
+#   - a clean P2-only capture: S_tail=P2, no `[P0]`/`[P1]` tag anywhere in
+#     the region (even if the region's reasoning turns contain untagged
+#     numbered prose — irrelevant to the bare tag scan) → corroborated →
+#     demotes normally (no over-correction).
+#   - documented residual: a reasoning/tool-trace turn that ITSELF quotes a
+#     P0/P1 tag (e.g. codex reading a PRIOR review comment via `gh`, which
+#     quoted a `[P1]`) also trips the region's tag scan even when the actual
+#     final response is only P2/P3 — demotion is suppressed for THAT round
+#     too. This is the safe direction (the loop continues / eventually stalls
+#     to an operator via INV-127), never a false PASS — accepted rather than
+#     chased with a fourth heuristic rung (out of scope per issue #490).
+_review_apply_severity_filter_corroborated() {
+  local verdict="${1:-}" tail_text="${2:-}" region_text="${3:-}" round="${4:-1}"
+  if [[ "$verdict" != "fail" ]]; then
+    printf '%s\n' "$verdict"
+    return 0
+  fi
+  local sev_tail
+  sev_tail=$(_review_extract_highest_severity "$tail_text")
+  if shouldBlockFinding "$round" "$sev_tail"; then
+    printf 'fail\n'
+    return 0
+  fi
+  # About to demote (sev_tail alone does not block at this round — in
+  # practice always P2/P3, since P0/P1/"none" always block via
+  # shouldBlockFinding's own case arms and would have returned above).
+  # Corroborate against the wider region before trusting it.
+  if _review_region_has_terminal_tag "$region_text"; then
+    printf 'fail\n'
+  else
+    printf 'pass\n'
+  fi
+  return 0
+}
+
+# _review_highest_severity_corroborated <tail-text> <region-text> <round>
+#
+# The severity counterpart to `_review_apply_severity_filter_corroborated`
+# — echoes the token `AGENT_HIGHEST_SEVERITY[i]` should record for a
+# codex-stdout-fallback agent, mirroring that function's own branch
+# structure (issue #490, pr-test-analyzer finding) so the two never
+# disagree about which text drove a decision:
+#
+#   - `<tail-text>`'s own severity already blocks at `<round>` (P0, P1,
+#     "none", or a P2/P3 within its blocking rounds) → echo THAT severity.
+#     No corroboration was consulted for this agent's verdict, so nothing
+#     from the region should be attributed to it.
+#   - Otherwise (a demotion was evaluated): if the region carries a literal
+#     `[P0]`/`[P1]` tag (the demotion was REFUSED), echo the region's own
+#     terminal tag (`_review_region_terminal_severity`) — this is the ONLY
+#     case where the region's severity, not the tail's, must be reported:
+#     `AGENT_HIGHEST_SEVERITY` feeds [INV-127]'s `_aggregate_has_p0p1_fail`
+#     gate, and that gate must see P0/P1-class evidence for a refused
+#     demotion or the round-cap breaker can never trip on this lane —
+#     silently turning the documented "eventually stalls to an operator"
+#     residual into an unbounded loop instead.
+#   - Otherwise (the demotion was corroborated, verdict → `pass`) → echo
+#     `<tail-text>`'s severity. The verdict pair `_aggregate_has_p0p1_fail`
+#     reads is `(pass, <this>)`, which its own case arms never treat as
+#     fail-relevant regardless of the value, so this choice is cosmetic
+#     (log-line/body-render text) — but the tail's own P2/P3 is still the
+#     ACCURATE description of what was found, whereas the region's severity
+#     could over-report (see `_review_region_has_terminal_tag`'s own
+#     documentation of why the region must never be scored with the full
+#     per-finding extractor).
+#
+# Pure; rc 0 always.
+_review_highest_severity_corroborated() {
+  local tail_text="${1:-}" region_text="${2:-}" round="${3:-1}"
+  local sev_tail
+  sev_tail=$(_review_extract_highest_severity "$tail_text")
+  if shouldBlockFinding "$round" "$sev_tail"; then
+    printf '%s\n' "$sev_tail"
+    return 0
+  fi
+  if _review_region_has_terminal_tag "$region_text"; then
+    _review_region_terminal_severity "$region_text"
+  else
+    printf '%s\n' "$sev_tail"
+  fi
+  return 0
+}
+
 # _review_severity_prompt_block <round>
 #
 # Renders the shared severity-tagging instruction text injected into BOTH the

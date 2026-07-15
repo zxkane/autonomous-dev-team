@@ -3340,6 +3340,8 @@ declare -a AGENT_HIGHEST_SEVERITY=()
 _any_severity_demotion=false
 for _i in "${!AGENT_NAMES[@]}"; do
   _sev_text=""
+  _sev_region_text=""
+  _is_codex_stdout_fallback=false
   if [[ "${AGENT_VERDICT_SOURCES[$_i]:-}" == "codex-stdout-fallback" && -n "${AGENT_CODEX_LOGS[$_i]:-}" && -f "${AGENT_CODEX_LOGS[$_i]}" ]]; then
     # [INV-132] (#481 R1): the ONLY branch that scores the raw capture — a
     # verdict resolved via the legacy stdout-classify route
@@ -3348,16 +3350,51 @@ for _i in "${!AGENT_NAMES[@]}"; do
     # or comment-poll channels do. Strip the echoed prompt before scoring —
     # the raw capture always leads with build_review_prompt's own echoed
     # checklist, which would otherwise fail-safe-collapse to `none`.
+    _is_codex_stdout_fallback=true
     _sev_text=$(_codex_review_strip_prompt_echo "${AGENT_CODEX_LOGS[$_i]}")
+    # [INV-133] (#490): the WIDER corroboration region (FIRST codex-role
+    # turn marker to EOF, adapters/codex.sh) a quoted-marker hijack of the
+    # LAST-marker tail above cannot exclude a genuine finding from — see
+    # `_review_apply_severity_filter_corroborated`'s call below.
+    _sev_region_text=$(_codex_review_full_response_region "${AGENT_CODEX_LOGS[$_i]}")
   else
     # Every other resolution channel — artifact, comment-fallback, or a
     # codex agent that self-posted via the ordinary poll loop — scores
     # AGENT_VERDICT_BODIES[i], identical to the non-codex path (R1).
     _sev_text="${AGENT_VERDICT_BODIES[$_i]:-}"
   fi
-  AGENT_HIGHEST_SEVERITY[$_i]=$(_review_extract_highest_severity "$_sev_text")
   _pre_filter_verdict="${AGENT_VERDICTS[$_i]}"
-  AGENT_VERDICTS[$_i]=$(_review_apply_severity_filter "${AGENT_VERDICTS[$_i]}" "$_sev_text" "$REVIEW_ROUND")
+  if [[ "$_is_codex_stdout_fallback" == true ]]; then
+    # [INV-133] (#490): corroborate a would-be demotion against the wider
+    # region before trusting it — a quoted turn-marker line inside the
+    # final response can hijack the narrow LAST-marker tail search
+    # (`_sev_text`) and discard a genuine [P0]/[P1] finding that precedes
+    # it, silently reducing the scored severity. Every other resolution
+    # channel is unaffected (no region concept applies to a rendered body).
+    #
+    # [pr-test-analyzer finding]: AGENT_HIGHEST_SEVERITY MUST be computed
+    # via the matching `_review_highest_severity_corroborated` helper, not
+    # a bare `_review_extract_highest_severity` on either text alone.
+    # AGENT_HIGHEST_SEVERITY feeds `_aggregate_has_p0p1_fail` below —
+    # INV-127's own terminal-floor gate for the round-cap breaker. Scoring
+    # only the tail would report P2 even on a refused demotion (the region
+    # held the real P1), silently defeating that breaker for the hijack
+    # scenario this fix exists for and turning the documented "eventually
+    # stalls to an operator" residual into an unbounded loop. Scoring the
+    # region with the full per-finding extractor is ALSO wrong (a
+    # different, sibling bug the corroboration filter itself avoids via
+    # `_review_region_has_terminal_tag`'s bare-tag scan): the region
+    # includes reasoning/tool-call turns, which routinely contain ordinary
+    # untagged numbered prose that would collapse the region's own
+    # extraction to `none` for many ORDINARY clean reviews. The dedicated
+    # helper mirrors the filter's own branch structure so the two never
+    # disagree about which text drove a given round's decision.
+    AGENT_HIGHEST_SEVERITY[$_i]=$(_review_highest_severity_corroborated "$_sev_text" "$_sev_region_text" "$REVIEW_ROUND")
+    AGENT_VERDICTS[$_i]=$(_review_apply_severity_filter_corroborated "${AGENT_VERDICTS[$_i]}" "$_sev_text" "$_sev_region_text" "$REVIEW_ROUND")
+  else
+    AGENT_HIGHEST_SEVERITY[$_i]=$(_review_extract_highest_severity "$_sev_text")
+    AGENT_VERDICTS[$_i]=$(_review_apply_severity_filter "${AGENT_VERDICTS[$_i]}" "$_sev_text" "$REVIEW_ROUND")
+  fi
   if [[ "$_pre_filter_verdict" == "fail" && "${AGENT_VERDICTS[$_i]}" == "pass" ]]; then
     _any_severity_demotion=true
     log "Issue #449: severity ratchet demoted '${AGENT_NAMES[$_i]}' fail→pass at round ${REVIEW_ROUND} (highest severity: ${AGENT_HIGHEST_SEVERITY[$_i]}, below this round's blocking floor)."

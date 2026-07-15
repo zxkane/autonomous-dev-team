@@ -478,28 +478,60 @@ _codex_review_stdout_is_malformed() {
 # but ONLY once the capture is confirmed to be a review, not the prompt echoed
 # back (#252), and ONLY over the text that is actually the review (not the
 # echoed prompt's own instruction text, #481 round 4).
+#
+# [INV-133 amendment] (#490, review round 1): if the tail scan above finds NO
+# tag at all, this function does NOT settle on `pass` yet for a genuine
+# turn-marker capture — it first corroborates against the WIDER region
+# (`_codex_review_full_response_region`: FIRST codex-role turn marker to EOF)
+# for a literal `[P0]`/`[P1]` tag. WHY THIS IS LOAD-BEARING, not redundant with
+# `_review_apply_severity_filter_corroborated` (lib-review-severity.sh): that
+# filter ONLY ever demotes an EXISTING `fail` — it is a no-op pass-through on
+# any other verdict. The hijack shape this whole fix (issue #490) exists for
+# can discard a genuine `[P1]` finding AND leave the tail with NO tag
+# whatsoever (not even a masked `[P2]`/`[P3]`) when the quoted marker sits
+# between the real finding and EVERY remaining tagged line. Pre-amendment,
+# THIS function would classify that capture `pass` directly — before the
+# corroborated filter ever runs — producing exactly the false PASS the issue
+# describes, undetected by every test that only exercised captures whose tail
+# retained a masked `[P2]` (the original hijack fixture always classified
+# `fail` here already; see the `-notag` fixture variant for the gap this
+# closes). Scoped to the SAME genuine-turn-marker condition the tail-only scan
+# above already requires (`_cls_has_turns`) — a legacy free-form capture with
+# no turn-marker structure at all has no region concept and keeps its
+# byte-identical whole-capture-scan `pass`. A region tag match here still only
+# flips `pass`→`fail`; the round-aware demotion decision (once a real `fail`
+# reaches the pre-aggregation filter) remains entirely lib-review-severity.sh's
+# job, unchanged.
 _codex_review_classify_stdout() {
   local f="${1:-}"
   if _codex_review_stdout_is_malformed "$f"; then
     printf 'malformed\n'
     return 0
   fi
-  local _scan_text=""
+  local _scan_text="" _cls_stripped="" _cls_original="" _cls_has_turns=false
   if [[ -n "$f" && -f "$f" && -r "$f" ]]; then
-    local _cls_stripped _cls_original
     _cls_stripped=$(_codex_review_strip_prompt_echo "$f") || _cls_stripped=""
     _cls_original=$(cat -- "$f" 2>/dev/null) || _cls_original=""
     if [[ -n "$_cls_stripped" && "$_cls_stripped" != "$_cls_original" ]]; then
       _scan_text="$_cls_stripped"
+      _cls_has_turns=true
     else
       _scan_text="$_cls_original"
     fi
   fi
   if [[ -n "$_scan_text" ]] && grep -qE '\[P[0123]\]' <<<"$_scan_text" 2>/dev/null; then
     printf 'fail\n'
-  else
-    printf 'pass\n'
+    return 0
   fi
+  if [[ "$_cls_has_turns" == true ]]; then
+    local _cls_region
+    _cls_region=$(_codex_review_full_response_region "$f") || _cls_region=""
+    if [[ -n "$_cls_region" ]] && grep -qE '\[P[01]\]' <<<"$_cls_region" 2>/dev/null; then
+      printf 'fail\n'
+      return 0
+    fi
+  fi
+  printf 'pass\n'
   return 0
 }
 
@@ -659,6 +691,141 @@ _codex_review_strip_prompt_echo() {
     printf '%s' "$original"
   else
     printf '%s' "$_stripped"
+  fi
+  return 0
+}
+
+# _codex_review_full_response_region <stdout-file>
+#
+# Issue #490 (fail-closed corroboration, not another turn-marker heuristic
+# rung): locates the SAME structural header + FIRST `user` marker
+# `_codex_review_strip_prompt_echo` uses, but then finds the FIRST standalone
+# `codex` turn-marker line after it — not the LAST — and returns EVERYTHING
+# from that point to EOF: every codex-role turn (reasoning, tool-call, AND
+# final-response turns alike), not just the final response.
+#
+# WHY: `_codex_review_strip_prompt_echo`'s LAST-marker search is exactly right
+# for isolating "the final response text" — but a final response that QUOTES
+# tool/reviewed-file output can legitimately contain a line of the exact
+# turn-marker shape (column-0, exact word, unfenced, blank-line-preceded —
+# the round-3 hardening, [INV-132]). Such a quoted line wins the LAST-marker
+# search and discards every finding BEFORE it, including a genuine blocking
+# one. `_review_apply_severity_filter_corroborated` (lib-review-severity.sh)
+# cross-checks the tail's severity against THIS wider region before ever
+# demoting a `fail`: because this function anchors on the FIRST `codex`
+# marker (immediately after the echoed prompt), no quoted marker deeper in
+# the transcript can ever exclude a genuine finding from it — the only way a
+# real finding is missing from this region is if it precedes the FIRST codex
+# turn, which is structurally impossible (the ONLY thing before the first
+# `codex` marker is the echoed prompt, the `user` turn's content, never the
+# agent's own findings).
+#
+# Deliberately NOT a narrowing of the turn-marker heuristic (issue #490's own
+# "Out of Scope" — no new shape requirement is added to what counts as a
+# marker; the SAME column-0/exact-word/unfenced/blank-line-preceded
+# discipline `_codex_review_strip_prompt_echo` step 3 uses is reused
+# verbatim, just applied to find the FIRST match instead of the LAST). Steps
+# 1-2 (header validation + FIRST `user` marker) are duplicated rather than
+# shared with `_codex_review_strip_prompt_echo`, so this stays a standalone,
+# independently-testable pure function (mirrors this pipeline's established
+# duplicate-rather-than-share discipline for parallel pure helpers, e.g.
+# `_aggregate_has_p0p1_fail` vs `shouldBlockFinding`).
+#
+# Same fail-safe contract as `_codex_review_strip_prompt_echo`: any missing
+# piece of the structure (no header, no `user` marker, no `codex` marker
+# after it) echoes the ORIGINAL capture unchanged. Also drops the CLI's own
+# trailing `tokens used: <N>` footer line, same as the strip helper. rc 0
+# ALWAYS (fail-safe under `set -euo pipefail`).
+_codex_review_full_response_region() {
+  local f="${1:-}"
+  local original=""
+  if [[ -n "$f" && -f "$f" && -r "$f" ]]; then
+    original=$(cat -- "$f" 2>/dev/null || true)  # fail-safe: a read error yields empty, never a crash
+  fi
+  [[ -n "$original" ]] || { printf '%s' "$original"; return 0; }
+
+  # Steps 1-2: identical to `_codex_review_strip_prompt_echo` (header
+  # validation + FIRST `user` marker search).
+  local _first_nonempty _has_header=false
+  _first_nonempty=$(awk 'NF{print; exit}' "$f" 2>/dev/null) || _first_nonempty=""
+  if [[ "$_first_nonempty" =~ ^OpenAI\ Codex\ v[0-9] ]]; then
+    _has_header=true
+  else
+    local _leading_region
+    _leading_region=$(awk '
+      NR==1 && $0=="" { next }
+      /^[[:space:]]*$/ { exit }
+      /^[[:space:]]*```/ { exit }
+      /^[[:space:]]*#/ { exit }
+      /^(user|codex)[[:space:]]*$/ { exit }
+      { print }
+    ' "$f" 2>/dev/null) || _leading_region=""
+    if [[ -n "$_leading_region" ]] \
+       && grep -qiE '^workdir:' <<<"$_leading_region" 2>/dev/null \
+       && grep -qiE '^model:' <<<"$_leading_region" 2>/dev/null \
+       && grep -qiE '^provider:' <<<"$_leading_region" 2>/dev/null; then
+      _has_header=true
+    fi
+  fi
+  if [[ "$_has_header" != true ]]; then
+    printf '%s' "$original"
+    return 0
+  fi
+
+  local _user_line_no
+  _user_line_no=$(awk '
+    /^[[:space:]]*(```|~~~)/ { infence = !infence; next }
+    infence { next }
+    !infence && /^user[[:space:]]*$/ { print NR; exit }
+  ' "$f" 2>/dev/null) || _user_line_no=""
+  if [[ -z "$_user_line_no" ]]; then
+    printf '%s' "$original"
+    return 0
+  fi
+
+  # Step 3 — the divergence from `_codex_review_strip_prompt_echo`: locate
+  # the FIRST standalone `codex` marker after the `user` marker — same
+  # column-0/exact-word/unfenced discipline as step 3 there, but WITHOUT the
+  # blank-line-preceded requirement, and stopping at the FIRST match
+  # (`print NR; exit`) rather than tracking the LAST one across the file.
+  #
+  # Dropping blank-line-precedence here (silent-failure-hunter finding,
+  # issue #490): that requirement exists in the LAST-marker search to REJECT
+  # a spurious inline `codex` word so the search falls back to an EARLIER,
+  # genuine marker — safe, because "earlier" is exactly the direction a
+  # LAST-marker search needs when its top candidate is disqualified. A
+  # FIRST-marker search is the mirror image: if the requirement disqualified
+  # the genuinely first marker (e.g. it directly follows the echoed prompt
+  # with no blank separator), the search would advance to a LATER candidate
+  # instead — excluding everything between the two from the region,
+  # including any real finding in a first codex-role turn. That is exactly
+  # the class of bug this whole fix exists to close, reintroduced via the
+  # borrowed discipline. Accepting the raw FIRST column-0/exact-word/
+  # unfenced `codex` line — even a spurious one inside the echoed prompt
+  # itself — only ever WIDENS the region (it can start no later than the
+  # genuine first codex-role turn), which can never exclude a real finding;
+  # it can at most include a little extra untagged prompt text, which
+  # _review_extract_highest_severity's own per-finding fail-safe already
+  # handles (collapses to `none`, the documented safe-non-demotion residual).
+  local _codex_line_no
+  _codex_line_no=$(awk -v start="$_user_line_no" '
+    /^[[:space:]]*(```|~~~)/ { infence = !infence; next }
+    infence { next }
+    NR > start && !infence && /^codex[[:space:]]*$/ { print NR; exit }
+  ' "$f" 2>/dev/null) || _codex_line_no=""
+  if [[ -z "$_codex_line_no" ]]; then
+    printf '%s' "$original"
+    return 0
+  fi
+
+  local _region
+  _region=$(awk -v boundary="$_codex_line_no" '
+    NR > boundary && tolower($0) !~ /^[[:space:]]*tokens used:[[:space:]]*[0-9]+[[:space:]]*$/ { print }
+  ' "$f" 2>/dev/null) || _region=""
+  if [[ -z "$_region" ]]; then
+    printf '%s' "$original"
+  else
+    printf '%s' "$_region"
   fi
   return 0
 }

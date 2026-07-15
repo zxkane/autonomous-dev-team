@@ -1,0 +1,33 @@
+OpenAI Codex v0.139.0
+--------
+workdir: /tmp/codex-review-wt-996-hij000
+model: openai.gpt-5.4
+provider: amazon-bedrock
+approval: never
+sandbox: read-only
+--------
+
+user
+You are an autonomous PR reviewer for PR #996.
+
+## Review Checklist
+1. [ ] Design canvas created (docs/designs/ or docs/plans/)
+2. [ ] Git worktree used (branch name starts with feat/, fix/, etc.)
+
+codex
+I reviewed the scoped diff (the PR's merge-target range).
+
+Findings:
+
+[P1] src/wrapper.sh:10 — the wrapper mis-scores severity when the tail is
+quoted output, silently demoting a real blocking finding to a false PASS.
+
+Quoted adapter output for context:
+
+codex
+
+[P2] tests/fixture.txt:1 — minor style nit in the trailing quoted text.
+
+Summary: 1 blocking finding (P1), 1 non-blocking finding (P2).
+
+tokens used: 33210
