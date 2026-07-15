@@ -172,6 +172,48 @@ assert_eq "TC-CXRS-CLS-08 p1 fixture → fail" "fail" "$(_codex_review_classify_
 # this classifier.
 assert_eq "TC-CXRS-CLS-09 clean-but-P2/P3-tagged fixture → fail (#449 ratchet; demotion is post-classification)" "fail" "$(_codex_review_classify_stdout "$FIXTURES/codex-review-stdout-clean.txt")"
 
+# TC-CXRS-CLS-10 — issue #481 review round 4: a genuine turn-marker capture
+# whose final response is CLEAN classifies `pass`, not `fail`. Pre-fix, this
+# function scanned the WHOLE raw capture for `[P0]`-`[P3]` — but a genuine
+# turn-marker capture echoes the wrapper's OWN severity-tagging prompt block
+# verbatim (the `user` turn's content), which itself quotes `` `[P0]` ``..
+# `` `[P3]` `` as backtick-fenced markers. That substring match alone made
+# EVERY such capture classify `fail`, even one whose final `codex` response
+# carries no findings at all — the pre-aggregation severity filter can never
+# rescue this, because the (correctly stripped) clean response scores `none`
+# (no tag present), and `none` ALWAYS blocks (shouldBlockFinding's fail-safe
+# default) — a clean stdout-fallback review would block indefinitely
+# regardless of round.
+assert_eq "TC-CXRS-CLS-10 turn-marker capture, clean final response → pass (#481 round-4 regression)" \
+  "pass" "$(_codex_review_classify_stdout "$FIXTURES/codex-review-stdout-turns-clean-response.txt")"
+
+# TC-CXRS-CLS-11 — the P2-only turn-marker reproduction fixture still
+# classifies `fail` post-fix (its genuine [P2] tags survive stripping) —
+# proves the fix does not over-correct into a blanket `pass`.
+assert_eq "TC-CXRS-CLS-11 turn-marker capture, genuine [P2] findings → fail (unaffected by round-4 fix)" \
+  "fail" "$(_codex_review_classify_stdout "$FIXTURES/codex-review-stdout-turns-p2-only.txt")"
+
+# TC-CXRS-CLS-12 — a capture with NO turn-marker structure at all (the
+# pre-#481 legacy free-form shape) is scanned WHOLE, unchanged — the fix is
+# scoped to turn-marker captures via the strip helper's own fail-safe
+# passthrough (stripped == original → scan the original).
+printf '%s\n' 'Codex review of PR #999' 'Looks good, no issues.' > "$F"
+assert_eq "TC-CXRS-CLS-12 no turn-marker structure → whole-capture scan unchanged (pass)" \
+  "pass" "$(_codex_review_classify_stdout "$F")"
+printf '%s\n' 'Codex review of PR #999' '[P1] genuine finding, no structure.' > "$F"
+assert_eq "TC-CXRS-CLS-12b no turn-marker structure, genuine [P1] → still fail (whole-capture scan unchanged)" \
+  "fail" "$(_codex_review_classify_stdout "$F")"
+
+# TC-CXRS-CLS-13 — runs under set -euo pipefail without aborting on the
+# clean-response turn-marker fixture (the new code path added in round 4).
+cls13=$(
+  set -euo pipefail
+  source "$LIB"
+  out=$(_codex_review_classify_stdout "$FIXTURES/codex-review-stdout-turns-clean-response.txt")
+  echo "rc=$?|$out"
+)
+assert_eq "TC-CXRS-CLS-13 no abort under set -euo pipefail (turn-marker clean-response path)" "rc=0|pass" "$cls13"
+
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== TC-CXRS-BODY: _codex_review_compose_body ==="
@@ -206,6 +248,16 @@ else
   echo -e "  ${RED}FAIL${NC}: TC-CXRS-BODY-04a large stdout NOT truncated (len=${#body04})"; FAIL=$((FAIL + 1))
 fi
 assert_contains "TC-CXRS-BODY-04b truncation marker present" "truncated" "$body04"
+
+# [INV-132] (#481, spec revision 2): _codex_review_compose_body is
+# DELIBERATELY unmodified by this fix — R2's echo-stripping is scoped to
+# SEVERITY SCORING only (a separate helper, _codex_review_strip_prompt_echo,
+# invoked from autonomous-review.sh's severity call site), not to what gets
+# posted as the human-facing verdict comment. Regression pin: a FAIL body
+# composed from an echo-carrying capture still includes the echo verbatim.
+body05=$(_codex_review_compose_body fail "$FIXTURES/codex-review-stdout-turns-p2-only.txt")
+assert_contains "TC-CXRS-BODY-05 compose_body is unmodified by INV-132 — the FAIL body still carries the raw capture verbatim (echo included)" \
+  "1. [ ] Design canvas created" "$body05"
 
 # ---------------------------------------------------------------------------
 echo ""
@@ -1250,6 +1302,34 @@ assert_eq "TC-CXRS-INT-09 rc 0 P2/P3-tagged review → posts FAIL (gate admits c
 assert_eq "TC-CXRS-INT-10 rc 0, empty capture, no self-post → posts default PASS (not dropped unavailable)" \
   "POST|pass|pass" "$(fallback_case "" "" "" "" 0)"
 
+# TC-CXRS-INT-11 — issue #481 review round 2: a REAL-SHAPED turn-marker capture
+# (CLI header → `user` marker → echoed prompt → `codex` marker → final response
+# with genuine [P2] findings, no self-post) reaches the stdout fallback and
+# posts FAIL (any tag classifies fail under the #449 ratchet) — end-to-end
+# through the ACTUAL wrapper block above (not a reimplementation). Pre-fix,
+# `_codex_review_stdout_is_malformed` misclassified every such capture
+# `malformed` (its own header/echo trivially matches signals 1/2), so this
+# case NOPOSTed (left unresolved for the terminal sweep) instead of reaching
+# the fallback at all — the codex-stdout-fallback route (INV-132) was
+# permanently unreachable for a real turn-marker review. The fix (signal 0 in
+# `_codex_review_stdout_is_malformed`) distinguishes a completed turn-marker
+# review from a pure prompt-echo BEFORE signals 1-3 run.
+assert_eq "TC-CXRS-INT-11 real turn-marker P2-only capture reaches the fallback → posts FAIL (#481 round-2 regression)" \
+  "POST|fail|fail" "$(fallback_case "$FIXTURES/codex-review-stdout-turns-p2-only.txt" "" "" "" 0)"
+
+# TC-CXRS-INT-12 — issue #481 review round 4: a REAL-SHAPED turn-marker
+# capture whose final response is CLEAN (no findings at all) reaches the
+# stdout fallback and posts PASS — end-to-end through the ACTUAL wrapper
+# block above (not a reimplementation). Pre-fix, `_codex_review_classify_
+# stdout` scanned the WHOLE raw capture, whose echoed prompt quotes
+# `` `[P1]` `` etc. as backtick-fenced severity-tag markers — a substring
+# match that misclassified `fail` for a review with no findings at all,
+# blocking indefinitely regardless of round (the pre-aggregation severity
+# filter cannot rescue it: the correctly-stripped clean response scores
+# `none`, which always blocks).
+assert_eq "TC-CXRS-INT-12 real turn-marker clean-response capture reaches the fallback → posts PASS (#481 round-4 regression)" \
+  "POST|pass|pass" "$(fallback_case "$FIXTURES/codex-review-stdout-turns-clean-response.txt" "" "" "" 0)"
+
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== TC-CXRS-MLP: _run_codex_review passes a MULTI-LINE prompt as ONE arg (#218 finding 1) ==="
@@ -1848,6 +1928,58 @@ _codex_review_stdout_is_malformed "$MF"; assert_eq "TC-CXRS-MAL-DET-27 long revi
 # AND no verdict heading is STILL malformed (signal 3 still fires on a genuine dump).
 { printf '%s\n' 'You are reviewing PR #999.'; head -c 60000 /dev/zero | tr '\0' 'z'; } > "$MF"
 _codex_review_stdout_is_malformed "$MF"; assert_eq "TC-CXRS-MAL-DET-28 long dump, NO finding structure, no heading → STILL malformed (rc 0)" 0 "$?"
+
+# --- Signal 0 (issue #481 review round 2): a genuine turn-marker capture
+#     (header → `user` marker → echoed prompt → `codex` marker → final
+#     response) is NEVER malformed, even though its OWN header/echo trivially
+#     satisfies signals 1/2 — the exact structure a pure prompt-echo triggers
+#     on. Pre-fix, EVERY turn-marker-shaped review (including one carrying a
+#     real, fully-formed final response) was misclassified `malformed` before
+#     signal 0 could distinguish it, making the codex-stdout-fallback route
+#     ([INV-132]) permanently unreachable for this capture shape. ---
+
+# TC-CXRS-MAL-DET-29 — the real-shaped reproduction fixture (header/user/echo/
+# codex/[P2] findings) → NOT malformed (rc 1). THE round-2 regression.
+_codex_review_stdout_is_malformed "$FIXTURES/codex-review-stdout-turns-p2-only.txt"
+assert_eq "TC-CXRS-MAL-DET-29 real turn-marker P2-only capture → NOT malformed (rc 1) [#481 round-2 regression]" 1 "$?"
+
+# TC-CXRS-MAL-DET-30 — the tilde-fenced over-strip-hazard fixture (still a
+# genuine turn-marker review with real [P2] findings after the last `codex`
+# marker) → NOT malformed (rc 1).
+_codex_review_stdout_is_malformed "$FIXTURES/codex-review-stdout-turns-tilde-fence.txt"
+assert_eq "TC-CXRS-MAL-DET-30 tilde-fence turn-marker capture → NOT malformed (rc 1)" 1 "$?"
+
+# TC-CXRS-MAL-DET-31 — the backtick-fenced over-strip-hazard fixture → NOT malformed (rc 1).
+_codex_review_stdout_is_malformed "$FIXTURES/codex-review-stdout-turns-overstrip.txt"
+assert_eq "TC-CXRS-MAL-DET-31 backtick-fence turn-marker capture → NOT malformed (rc 1)" 1 "$?"
+
+# TC-CXRS-MAL-DET-32 — REGRESSION GUARD: turn markers present (header + `user`
+# + `codex`) but NOTHING after the last `codex` marker (the trace was captured
+# mid-turn, no final response yet) — signal 0 must NOT fire (the strip helper
+# echoes the ORIGINAL unchanged when there's no post-marker text, so the
+# inequality is false and this falls through to signals 1/2, which DO match
+# the bare header/echo) → STILL malformed (rc 0). Signal 0 only exempts a
+# capture with REAL content after the boundary.
+printf '%s\n' \
+  'OpenAI Codex v0.139.0' '--------' 'workdir: /tmp/x' 'model: openai.gpt-5.4' \
+  'provider: amazon-bedrock' 'approval: never' 'sandbox: read-only' '--------' '' \
+  'user' 'You are an autonomous PR reviewer for PR #999.' '' \
+  '## Review Checklist' '1. [ ] Design canvas created' '' \
+  'codex' > "$MF"
+_codex_review_stdout_is_malformed "$MF"; assert_eq "TC-CXRS-MAL-DET-32 turn markers present but NO text after the last codex marker → STILL malformed (rc 0)" 0 "$?"
+
+# TC-CXRS-MAL-DET-33 — the unfenced-inline-marker over-strip-hazard fixture
+# (a genuine final response with an EARLIER un-fenced, column-0 `codex` word
+# inline in quoted tool output, no blank line before it — round-3 review
+# finding [P2], PR #484) → NOT malformed (rc 1). Signal 0 must locate the
+# TRUE last marker (blank-line-preceded), not the inline hazard word.
+_codex_review_stdout_is_malformed "$FIXTURES/codex-review-stdout-turns-unfenced-inline-marker.txt"
+assert_eq "TC-CXRS-MAL-DET-33 unfenced-inline-marker turn-marker capture → NOT malformed (rc 1)" 1 "$?"
+
+# TC-CXRS-MAL-CLS-07 — classifier-level pin: the real turn-marker P2-only
+# fixture classifies `fail` (the [P2] tags survive), NOT `malformed`.
+assert_eq "TC-CXRS-MAL-CLS-07 real turn-marker P2-only capture → fail (NOT malformed) [#481 round-2 regression]" \
+  "fail" "$(_codex_review_classify_stdout "$FIXTURES/codex-review-stdout-turns-p2-only.txt")"
 
 # --- _codex_review_classify_stdout gains the `malformed` token (checked FIRST) ---
 # TC-CXRS-MAL-CLS-01 — prompt-echo capture ([P1] present ONLY as quoted instruction

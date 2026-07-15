@@ -1,0 +1,27 @@
+OpenAI Codex v0.139.0
+--------
+workdir: /tmp/codex-review-wt-997-ghi789
+model: openai.gpt-5.4
+provider: amazon-bedrock
+approval: never
+sandbox: read-only
+--------
+
+user
+You are an autonomous PR reviewer for PR #997.
+
+## Review Checklist
+1. [ ] Design canvas created (docs/designs/ or docs/plans/)
+2. [ ] Git worktree used (branch name starts with feat/, fix/, etc.)
+
+codex
+I reviewed the scoped diff.
+
+[P1] src/auth.ts:10 — this change removes the signature check on the incoming
+webhook payload, so a forged request is accepted as authentic.
+
+Tool output from the reviewed app follows:
+codex
+[P2] src/docs.ts:20 — minor: this docstring is out of date.
+
+Summary: 2 findings — 1 blocking (P1), 1 non-blocking (P2).

@@ -1318,6 +1318,253 @@ for _sev in "${_i129_mixed_severities[@]}"; do
 done
 assert_eq "TC-INV129-036f R1's ratchet round reaches 6 across the mixed P1/P2 series" "6" "$_i129_mixed_round"
 
+# ===========================================================================
+echo
+echo "=== TC-SEVEXT-001..013: codex severity call-site input selection (issue #481, INV-132, spec revision 2) ==="
+# ===========================================================================
+# The severity filter's per-agent text selection (autonomous-review.sh, right
+# before _review_extract_highest_severity) branches on AGENT_VERDICT_SOURCES,
+# a real per-agent array this test file simulates directly, plus a wiring pin
+# confirming the wrapper's own selection order against the actual source.
+
+CX_TURNS_P2_FIXTURE="$FIXTURES/codex-review-stdout-turns-p2-only.txt"
+CX_TURNS_OVERSTRIP_FIXTURE="$FIXTURES/codex-review-stdout-turns-overstrip.txt"
+assert_file_exists "TC-SEVEXT setup: codex turn-marker P2-only fixture exists" "$CX_TURNS_P2_FIXTURE"
+assert_file_exists "TC-SEVEXT setup: codex turn-marker over-strip fixture exists" "$CX_TURNS_OVERSTRIP_FIXTURE"
+
+# TC-SEVEXT-001/002: the reproduction scenario, artifact-resolved path. An
+# artifact-resolved codex verdict (source=="artifact") scores
+# AGENT_VERDICT_BODIES[i] — the artifact-rendered body, never the raw
+# capture — and extracts P2 correctly.
+_sevext_art_json='{"schema_version":1,"verdict":"FAIL","blockingFindings":[{"title":"minor nit","severity":"P2"},{"title":"another nit","severity":"P2"}],"runId":"abc","agent":"codex"}'
+_sevext_art_body=$(_verdict_body_from_artifact_json "$_sevext_art_json")
+assert_eq "TC-SEVEXT-001 artifact-rendered body (source==artifact) scores P2" "P2" \
+  "$(_review_extract_highest_severity "$_sevext_art_body")"
+assert_eq "TC-SEVEXT-002 regression pin: a direct whole-capture scan of the SAME scenario's turn-marker fixture still collapses to none (R3 — the scanner itself is unmodified, only the input selection changed)" "none" \
+  "$(_review_extract_highest_severity "$(cat "$CX_TURNS_P2_FIXTURE")")"
+
+# TC-SEVEXT-003/004: the legacy stdout-classify fallback route
+# (source=="codex-stdout-fallback") strips the echo via the turn-marker
+# boundary helper, THEN scores — recovering P2 instead of none.
+assert_eq "TC-SEVEXT-003 stdout-fallback route: turn-marker-stripped capture scores P2" "P2" \
+  "$(_review_extract_highest_severity "$(_codex_review_strip_prompt_echo "$CX_TURNS_P2_FIXTURE")")"
+
+# TC-SEVEXT-004: a capture with no recognizable header/marker structure at
+# all is scored as-is (fail-safe passthrough) — downstream severity result
+# unaffected for a short clean review carrying a real tag.
+TMP_SEVEXT004=$(mktemp)
+printf '%s\n' 'A short clean review of the diff.' '' '[P3] tests/x.test.ts:1 — consider an edge case.' '' 'Summary: 1 non-blocking finding.' > "$TMP_SEVEXT004"
+assert_eq "TC-SEVEXT-004 no-structure capture: stripped == original, still scores P3" "P3" \
+  "$(_review_extract_highest_severity "$(_codex_review_strip_prompt_echo "$TMP_SEVEXT004")")"
+rm -f "$TMP_SEVEXT004"
+
+# TC-SEVEXT-005 (R3 pin): a genuinely untagged finding in the (already
+# echo-free) verdict body still extracts as `none` — the scanner itself is
+# unmodified by this fix.
+_sevext_untagged_body=$'1. missing null check\n2. off-by-one error'
+assert_eq "TC-SEVEXT-005 [R3] untagged numbered body still extracts none (scanner unmodified)" "none" \
+  "$(_review_extract_highest_severity "$_sevext_untagged_body")"
+
+# TC-SEVEXT-006: with extraction fixed, a P2-only round's (fail, severity)
+# pair never counts as INV-127 terminal-floor evidence.
+assert_eq "TC-SEVEXT-006 codex P2-only round: _aggregate_has_p0p1_fail is false (INV-127 does not advance)" "false" \
+  "$(_aggregate_has_p0p1_fail fail P2)"
+
+# TC-SEVEXT-007: regression pin — a non-codex agent's selection is untouched
+# (it always scored AGENT_VERDICT_BODIES[i]; no source flag concept applies).
+assert_eq "TC-SEVEXT-007 non-codex agent: verdict-body scoring unchanged" "P1" \
+  "$(_review_extract_highest_severity '[P1] a real blocking finding')"
+
+# TC-SEVEXT-008: over-stripping pin — a fixture whose reviewed-file/tool-trace
+# content contains bare `user`/`codex` words AFTER the real response marker
+# (but fenced, mirroring how a reviewed diff snippet would be quoted) must
+# NOT be treated as a false boundary; the real finding survives intact.
+_overstrip_stripped=$(_codex_review_strip_prompt_echo "$CX_TURNS_OVERSTRIP_FIXTURE")
+assert_contains "TC-SEVEXT-008a over-strip fixture: real [P2] finding survives" \
+  "$_overstrip_stripped" '[P2] src/roles.ts:12'
+assert_eq "TC-SEVEXT-008b over-strip fixture: severity extraction on the stripped result is P2 (not falsely collapsed)" "P2" \
+  "$(_review_extract_highest_severity "$_overstrip_stripped")"
+
+# TC-SEVEXT-009: wiring pin — the wrapper's severity call site branches on
+# AGENT_VERDICT_SOURCES[_i]=="codex-stdout-fallback", not agent identity.
+sevext_wire_region=$(awk '/^_any_severity_demotion=false$/{f=1} f{print} f && /^  AGENT_HIGHEST_SEVERITY\[\$_i\]=/{exit}' "$WRAPPER")
+assert_contains "TC-SEVEXT-009a wrapper's severity-source selection branches on AGENT_VERDICT_SOURCES" \
+  "$sevext_wire_region" 'AGENT_VERDICT_SOURCES[$_i]:-}" == "codex-stdout-fallback"'
+assert_contains "TC-SEVEXT-009b the stdout-fallback branch calls the strip helper (not a bare cat)" \
+  "$sevext_wire_region" '_codex_review_strip_prompt_echo "${AGENT_CODEX_LOGS[$_i]}"'
+assert_contains "TC-SEVEXT-009c the ELSE branch (every other resolution channel) scores AGENT_VERDICT_BODIES[_i]" \
+  "$sevext_wire_region" '_sev_text="${AGENT_VERDICT_BODIES[$_i]:-}"'
+
+# TC-SEVEXT-010: wiring pin — the wrapper tags AGENT_VERDICT_SOURCES as
+# `codex-stdout-fallback` at the EXACT call site where
+# `_codex_review_classify_stdout` supplied the verdict, as a real branchable
+# assignment (not merely a log line).
+assert_contains "TC-SEVEXT-010 wrapper sets AGENT_VERDICT_SOURCES[_i]=codex-stdout-fallback at the classify-stdout resolution site" \
+  "$(cat "$WRAPPER")" 'AGENT_VERDICT_SOURCES[$_i]="codex-stdout-fallback"'
+
+# ===========================================================================
+echo
+echo "=== TC-CXSTRIP-001..008: _codex_review_strip_prompt_echo (adapters/codex.sh, issue #481, spec revision 2) ==="
+# ===========================================================================
+
+_cxstrip_result=$(_codex_review_strip_prompt_echo "$CX_TURNS_P2_FIXTURE")
+assert_eq "TC-CXSTRIP-001a stripped result contains no numbered checklist line" "" \
+  "$(grep -o '1\. \[ \] Design canvas created' <<<"$_cxstrip_result")"
+assert_eq "TC-CXSTRIP-001b stripped result contains no reasoning/tool-trace turn text" "" \
+  "$(grep -o 'Running: git diff' <<<"$_cxstrip_result")"
+assert_contains "TC-CXSTRIP-001c stripped result still contains the real [P2] finding" \
+  "$_cxstrip_result" '[P2] src/handler.ts:88'
+assert_contains "TC-CXSTRIP-001d stripped result still contains the second [P2] finding" \
+  "$_cxstrip_result" '[P2] src/other.ts:42'
+
+TMP_CXSTRIP002=$(mktemp)
+printf '%s\n' 'A short clean review with no blocking findings.' '' 'Summary: looks good to merge.' > "$TMP_CXSTRIP002"
+assert_eq "TC-CXSTRIP-002 capture with no header at all is returned UNCHANGED" \
+  "$(cat "$TMP_CXSTRIP002")" "$(_codex_review_strip_prompt_echo "$TMP_CXSTRIP002")"
+rm -f "$TMP_CXSTRIP002"
+
+TMP_CXSTRIP003=$(mktemp)
+assert_eq "TC-CXSTRIP-003a empty file → empty, rc 0 (fail-safe)" "" \
+  "$(_codex_review_strip_prompt_echo "$TMP_CXSTRIP003")"
+rm -f "$TMP_CXSTRIP003"
+assert_eq "TC-CXSTRIP-003b missing file → empty, rc 0 (fail-safe)" "" \
+  "$(_codex_review_strip_prompt_echo /nonexistent/path/$$)"
+assert_eq "TC-CXSTRIP-003c empty arg → empty, rc 0 (fail-safe)" "" \
+  "$(_codex_review_strip_prompt_echo "")"
+
+# TC-CXSTRIP-004: a validated header present, but NO `user` marker at all
+# (a legacy free-form capture) → whole text returned unchanged (fail-safe).
+TMP_CXSTRIP004=$(mktemp)
+printf '%s\n' 'OpenAI Codex v0.139.0' '--------' 'workdir: /tmp/x' 'model: m' 'provider: p' '--------' '' 'Direct review text, no turn markers.' '[P2] a real finding here.' > "$TMP_CXSTRIP004"
+assert_eq "TC-CXSTRIP-004 header present but no user marker → whole capture unchanged (fail-safe)" \
+  "$(cat "$TMP_CXSTRIP004")" "$(_codex_review_strip_prompt_echo "$TMP_CXSTRIP004")"
+rm -f "$TMP_CXSTRIP004"
+
+# TC-CXSTRIP-005: header + `user` marker present, but NO `codex` marker
+# after it (codex crashed mid-turn / captured before responding) → whole
+# capture unchanged (fail-safe) — never guess a boundary that isn't there.
+TMP_CXSTRIP005=$(mktemp)
+printf '%s\n' 'OpenAI Codex v0.139.0' '--------' 'workdir: /tmp/x' 'model: m' 'provider: p' '--------' '' 'user' 'echoed prompt text with no [P1] tag' > "$TMP_CXSTRIP005"
+assert_eq "TC-CXSTRIP-005 user marker present but no codex marker after it → whole capture unchanged (fail-safe)" \
+  "$(cat "$TMP_CXSTRIP005")" "$(_codex_review_strip_prompt_echo "$TMP_CXSTRIP005")"
+rm -f "$TMP_CXSTRIP005"
+
+# TC-CXSTRIP-006: the over-stripping fixture — reviewed content containing
+# bare `user`/`codex` words (fenced, as a diff/code snippet would render)
+# after the real response marker must not create a false LATER boundary;
+# the LAST codex marker used is the genuine turn marker BEFORE the fenced
+# quote, and everything after it (including the fenced quote) is kept.
+_cxstrip006=$(_codex_review_strip_prompt_echo "$CX_TURNS_OVERSTRIP_FIXTURE")
+assert_contains "TC-CXSTRIP-006a over-strip fixture: kept text includes the fenced user/codex/system quote" \
+  "$_cxstrip006" 'system'
+assert_contains "TC-CXSTRIP-006b over-strip fixture: kept text includes the real [P2] finding" \
+  "$_cxstrip006" '[P2] src/roles.ts:12'
+
+# TC-CXSTRIP-007: multiple `codex` turns (reasoning, tool call, final
+# response) — the LAST one bounds the final response; earlier reasoning/tool
+# turns are excluded from the scored text.
+TMP_CXSTRIP007=$(mktemp)
+printf '%s\n' 'OpenAI Codex v0.139.0' '--------' 'workdir: /tmp/x' 'model: m' 'provider: p' '--------' '' 'user' 'echoed prompt' '' 'codex' 'Reasoning turn text, no findings here.' '' 'codex' 'Tool call turn text, also no findings.' '' 'codex' '[P1] the real final finding.' > "$TMP_CXSTRIP007"
+_cxstrip007=$(_codex_review_strip_prompt_echo "$TMP_CXSTRIP007")
+assert_eq "TC-CXSTRIP-007a multi-turn capture: earlier reasoning turn text excluded" "" \
+  "$(grep -o 'Reasoning turn text' <<<"$_cxstrip007")"
+assert_eq "TC-CXSTRIP-007b multi-turn capture: earlier tool-call turn text excluded" "" \
+  "$(grep -o 'Tool call turn text' <<<"$_cxstrip007")"
+assert_contains "TC-CXSTRIP-007c multi-turn capture: final response finding included" \
+  "$_cxstrip007" '[P1] the real final finding'
+rm -f "$TMP_CXSTRIP007"
+
+# TC-CXSTRIP-008: the `user`/`codex` markers must be column-0 exact-word
+# matches — an indented or trailing-content variant is NOT a marker (avoids
+# a tool-output line like "  user" or "codexreview" false-matching).
+TMP_CXSTRIP008=$(mktemp)
+printf '%s\n' 'OpenAI Codex v0.139.0' '--------' 'workdir: /tmp/x' 'model: m' 'provider: p' '--------' '' '  user' 'not a real marker (indented)' 'codexreview not a real marker either' > "$TMP_CXSTRIP008"
+assert_eq "TC-CXSTRIP-008 indented/trailing-content lines are not markers → whole capture unchanged (fail-safe)" \
+  "$(cat "$TMP_CXSTRIP008")" "$(_codex_review_strip_prompt_echo "$TMP_CXSTRIP008")"
+rm -f "$TMP_CXSTRIP008"
+
+# TC-CXSTRIP-009: a ~~~-fenced (not just ```-fenced) reviewed-content snippet
+# quoting column-zero `user`/`codex`/`system` lines must NOT be mistaken for a
+# later genuine turn marker — the fence-toggle awk must recognize BOTH fence
+# styles, or the helper would discard the real findings that precede the
+# tilde-fenced snippet and extract none instead of demoting (review round-1
+# finding 2, PR #484).
+CX_TILDE_FIXTURE="$FIXTURES/codex-review-stdout-turns-tilde-fence.txt"
+assert_file_exists "TC-CXSTRIP-009 setup: tilde-fence fixture exists" "$CX_TILDE_FIXTURE"
+_cxstrip009=$(_codex_review_strip_prompt_echo "$CX_TILDE_FIXTURE")
+assert_contains "TC-CXSTRIP-009a tilde-fenced fixture: first real [P2] finding survives" \
+  "$_cxstrip009" '[P2] src/handler.ts:88'
+assert_contains "TC-CXSTRIP-009b tilde-fenced fixture: second real [P2] finding survives" \
+  "$_cxstrip009" '[P2] src/other.ts:42'
+assert_eq "TC-CXSTRIP-009c severity extraction on the tilde-fence fixture's stripped result is P2 (not falsely collapsed to none)" "P2" \
+  "$(_review_extract_highest_severity "$_cxstrip009")"
+
+# TC-CXSTRIP-010: the CLI's own trailing `tokens used: <N>` footer must never
+# reach the scored text — a bare token count is not review findings and must
+# not be able to influence severity extraction (review round-1 finding 3, PR
+# #484). The p2-only fixture already carries a `tokens used: 54210` footer
+# line after the final response.
+_cxstrip010=$(_codex_review_strip_prompt_echo "$CX_TURNS_P2_FIXTURE")
+assert_eq "TC-CXSTRIP-010a stripped result contains no 'tokens used' footer line" "" \
+  "$(grep -io 'tokens used' <<<"$_cxstrip010")"
+TMP_CXSTRIP010=$(mktemp)
+printf '%s\n' 'OpenAI Codex v0.139.0' '--------' 'workdir: /tmp/x' 'model: m' 'provider: p' '--------' '' 'user' 'echoed prompt' '' 'codex' '[P3] a real finding, low severity only.' '' 'Tokens Used: 12345' > "$TMP_CXSTRIP010"
+_cxstrip010b=$(_codex_review_strip_prompt_echo "$TMP_CXSTRIP010")
+assert_eq "TC-CXSTRIP-010b mixed-case 'Tokens Used:' footer stripped" "" \
+  "$(grep -io 'tokens used' <<<"$_cxstrip010b")"
+assert_eq "TC-CXSTRIP-010c severity extraction on a footer-only-P3 capture is P3, not polluted by the footer" "P3" \
+  "$(_review_extract_highest_severity "$_cxstrip010b")"
+rm -f "$TMP_CXSTRIP010"
+
+# TC-CXSTRIP-011: an UN-FENCED, column-0 `codex` word appearing mid-paragraph
+# in quoted tool/reviewed-file output — with NO blank line before it — must
+# NOT be mistaken for a later genuine turn marker (round-3 review finding
+# [P2], PR #484). Pre-fix, the Step-3 scan required only column-0/exact-word/
+# unfenced, so this inline word won this file's "last codex marker" search
+# and everything before it (including a real [P1]) was discarded, leaving
+# only the trailing [P2] — a P1 finding silently reduced to P2-only and
+# demoted at round 5. Every genuine marker in a real capture is its own
+# paragraph (blank line before it); this fixture's hazard line flows directly
+# out of the preceding prose sentence with no blank line, so the fix's
+# blank-line-before requirement must reject it as a boundary.
+CX_UNFENCED_INLINE_FIXTURE="$FIXTURES/codex-review-stdout-turns-unfenced-inline-marker.txt"
+assert_file_exists "TC-CXSTRIP-011 setup: unfenced-inline-marker fixture exists" "$CX_UNFENCED_INLINE_FIXTURE"
+_cxstrip011=$(_codex_review_strip_prompt_echo "$CX_UNFENCED_INLINE_FIXTURE")
+assert_contains "TC-CXSTRIP-011a unfenced-inline-marker fixture: the earlier [P1] finding survives" \
+  "$_cxstrip011" '[P1] src/auth.ts:10'
+assert_contains "TC-CXSTRIP-011b unfenced-inline-marker fixture: the later [P2] finding survives" \
+  "$_cxstrip011" '[P2] src/docs.ts:20'
+assert_eq "TC-CXSTRIP-011c severity extraction on the unfenced-inline-marker fixture is P1 (not demoted to P2 by over-stripping)" "P1" \
+  "$(_review_extract_highest_severity "$_cxstrip011")"
+
+# ===========================================================================
+echo
+echo "=== TC-SEVEXT-011..013: simulated 5-round P2-only codex loop demotes at round 5 (spec revision 2 AC procedure) ==="
+# ===========================================================================
+# The acceptance-criteria scenario, driven through the PRODUCTION helper
+# (_codex_review_strip_prompt_echo) at each round — not a reimplementation.
+
+_sevext5_marker=""
+_sevext5_round=0
+for _h in cxhead1 cxhead2 cxhead3 cxhead4 cxhead5; do
+  _sevext5_round=$(_review_round_next_count "$_sevext5_marker")
+  _sevext5_marker=$(_review_round_marker 481 "$_h" "$_sevext5_round")
+done
+assert_eq "TC-SEVEXT-011 5-round new-head-every-round progression reaches round 5" "5" "$_sevext5_round"
+
+# Drive the production stdout-fallback route: strip via the helper, then
+# extract severity, mirroring exactly what the wrapper's ELSE-branch-vs-
+# stdout-fallback-branch selection does for each round of the loop.
+_sevext5_stripped=$(_codex_review_strip_prompt_echo "$CX_TURNS_P2_FIXTURE")
+_sevext5_sev=$(_review_extract_highest_severity "$_sevext5_stripped")
+assert_eq "TC-SEVEXT-012a extraction from the helper-stripped codex capture is P2" "P2" "$_sevext5_sev"
+assert_eq "TC-SEVEXT-012b at round 5, that P2 demotes fail→pass (INV-129 loop convergence, extraction now correctly fed)" "pass" \
+  "$(_review_apply_severity_filter fail "$_sevext5_stripped" "$_sevext5_round")"
+assert_eq "TC-SEVEXT-012c rounds 1-4 stay fail (the ratchet's own floor, unmodified)" "fail fail fail fail" \
+  "$(_review_apply_severity_filter fail "$_sevext5_stripped" 1) $(_review_apply_severity_filter fail "$_sevext5_stripped" 2) $(_review_apply_severity_filter fail "$_sevext5_stripped" 3) $(_review_apply_severity_filter fail "$_sevext5_stripped" 4)"
+assert_eq "TC-SEVEXT-013 INV-127's counter (via _aggregate_has_p0p1_fail) stays false across all 5 rounds" "false false false false false" \
+  "$(_aggregate_has_p0p1_fail fail "$_sevext5_sev") $(_aggregate_has_p0p1_fail fail "$_sevext5_sev") $(_aggregate_has_p0p1_fail fail "$_sevext5_sev") $(_aggregate_has_p0p1_fail fail "$_sevext5_sev") $(_aggregate_has_p0p1_fail fail "$_sevext5_sev")"
+
 echo
 echo "=== Summary ==="
 echo "Passed: $PASS"

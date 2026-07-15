@@ -198,7 +198,28 @@ _codex_review_deadline_seconds() {
 # STRUCTURE, not on a bare keyword that a genuine review could legitimately mention.
 # rc 0/1 only — never aborts under `set -euo pipefail` (a bare call is fail-safe).
 #
-# Three cheap, robust signals (ANY one is sufficient — defense in depth):
+# Signal 0 (checked FIRST, issue #481 review round 2): a genuine `codex review`
+# TURN-MARKER capture — `<CLI header> → <user marker> → <echoed prompt> →
+# <reasoning/tool-trace turns> → <codex marker(s)> → <final response>` — ALSO
+# opens with the exact banner/header structure signal 1 below matches (the
+# prompt IS echoed verbatim as the `user` turn's content, by construction of
+# `_run_codex_review`'s capture). Without this signal, EVERY such capture —
+# including one whose final `codex` turn is a genuine, fully-formed review —
+# was misclassified `malformed` by signal 1 before ever reaching signal 0's
+# check, making the codex-stdout-fallback route ([INV-132], `AGENT_VERDICT_
+# SOURCES[i]=="codex-stdout-fallback"`) permanently unreachable for any real
+# review shaped this way — the round-2 review finding this signal closes.
+# `_codex_review_strip_prompt_echo` locates the SAME structural boundary
+# ([INV-132]'s own turn-marker parser): a validated header, the FIRST `user`
+# marker after it, the LAST `codex` marker after THAT. If all three are
+# present AND the text strictly after the last `codex` marker is non-empty
+# (a real final-response turn exists), this is a completed turn-marker
+# review, never malformed — regardless of what its leading region contains.
+# A capture with the turn markers but NO text after the last `codex` marker
+# (e.g. the trace was captured mid-turn) is NOT covered by this signal and
+# falls through to signals 1-3 unchanged.
+#
+# Three cheap, robust signals below (ANY one is sufficient — defense in depth):
 #   1. Banner/header — the codex startup banner is the capture's FIRST non-empty
 #      line (`^OpenAI Codex v`), OR a `workdir:`+`model:`+`provider:` triple appears
 #      in the CONTIGUOUS LEADING HEADER REGION (the run of lines from the top up to
@@ -231,6 +252,21 @@ _codex_review_deadline_seconds() {
 _codex_review_stdout_is_malformed() {
   local f="${1:-}"
   [[ -n "$f" && -f "$f" && -r "$f" ]] || return 1
+
+  # Signal 0: a genuine turn-marker capture with real content after the LAST
+  # `codex` marker is NEVER malformed — checked before signals 1-3 so a
+  # completed turn-marker review's OWN header/echo (which trivially satisfies
+  # signal 1/2's structural match) can never misclassify it. Fail-safe: if
+  # the strip helper found no header/no markers/no post-marker text, it
+  # echoes the ORIGINAL capture unchanged, so the inequality below is false
+  # and this signal is silently skipped (falls through to signals 1-3).
+  local _turn_stripped
+  _turn_stripped=$(_codex_review_strip_prompt_echo "$f") || _turn_stripped=""
+  if [[ -n "$_turn_stripped" ]]; then
+    local _turn_original
+    _turn_original=$(cat -- "$f" 2>/dev/null) || _turn_original=""
+    [[ "$_turn_stripped" != "$_turn_original" ]] && return 1
+  fi
 
   # Banner/header signals 1a/1b match ONLY the ACTUAL startup header — the codex
   # launch trace at the very top of the capture — NOT arbitrary lines that merely
@@ -397,10 +433,35 @@ _codex_review_stdout_is_malformed() {
 # startup-trace stdout is NOT a real review, so the severity-tag scan must NOT run
 # over it (its tags are only quoted instruction text → a phantom FAIL). Then the
 # gate logic: ANY severity tag (`[P0]`-`[P3]`, issue #449's severity-aware blocking
-# ratchet) anywhere in the (non-malformed) output → `fail`; otherwise → `pass`. An
+# ratchet) anywhere in the SCANNED text → `fail`; otherwise → `pass`. An
 # empty / missing / unreadable file → `pass` (no tag ⇒ no finding; the wrapper still
 # posts a `Review PASSED` verdict so a comment always lands). rc 0 ALWAYS —
 # fail-safe under `set -euo pipefail` (a bare call must not abort the wrapper).
+#
+# [INV-132] (#481, review round 4): the SCANNED text is the STRUCTURALLY
+# STRIPPED final response (`_codex_review_strip_prompt_echo`) whenever the
+# capture validates as a genuine turn-marker review — the SAME boundary
+# signal 0 (above) uses to admit it past the malformed gate in the first
+# place. A genuine turn-marker capture echoes the wrapper's OWN prompt
+# verbatim as the `user` turn's content, and that prompt's severity-tagging
+# instructions (`_review_severity_prompt_block`) literally quote `[P0]`-`[P3]`
+# as backtick-fenced markers (e.g. `` `[P1]` — a clear correctness/reliability
+# merge blocker``) — a substring scan of the RAW capture matches those quoted
+# instruction tokens exactly like a real finding tag, misclassifying `fail`
+# for a review whose actual final response is completely clean (no findings,
+# no tags at all). Because that misclassification happens HERE — before the
+# pre-aggregation severity filter ever runs — the ratchet can never rescue it:
+# `_review_extract_highest_severity` on the (correctly stripped) clean final
+# response finds no tag at all and reports `none`, which
+# `shouldBlockFinding` ALWAYS blocks (fail-safe), so a clean stdout-fallback
+# review would block indefinitely regardless of round. The fix reuses the
+# SAME strip helper the malformed gate already validated the structure with:
+# if stripping changed the text (a genuine turn-marker capture with real
+# content after the last `codex` marker), scan ONLY that stripped final
+# response; otherwise (no structure — a legacy free-form capture, or a
+# turn-marker capture with no post-marker text, which is already `malformed`
+# and never reaches this line) scan the whole capture unchanged — the
+# original, byte-identical behavior for every non-turn-marker shape.
 #
 # Pre-#449 this classified `fail` ONLY on `[P1]` — `[P2]`/`[P3]` were purely
 # non-blocking observations with no ratchet. Under the ratchet a `[P2]`/`[P3]`
@@ -415,15 +476,189 @@ _codex_review_stdout_is_malformed() {
 # FAIL only re-queues the PR to dev, whereas a missed tag would let a blocking
 # finding through to merge. So the cheap substring match is the safe direction —
 # but ONLY once the capture is confirmed to be a review, not the prompt echoed
-# back (#252).
+# back (#252), and ONLY over the text that is actually the review (not the
+# echoed prompt's own instruction text, #481 round 4).
 _codex_review_classify_stdout() {
   local f="${1:-}"
   if _codex_review_stdout_is_malformed "$f"; then
     printf 'malformed\n'
-  elif [[ -n "$f" && -f "$f" && -r "$f" ]] && grep -qE '\[P[0123]\]' "$f" 2>/dev/null; then
+    return 0
+  fi
+  local _scan_text=""
+  if [[ -n "$f" && -f "$f" && -r "$f" ]]; then
+    local _cls_stripped _cls_original
+    _cls_stripped=$(_codex_review_strip_prompt_echo "$f") || _cls_stripped=""
+    _cls_original=$(cat -- "$f" 2>/dev/null) || _cls_original=""
+    if [[ -n "$_cls_stripped" && "$_cls_stripped" != "$_cls_original" ]]; then
+      _scan_text="$_cls_stripped"
+    else
+      _scan_text="$_cls_original"
+    fi
+  fi
+  if [[ -n "$_scan_text" ]] && grep -qE '\[P[0123]\]' <<<"$_scan_text" 2>/dev/null; then
     printf 'fail\n'
   else
     printf 'pass\n'
+  fi
+  return 0
+}
+
+# ===========================================================================
+# Issue #481 (R2, spec revision 2): strip the echoed prompt from a codex
+# review stdout capture before scoring it for severity — ONLY on the legacy
+# stdout-classify fallback route (AGENT_VERDICT_SOURCES[i]=="codex-stdout-
+# fallback" at the autonomous-review.sh call site; every other resolution
+# channel scores AGENT_VERDICT_BODIES[i] directly, per R1).
+# ===========================================================================
+# `_review_extract_highest_severity` (lib-review-severity.sh) is a per-finding
+# fail-safe scan: ANY numbered line with no `[P0]`-`[P3]` tag collapses the
+# WHOLE scan to `none` (deliberately — issue #449's own fix for a tagged
+# low-severity finding masking a genuine untagged one). A `codex review`
+# combined stdout/stderr capture, per `_run_codex_review`, has the shape
+# `<CLI header> → <user turn marker> → <echoed prompt, dozens of untagged
+# numbered checklist lines> → <reasoning/tool trace> → <codex turn marker> →
+# <final response>`, so scoring the raw capture always hits the fail-safe on
+# the echoed checklist and reports `none` regardless of what the agent
+# actually tagged in its final response.
+#
+# The boundary this helper locates is STRUCTURAL, not a bare substring
+# search: (1) a VALIDATED leading CLI header (reusing
+# `_codex_review_stdout_is_malformed`'s own header signals — the banner as
+# the first non-empty line, or the workdir:+model:+provider: triple in the
+# contiguous leading region); (2) the FIRST standalone turn-marker line
+# reading exactly `user` (column 0, no other content, outside any fenced
+# block) AFTER that header; (3) the LAST standalone turn-marker line reading
+# exactly `codex` (same column-0/exact/unfenced discipline) anywhere in the
+# file. Only text STRICTLY AFTER that last `codex` marker is returned — the
+# final response turn, never a reasoning/tool-trace turn that merely
+# precedes it.
+#
+# This deliberately does NOT search for the LAST `user` line (a review's own
+# reviewed-file content or tool-execution output could legitimately contain
+# an incidental bare `user`/`codex` word) — only the FIRST `user` marker
+# (immediately bounding the header) is ever consulted, and marker candidates
+# are restricted to column-0, exact-word, UNFENCED lines so a quoted/fenced
+# reviewed-file snippet or an indented tool-output line can never masquerade
+# as a genuine turn boundary (mirrors this file's own established
+# fenced-block-exclusion discipline from `_echo_region`/`_leading_region`
+# above). Both ``` and ~~~ fence styles toggle the same `infence` state, so a
+# tilde-fenced reviewed snippet is excluded from marker detection exactly like
+# a backtick-fenced one.
+#
+# ANY missing piece of that structure (no validated header, no `user` marker
+# after it, no `codex` marker after THAT) is fail-safe: echoes the ORIGINAL
+# content UNCHANGED, never a guessed boundary. Empty/missing/unreadable input
+# echoes empty. rc 0 ALWAYS (fail-safe under `set -euo pipefail`).
+#
+# The returned text also drops the CLI's own trailing `tokens used: <N>`
+# footer line (case-insensitive) — a token count is never review findings and
+# must never influence severity extraction.
+
+# _codex_review_strip_prompt_echo <stdout-file>
+_codex_review_strip_prompt_echo() {
+  local f="${1:-}"
+  local original=""
+  if [[ -n "$f" && -f "$f" && -r "$f" ]]; then
+    original=$(cat -- "$f" 2>/dev/null || true)  # fail-safe: a read error yields empty, never a crash
+  fi
+  [[ -n "$original" ]] || { printf '%s' "$original"; return 0; }
+
+  # Step 1: validate a leading CLI header exists at all — reuses the SAME
+  # structural signals _codex_review_stdout_is_malformed established (INV-73):
+  # the banner as the capture's first non-empty line, OR the
+  # workdir:+model:+provider: triple within the contiguous leading region (the
+  # run of lines from the top up to the first blank/fence/heading/turn-marker
+  # line). No header at all → fail-safe, return the original unchanged.
+  local _first_nonempty _has_header=false
+  _first_nonempty=$(awk 'NF{print; exit}' "$f" 2>/dev/null) || _first_nonempty=""
+  if [[ "$_first_nonempty" =~ ^OpenAI\ Codex\ v[0-9] ]]; then
+    _has_header=true
+  else
+    local _leading_region
+    _leading_region=$(awk '
+      NR==1 && $0=="" { next }
+      /^[[:space:]]*$/ { exit }
+      /^[[:space:]]*```/ { exit }
+      /^[[:space:]]*#/ { exit }
+      /^(user|codex)[[:space:]]*$/ { exit }
+      { print }
+    ' "$f" 2>/dev/null) || _leading_region=""
+    if [[ -n "$_leading_region" ]] \
+       && grep -qiE '^workdir:' <<<"$_leading_region" 2>/dev/null \
+       && grep -qiE '^model:' <<<"$_leading_region" 2>/dev/null \
+       && grep -qiE '^provider:' <<<"$_leading_region" 2>/dev/null; then
+      _has_header=true
+    fi
+  fi
+  if [[ "$_has_header" != true ]]; then
+    printf '%s' "$original"
+    return 0
+  fi
+
+  # Step 2: locate the FIRST standalone `user` turn-marker line — column 0,
+  # exact word, nothing else on the line, outside any fenced block. This is
+  # the header-owned marker: the header's own key:value/banner lines never
+  # match it, so it is genuinely the first one AFTER the header. Never search
+  # for the LAST `user` line — reviewed content quoted later could contain
+  # one incidentally.
+  local _user_line_no
+  _user_line_no=$(awk '
+    /^[[:space:]]*(```|~~~)/ { infence = !infence; next }
+    infence { next }
+    !infence && /^user[[:space:]]*$/ { print NR; exit }
+  ' "$f" 2>/dev/null) || _user_line_no=""
+  if [[ -z "$_user_line_no" ]]; then
+    printf '%s' "$original"
+    return 0
+  fi
+
+  # Step 3: locate the LAST standalone `codex` turn-marker line AFTER the
+  # `user` marker — same column-0/exact-word/unfenced discipline, PLUS a
+  # blank line immediately before it. Multiple `codex` turns are expected
+  # (reasoning, tool calls, final response); the LAST one bounds the final
+  # response, which is the only text scored.
+  #
+  # The blank-line-before requirement (round-3 review finding [P2], PR #484):
+  # every genuine turn marker in a real `codex review` capture is emitted as
+  # its own paragraph — preceded by a blank line — because the CLI always
+  # closes out the PRIOR turn's text before opening a new one. Reviewed
+  # content or captured tool output, by contrast, can legitimately contain an
+  # UN-FENCED, column-0 `codex` word flowing directly out of the preceding
+  # prose line with NO blank line before it (e.g. "Tool output follows:" then
+  # "codex" as literal quoted output). Without this check that inline word was
+  # mistaken for a later turn marker, discarding every real finding before it.
+  # A candidate on line 1 of the file trivially has no line before it, so it
+  # is never treated as blank-preceded (a marker can only be real starting
+  # from line 2 — line 1 is always inside/before the header region anyway).
+  local _codex_line_no
+  _codex_line_no=$(awk -v start="$_user_line_no" '
+    /^[[:space:]]*(```|~~~)/ { infence = !infence; prev = $0; next }
+    infence { prev = $0; next }
+    NR > start && !infence && /^codex[[:space:]]*$/ && NR > 1 && prev == "" { last = NR }
+    { prev = $0 }
+    END { if (last) print last }
+  ' "$f" 2>/dev/null) || _codex_line_no=""
+  if [[ -z "$_codex_line_no" ]]; then
+    printf '%s' "$original"
+    return 0
+  fi
+
+  # Return everything STRICTLY AFTER the last `codex` marker line, minus the
+  # CLI's own trailing `tokens used: <N>` footer (the same line
+  # `metrics_parse_tokens` reads, lib-metrics.sh) — a token count is never
+  # part of the agent's findings and must not reach the severity scanner.
+  # Case-insensitivity is done via `tolower()` (POSIX, mawk-portable) rather
+  # than gawk's `IGNORECASE` extension — this subsystem's awk must stay
+  # portable to any POSIX awk (mirrors the `_codex_capture_thread` discipline
+  # documented in INV-91).
+  local _stripped
+  _stripped=$(awk -v boundary="$_codex_line_no" '
+    NR > boundary && tolower($0) !~ /^[[:space:]]*tokens used:[[:space:]]*[0-9]+[[:space:]]*$/ { print }
+  ' "$f" 2>/dev/null) || _stripped=""
+  if [[ -z "$_stripped" ]]; then
+    printf '%s' "$original"
+  else
+    printf '%s' "$_stripped"
   fi
   return 0
 }
@@ -442,6 +677,14 @@ _codex_review_classify_stdout() {
 #
 #   pass → a one-line passing summary noting codex review ran (no blocking findings).
 #   fail → the captured codex review findings text (so the dev agent sees them).
+#
+# [INV-132] (#481): this composer is UNCHANGED by the severity-extraction fix —
+# it still embeds the raw capture (echo included) as the human-facing comment
+# body. R2's echo-stripping is scoped to SEVERITY SCORING only (the
+# `_sev_text` selection in autonomous-review.sh), not to what gets posted for
+# a human reader; the wrapper separately records this agent's verdict SOURCE
+# as `codex-stdout-fallback` so the severity loop knows to score the
+# stripped RAW CAPTURE (`AGENT_CODEX_LOGS[i]`) instead of this composed body.
 _codex_review_compose_body() {
   local verdict="${1:-pass}" f="${2:-}"
   local cap=50000 text=""
