@@ -751,17 +751,35 @@ _codex_review_full_response_region() {
     return 0
   fi
 
-  # Step 3 — the ONE divergence from `_codex_review_strip_prompt_echo`:
-  # locate the FIRST standalone `codex` marker after the `user` marker — same
-  # column-0/exact-word/unfenced/blank-line-preceded discipline as step 3
-  # there, but stopping at the FIRST match (`print NR; exit`) rather than
-  # tracking the LAST one across the whole file.
+  # Step 3 — the divergence from `_codex_review_strip_prompt_echo`: locate
+  # the FIRST standalone `codex` marker after the `user` marker — same
+  # column-0/exact-word/unfenced discipline as step 3 there, but WITHOUT the
+  # blank-line-preceded requirement, and stopping at the FIRST match
+  # (`print NR; exit`) rather than tracking the LAST one across the file.
+  #
+  # Dropping blank-line-precedence here (silent-failure-hunter finding,
+  # issue #490): that requirement exists in the LAST-marker search to REJECT
+  # a spurious inline `codex` word so the search falls back to an EARLIER,
+  # genuine marker — safe, because "earlier" is exactly the direction a
+  # LAST-marker search needs when its top candidate is disqualified. A
+  # FIRST-marker search is the mirror image: if the requirement disqualified
+  # the genuinely first marker (e.g. it directly follows the echoed prompt
+  # with no blank separator), the search would advance to a LATER candidate
+  # instead — excluding everything between the two from the region,
+  # including any real finding in a first codex-role turn. That is exactly
+  # the class of bug this whole fix exists to close, reintroduced via the
+  # borrowed discipline. Accepting the raw FIRST column-0/exact-word/
+  # unfenced `codex` line — even a spurious one inside the echoed prompt
+  # itself — only ever WIDENS the region (it can start no later than the
+  # genuine first codex-role turn), which can never exclude a real finding;
+  # it can at most include a little extra untagged prompt text, which
+  # _review_extract_highest_severity's own per-finding fail-safe already
+  # handles (collapses to `none`, the documented safe-non-demotion residual).
   local _codex_line_no
   _codex_line_no=$(awk -v start="$_user_line_no" '
-    /^[[:space:]]*(```|~~~)/ { infence = !infence; prev = $0; next }
-    infence { prev = $0; next }
-    NR > start && !infence && /^codex[[:space:]]*$/ && NR > 1 && prev == "" { print NR; exit }
-    { prev = $0 }
+    /^[[:space:]]*(```|~~~)/ { infence = !infence; next }
+    infence { next }
+    NR > start && !infence && /^codex[[:space:]]*$/ { print NR; exit }
   ' "$f" 2>/dev/null) || _codex_line_no=""
   if [[ -z "$_codex_line_no" ]]; then
     printf '%s' "$original"

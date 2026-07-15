@@ -3363,7 +3363,6 @@ for _i in "${!AGENT_NAMES[@]}"; do
     # AGENT_VERDICT_BODIES[i], identical to the non-codex path (R1).
     _sev_text="${AGENT_VERDICT_BODIES[$_i]:-}"
   fi
-  AGENT_HIGHEST_SEVERITY[$_i]=$(_review_extract_highest_severity "$_sev_text")
   _pre_filter_verdict="${AGENT_VERDICTS[$_i]}"
   if [[ "$_is_codex_stdout_fallback" == true ]]; then
     # [INV-133] (#490): corroborate a would-be demotion against the wider
@@ -3372,8 +3371,28 @@ for _i in "${!AGENT_NAMES[@]}"; do
     # (`_sev_text`) and discard a genuine [P0]/[P1] finding that precedes
     # it, silently reducing the scored severity. Every other resolution
     # channel is unaffected (no region concept applies to a rendered body).
+    #
+    # [pr-test-analyzer finding]: AGENT_HIGHEST_SEVERITY MUST be computed
+    # via the matching `_review_highest_severity_corroborated` helper, not
+    # a bare `_review_extract_highest_severity` on either text alone.
+    # AGENT_HIGHEST_SEVERITY feeds `_aggregate_has_p0p1_fail` below —
+    # INV-127's own terminal-floor gate for the round-cap breaker. Scoring
+    # only the tail would report P2 even on a refused demotion (the region
+    # held the real P1), silently defeating that breaker for the hijack
+    # scenario this fix exists for and turning the documented "eventually
+    # stalls to an operator" residual into an unbounded loop. Scoring the
+    # region with the full per-finding extractor is ALSO wrong (a
+    # different, sibling bug the corroboration filter itself avoids via
+    # `_review_region_has_terminal_tag`'s bare-tag scan): the region
+    # includes reasoning/tool-call turns, which routinely contain ordinary
+    # untagged numbered prose that would collapse the region's own
+    # extraction to `none` for many ORDINARY clean reviews. The dedicated
+    # helper mirrors the filter's own branch structure so the two never
+    # disagree about which text drove a given round's decision.
+    AGENT_HIGHEST_SEVERITY[$_i]=$(_review_highest_severity_corroborated "$_sev_text" "$_sev_region_text" "$REVIEW_ROUND")
     AGENT_VERDICTS[$_i]=$(_review_apply_severity_filter_corroborated "${AGENT_VERDICTS[$_i]}" "$_sev_text" "$_sev_region_text" "$REVIEW_ROUND")
   else
+    AGENT_HIGHEST_SEVERITY[$_i]=$(_review_extract_highest_severity "$_sev_text")
     AGENT_VERDICTS[$_i]=$(_review_apply_severity_filter "${AGENT_VERDICTS[$_i]}" "$_sev_text" "$REVIEW_ROUND")
   fi
   if [[ "$_pre_filter_verdict" == "fail" && "${AGENT_VERDICTS[$_i]}" == "pass" ]]; then
