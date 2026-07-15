@@ -148,6 +148,91 @@ _review_apply_severity_filter() {
   return 0
 }
 
+# _review_apply_severity_filter_corroborated <verdict> <tail-text> <region-text> <round>
+#
+# Issue #490: the codex-stdout-fallback lane's ONLY input to
+# `_review_apply_severity_filter` is `<tail-text>` — the structurally
+# stripped text strictly after the LAST turn marker
+# (`_codex_review_strip_prompt_echo`, [INV-132]). Final-response content that
+# QUOTES tool/reviewed-file output can legitimately contain a line of the
+# exact turn-marker shape (column-0, exact word, unfenced,
+# blank-line-preceded); such a quoted line wins the LAST-marker search and
+# discards every finding before it, including a genuine `[P0]`/`[P1]`. Three
+# prior hardening rounds narrowed the marker heuristic itself and each
+# produced the same adjacent hole — an unstructured text interleave has no
+# textual marker discipline with a floor. The fix changes the demotion
+# SEMANTICS instead: require agreement between two independent scans before
+# ever trusting a demotion on this lane.
+#
+# `<tail-text>` is the same narrow, LAST-marker-bounded text
+# `_review_apply_severity_filter` already scores (`S_tail`).
+# `<region-text>` is the WIDER region from the FIRST codex-role turn marker
+# to EOF — every codex-role turn (reasoning, tool-call, AND final-response
+# turns), never just the final response
+# (`_codex_review_full_response_region`, `adapters/codex.sh`) — its own
+# severity is `S_region`.
+#
+# Behavior: identical to `_review_apply_severity_filter` EXCEPT when it is
+# about to demote (S_tail does not block at <round>): in that case, ALSO
+# require that `S_region` is not P0/P1-class (see the case arms below —
+# mirrors `_aggregate_has_p0p1_fail`'s own terminal-floor classification:
+# P0, P1, "none", and any unrecognized token all count; only P2/P3 do not).
+# If `S_region` IS P0/P1-class, the demotion is refused — the agent's
+# verdict is treated as undemotable THIS round (the same fail-safe handling
+# `shouldBlockFinding` already gives an untagged/"none" severity) — because
+# a genuine terminal-floor finding is structurally guaranteed to be
+# somewhere in the wider region (the region starts at the FIRST codex-role
+# turn, immediately after the echoed prompt — nothing on this lane can ever
+# precede it, so a quoted marker deeper in the transcript can only ever
+# EXCLUDE a real finding from the narrower tail, never from this region).
+#
+# Consequence — never a false PASS, sometimes an extra non-converging round:
+#   - the hijack shape: S_tail=P2 (the discarded [P1] sits before the quoted
+#     marker), S_region=P1 → refused → stays `fail` (fail-closed; the
+#     scenario this fix exists for).
+#   - a clean P2-only capture: S_tail=P2, S_region=P2 (no P0/P1 anywhere in
+#     the region) → corroborated → demotes normally (no over-correction).
+#   - documented residual: a reasoning/tool-trace turn that ITSELF quotes a
+#     P0/P1 tag (e.g. codex reading a PRIOR review comment via `gh`, which
+#     quoted a `[P1]`) also makes S_region P0/P1-class even when the actual
+#     final response is only P2/P3 — demotion is suppressed for THAT round
+#     too. This is the safe direction (the loop continues / eventually stalls
+#     to an operator via INV-127), never a false PASS — accepted rather than
+#     chased with a fourth heuristic rung (out of scope per issue #490).
+_review_apply_severity_filter_corroborated() {
+  local verdict="${1:-}" tail_text="${2:-}" region_text="${3:-}" round="${4:-1}"
+  if [[ "$verdict" != "fail" ]]; then
+    printf '%s\n' "$verdict"
+    return 0
+  fi
+  local sev_tail
+  sev_tail=$(_review_extract_highest_severity "$tail_text")
+  if shouldBlockFinding "$round" "$sev_tail"; then
+    printf 'fail\n'
+    return 0
+  fi
+  # About to demote (sev_tail alone does not block at this round — in
+  # practice always P2/P3, since P0/P1/"none" always block via
+  # shouldBlockFinding's own case arms and would have returned above).
+  # Corroborate against the wider region before trusting it.
+  local sev_region
+  sev_region=$(_review_extract_highest_severity "$region_text")
+  case "$sev_region" in
+    P2|P3)
+      # The wider region agrees: no terminal-floor severity anywhere in it
+      # either. The tail-only demotion is corroborated.
+      printf 'pass\n'
+      ;;
+    *)
+      # sev_region is P0/P1-class (P0, P1, "none", or any unrecognized
+      # token) while the tail's own severity is not — refuse the demotion,
+      # fail-closed.
+      printf 'fail\n'
+      ;;
+  esac
+  return 0
+}
+
 # _review_severity_prompt_block <round>
 #
 # Renders the shared severity-tagging instruction text injected into BOTH the

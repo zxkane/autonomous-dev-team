@@ -1539,6 +1539,87 @@ assert_eq "TC-CXSTRIP-011c severity extraction on the unfenced-inline-marker fix
 
 # ===========================================================================
 echo
+echo "=== TC-CXREGION-001..008: _codex_review_full_response_region (adapters/codex.sh, issue #490) ==="
+# ===========================================================================
+# _codex_review_full_response_region locates the FIRST codex-role turn marker
+# (mirrors _codex_review_strip_prompt_echo's steps 1-2 exactly, then diverges
+# at step 3: FIRST match, not LAST) and returns everything to EOF.
+
+CX_HIJACK_FIXTURE="$FIXTURES/codex-review-stdout-turns-blankline-hijack.txt"
+assert_file_exists "TC-CXREGION setup: blankline-hijack fixture exists" "$CX_HIJACK_FIXTURE"
+
+_cxregion_hijack=$(_codex_review_full_response_region "$CX_HIJACK_FIXTURE" 2>/dev/null || true)
+assert_contains "TC-CXREGION-001a hijack fixture: the genuine [P1] finding is inside the region" \
+  "$_cxregion_hijack" '[P1] src/wrapper.sh:10'
+assert_contains "TC-CXREGION-001b hijack fixture: the trailing [P2] finding is also inside the region" \
+  "$_cxregion_hijack" '[P2] tests/fixture.txt:1'
+assert_eq "TC-CXREGION-001c hijack fixture: no 'tokens used' footer leaks into the region" "" \
+  "$(grep -io 'tokens used' <<<"$_cxregion_hijack")"
+
+# TC-CXREGION-002: same fail-safe contract as the strip helper — a capture
+# with no header at all is returned UNCHANGED.
+TMP_CXREGION002=$(mktemp)
+printf '%s\n' 'A short clean review with no blocking findings.' '' 'Summary: looks good to merge.' > "$TMP_CXREGION002"
+assert_eq "TC-CXREGION-002 capture with no header at all is returned UNCHANGED" \
+  "$(cat "$TMP_CXREGION002")" "$(_codex_review_full_response_region "$TMP_CXREGION002")"
+rm -f "$TMP_CXREGION002"
+
+# TC-CXREGION-003: empty/missing/empty-arg fail-safe.
+TMP_CXREGION003=$(mktemp)
+assert_eq "TC-CXREGION-003a empty file → empty, rc 0 (fail-safe)" "" \
+  "$(_codex_review_full_response_region "$TMP_CXREGION003")"
+rm -f "$TMP_CXREGION003"
+assert_eq "TC-CXREGION-003b missing file → empty, rc 0 (fail-safe)" "" \
+  "$(_codex_review_full_response_region /nonexistent/path/$$)"
+assert_eq "TC-CXREGION-003c empty arg → empty, rc 0 (fail-safe)" "" \
+  "$(_codex_review_full_response_region "")"
+
+# TC-CXREGION-004: header present but no `user` marker at all → unchanged.
+TMP_CXREGION004=$(mktemp)
+printf '%s\n' 'OpenAI Codex v0.139.0' '--------' 'workdir: /tmp/x' 'model: m' 'provider: p' '--------' '' 'Direct review text, no turn markers.' '[P2] a real finding here.' > "$TMP_CXREGION004"
+assert_eq "TC-CXREGION-004 header present but no user marker → whole capture unchanged (fail-safe)" \
+  "$(cat "$TMP_CXREGION004")" "$(_codex_review_full_response_region "$TMP_CXREGION004")"
+rm -f "$TMP_CXREGION004"
+
+# TC-CXREGION-005: `user` marker present but no `codex` marker after it →
+# unchanged (never guess a boundary that isn't there).
+TMP_CXREGION005=$(mktemp)
+printf '%s\n' 'OpenAI Codex v0.139.0' '--------' 'workdir: /tmp/x' 'model: m' 'provider: p' '--------' '' 'user' 'echoed prompt text with no findings' > "$TMP_CXREGION005"
+assert_eq "TC-CXREGION-005 user marker present but no codex marker after it → whole capture unchanged (fail-safe)" \
+  "$(cat "$TMP_CXREGION005")" "$(_codex_review_full_response_region "$TMP_CXREGION005")"
+rm -f "$TMP_CXREGION005"
+
+# TC-CXREGION-006: multiple `codex` turns — the region starts at the FIRST
+# one (reasoning), unlike the strip helper's LAST-marker (final response
+# only) — so earlier reasoning/tool-trace text IS included here.
+TMP_CXREGION006=$(mktemp)
+printf '%s\n' 'OpenAI Codex v0.139.0' '--------' 'workdir: /tmp/x' 'model: m' 'provider: p' '--------' '' 'user' 'echoed prompt' '' 'codex' 'Reasoning turn text, no findings here.' '' 'codex' '[P1] the real final finding.' > "$TMP_CXREGION006"
+_cxregion006=$(_codex_review_full_response_region "$TMP_CXREGION006")
+assert_contains "TC-CXREGION-006a multi-turn capture: region INCLUDES the earlier reasoning turn (unlike the tail-only strip helper)" \
+  "$_cxregion006" 'Reasoning turn text'
+assert_contains "TC-CXREGION-006b multi-turn capture: region also includes the final finding" \
+  "$_cxregion006" '[P1] the real final finding'
+rm -f "$TMP_CXREGION006"
+
+# TC-CXREGION-007: over-strip fixture (a fenced quote of the literal words
+# user/codex/system inside reviewed content) — the FIRST marker is still the
+# genuine one BEFORE the fenced quote, so the fenced quote does not create a
+# false EARLIER boundary; the real finding still survives in the region.
+_cxregion007=$(_codex_review_full_response_region "$CX_TURNS_OVERSTRIP_FIXTURE")
+assert_contains "TC-CXREGION-007 over-strip fixture: real [P2] finding survives inside the region" \
+  "$_cxregion007" '[P2] src/roles.ts:12'
+
+# TC-CXREGION-008: the SAME column-0/exact-word/unfenced/blank-line-preceded
+# discipline applies to the FIRST-marker search too — an indented or
+# trailing-content variant is not a marker.
+TMP_CXREGION008=$(mktemp)
+printf '%s\n' 'OpenAI Codex v0.139.0' '--------' 'workdir: /tmp/x' 'model: m' 'provider: p' '--------' '' '  user' 'not a real marker (indented)' 'codexreview not a real marker either' > "$TMP_CXREGION008"
+assert_eq "TC-CXREGION-008 indented/trailing-content lines are not markers → whole capture unchanged (fail-safe)" \
+  "$(cat "$TMP_CXREGION008")" "$(_codex_review_full_response_region "$TMP_CXREGION008")"
+rm -f "$TMP_CXREGION008"
+
+# ===========================================================================
+echo
 echo "=== TC-SEVEXT-011..013: simulated 5-round P2-only codex loop demotes at round 5 (spec revision 2 AC procedure) ==="
 # ===========================================================================
 # The acceptance-criteria scenario, driven through the PRODUCTION helper
@@ -1564,6 +1645,112 @@ assert_eq "TC-SEVEXT-012c rounds 1-4 stay fail (the ratchet's own floor, unmodif
   "$(_review_apply_severity_filter fail "$_sevext5_stripped" 1) $(_review_apply_severity_filter fail "$_sevext5_stripped" 2) $(_review_apply_severity_filter fail "$_sevext5_stripped" 3) $(_review_apply_severity_filter fail "$_sevext5_stripped" 4)"
 assert_eq "TC-SEVEXT-013 INV-127's counter (via _aggregate_has_p0p1_fail) stays false across all 5 rounds" "false false false false false" \
   "$(_aggregate_has_p0p1_fail fail "$_sevext5_sev") $(_aggregate_has_p0p1_fail fail "$_sevext5_sev") $(_aggregate_has_p0p1_fail fail "$_sevext5_sev") $(_aggregate_has_p0p1_fail fail "$_sevext5_sev") $(_aggregate_has_p0p1_fail fail "$_sevext5_sev")"
+
+# ===========================================================================
+echo
+echo "=== TC-CORROB-001..013: [INV-133] fail-closed severity corroboration against the full codex-turn region (issue #490) ==="
+# ===========================================================================
+# _codex_review_full_response_region (adapters/codex.sh) locates the FIRST
+# codex-role turn marker (not the LAST) and returns everything to EOF — every
+# codex-role turn, not just the final response. _review_apply_severity_filter_
+# corroborated (lib-review-severity.sh) requires the wider region to agree
+# before ever trusting a tail-only demotion on the codex-stdout-fallback lane.
+# CX_HIJACK_FIXTURE was already resolved + existence-checked in the
+# TC-CXREGION section above.
+
+# TC-CORROB-001/002: the hijack shape — a quoted, blank-line-preceded,
+# unfenced, column-0 `codex` line inside the final response wins the
+# LAST-marker search (_codex_review_strip_prompt_echo), discarding the
+# genuine [P1] finding that precedes it. The tail alone scores P2.
+_corrob_hijack_tail=$(_codex_review_strip_prompt_echo "$CX_HIJACK_FIXTURE")
+assert_eq "TC-CORROB-001 hijack fixture: LAST-marker tail alone scores P2 (the [P1] is discarded by the quoted marker)" "P2" \
+  "$(_review_extract_highest_severity "$_corrob_hijack_tail")"
+_corrob_hijack_region=$(_codex_review_full_response_region "$CX_HIJACK_FIXTURE")
+assert_eq "TC-CORROB-002 hijack fixture: FIRST-marker region scores P1 (the genuine finding is still inside the wider region)" "P1" \
+  "$(_review_extract_highest_severity "$_corrob_hijack_region")"
+
+# TC-CORROB-003: the REGRESSION this issue exists to close — the uncorroborated
+# filter (_review_apply_severity_filter, tail only) DOES demote at round 5,
+# which is exactly the false-PASS bug (proves the bug exists absent the fix).
+assert_eq "TC-CORROB-003 regression: the OLD uncorroborated filter demotes the hijack fixture at round 5 (false PASS, pre-fix behavior)" "pass" \
+  "$(_review_apply_severity_filter fail "$_corrob_hijack_tail" 5)"
+
+# TC-CORROB-004: the FIX — the corroborated filter refuses the demotion at
+# round 5 because the region shows P1 while the tail shows P2. Verdict stays
+# `fail` at every round (never a false PASS, at round 5 or beyond).
+assert_eq "TC-CORROB-004 fix: the corroborated filter REFUSES the demotion at round 5 (stays fail, no false PASS)" "fail" \
+  "$(_review_apply_severity_filter_corroborated fail "$_corrob_hijack_tail" "$_corrob_hijack_region" 5)"
+assert_eq "TC-CORROB-004b fix: still fail at a much later round (round 10)" "fail" \
+  "$(_review_apply_severity_filter_corroborated fail "$_corrob_hijack_tail" "$_corrob_hijack_region" 10)"
+
+# TC-CORROB-005: no over-correction — the EXISTING clean P2-only fixture
+# (codex-review-stdout-turns-p2-only.txt) has NO P0/P1 anywhere in the wider
+# region either, so the corroborated filter demotes it at round 5 exactly
+# like the uncorroborated one (convergence is preserved for the ordinary
+# case; the fix only refuses demotion when the region and tail disagree).
+_corrob_p2_tail=$(_codex_review_strip_prompt_echo "$CX_TURNS_P2_FIXTURE")
+_corrob_p2_region=$(_codex_review_full_response_region "$CX_TURNS_P2_FIXTURE")
+assert_eq "TC-CORROB-005a clean P2-only fixture: region also scores P2 (agrees with the tail)" "P2" \
+  "$(_review_extract_highest_severity "$_corrob_p2_region")"
+assert_eq "TC-CORROB-005b clean P2-only fixture: corroborated filter still demotes at round 5 (no over-correction)" "pass" \
+  "$(_review_apply_severity_filter_corroborated fail "$_corrob_p2_tail" "$_corrob_p2_region" 5)"
+assert_eq "TC-CORROB-005c clean P2-only fixture: corroborated filter still blocks at round 1 (ratchet floor unmodified)" "fail" \
+  "$(_review_apply_severity_filter_corroborated fail "$_corrob_p2_tail" "$_corrob_p2_region" 1)"
+
+# TC-CORROB-006: pass/unavailable/timed-out verdicts pass through the
+# corroborated filter unchanged, exactly like the uncorroborated one (no
+# region concept applies to a non-fail verdict).
+assert_eq "TC-CORROB-006a pass passes through unchanged" "pass" \
+  "$(_review_apply_severity_filter_corroborated pass 'irrelevant' 'irrelevant' 5)"
+assert_eq "TC-CORROB-006b unavailable passes through unchanged" "unavailable" \
+  "$(_review_apply_severity_filter_corroborated unavailable '' '' 5)"
+assert_eq "TC-CORROB-006c timed-out passes through unchanged" "timed-out" \
+  "$(_review_apply_severity_filter_corroborated timed-out '' '' 5)"
+
+# TC-CORROB-007: a fail whose OWN tail already blocks at this round (e.g. a
+# tail P1 at any round, or a tail P2 at round <=4) never reaches the region
+# corroboration check at all — stays fail regardless of what the region says
+# (mirrors _review_apply_severity_filter's own early-return; corroboration
+# only gates an actual would-be DEMOTION).
+assert_eq "TC-CORROB-007a tail P1 stays fail even if region were somehow P2/P3 (tail already blocks, no region check needed)" "fail" \
+  "$(_review_apply_severity_filter_corroborated fail '[P1] a real blocking finding' '[P3] unrelated' 5)"
+assert_eq "TC-CORROB-007b tail P2 at round 1 stays fail (ratchet floor, no region check needed)" "fail" \
+  "$(_review_apply_severity_filter_corroborated fail '[P2] narrow gap' '[P2] narrow gap' 1)"
+
+# TC-CORROB-008: documented residual — a region carrying an UNTAGGED
+# ("none") finding (e.g. a reasoning/tool-trace turn quoting a prior review
+# comment's [P1] would extract as P1, but an untagged numbered line in the
+# region collapses per-finding extraction to "none") also refuses the
+# demotion — "none" is P0/P1-class per _aggregate_has_p0p1_fail's own
+# vocabulary (fail-safe: an unscoreable region is never treated as safe to
+# demote against).
+assert_eq "TC-CORROB-008 region extracting as 'none' (untagged) also refuses the demotion (fail-safe residual)" "fail" \
+  "$(_review_apply_severity_filter_corroborated fail '[P2] narrow gap' $'1. untagged finding\n2. another untagged finding' 5)"
+
+# TC-CORROB-009: wiring pin — the wrapper computes the region text ONLY on
+# the codex-stdout-fallback lane, via the new region helper, and routes
+# through the corroborated filter on that lane specifically.
+corrob_wire_region=$(awk '/^_any_severity_demotion=false$/{f=1} f{print} f && /AGENT_VERDICTS\[\$_i\]=\$\(_review_apply_severity_filter "\$\{AGENT_VERDICTS/{exit}' "$WRAPPER")
+assert_contains "TC-CORROB-009a wrapper computes the region text via _codex_review_full_response_region on the stdout-fallback lane" \
+  "$corrob_wire_region" '_codex_review_full_response_region "${AGENT_CODEX_LOGS[$_i]}"'
+assert_contains "TC-CORROB-009b wrapper routes the stdout-fallback lane through the corroborated filter" \
+  "$corrob_wire_region" '_review_apply_severity_filter_corroborated "${AGENT_VERDICTS[$_i]}" "$_sev_text" "$_sev_region_text" "$REVIEW_ROUND"'
+assert_contains "TC-CORROB-009c every other resolution channel still uses the plain (uncorroborated) filter" \
+  "$corrob_wire_region" '_review_apply_severity_filter "${AGENT_VERDICTS[$_i]}" "$_sev_text" "$REVIEW_ROUND"'
+
+# TC-CORROB-010: end-to-end simulation — a 5-round new-head-every-round
+# progression whose EVERY round is the hijack shape must NEVER demote,
+# unlike the pure-P2 progression (TC-SEVEXT-011..013) which demotes at
+# round 5. Confirms the fix holds across the round range the severity
+# ratchet actually loosens over, not just at a single spot-checked round.
+_corrob10_marker=""
+_corrob10_round=0
+for _h in hjhead1 hjhead2 hjhead3 hjhead4 hjhead5 hjhead6 hjhead7; do
+  _corrob10_round=$(_review_round_next_count "$_corrob10_marker")
+  _corrob10_marker=$(_review_round_marker 490 "$_h" "$_corrob10_round")
+  _corrob10_result=$(_review_apply_severity_filter_corroborated fail "$_corrob_hijack_tail" "$_corrob_hijack_region" "$_corrob10_round")
+  assert_eq "TC-CORROB-010 round ${_corrob10_round}: hijack fixture never demotes (stays fail)" "fail" "$_corrob10_result"
+done
 
 echo
 echo "=== Summary ==="

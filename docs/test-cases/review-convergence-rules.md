@@ -20,7 +20,9 @@ itself is too heavy to run end-to-end.
 | `skills/autonomous-dispatcher/scripts/lib-review-e2e.sh` | R3: `_e2e_ci_green_precheck` pre-check helper feeding the E2E gate's evidence-present signal |
 | `skills/autonomous-dispatcher/scripts/lib-review-artifact.sh` | `_verdict_body_from_artifact_json` renders the OPTIONAL `severity` field inline so the JSON verdict-artifact channel (INV-78, the primary resolution path) feeds real severity into the ratchet |
 | `docs/pipeline/schemas/verdict-artifact.schema.json` | New OPTIONAL `severity` enum (`P0`\|`P1`\|`P2`\|`P3`) on the finding definition |
-| `skills/autonomous-dispatcher/scripts/autonomous-review.sh` | Wiring: severity filter runs pre-aggregation; INV-127 breaker runs in the FAIL substantive branch before `emit_verdict_trailer`; R3 pre-check runs before `_classify_e2e_gate`; empty-`PR_HEAD_SHA` guard on the R1 round counter; demoted-verdict body re-rendering |
+| `skills/autonomous-dispatcher/scripts/autonomous-review.sh` | Wiring: severity filter runs pre-aggregation; INV-127 breaker runs in the FAIL substantive branch before `emit_verdict_trailer`; R3 pre-check runs before `_classify_e2e_gate`; empty-`PR_HEAD_SHA` guard on the R1 round counter; demoted-verdict body re-rendering; [INV-133] (issue #490) routes the codex-stdout-fallback lane through the corroborated filter with a second, wider region text |
+| `skills/autonomous-dispatcher/scripts/adapters/codex.sh` ([INV-133], issue #490) | NEW `_codex_review_full_response_region` — locates the FIRST codex-role turn marker (not the LAST) and returns everything to EOF, for corroborating a would-be severity demotion |
+| `skills/autonomous-dispatcher/scripts/lib-review-severity.sh` ([INV-133], issue #490) | NEW `_review_apply_severity_filter_corroborated` — the codex-stdout-fallback lane's filter; refuses a demotion when the wider region disagrees with the narrow tail |
 | `tests/unit/test-review-convergence-rules.sh` (NEW) | This regression suite |
 
 ## Test scenarios
@@ -189,6 +191,41 @@ trip-report cutoff and this reset cutoff.
 | TC-REVIEW-CONV-067 | [CRITICAL, silent-failure-hunter finding on the reset fix above] A bot-authored FAIL body that merely quotes/discusses a prior `<!-- review-verdict: passed -->` trailer in prose (not as a bare, standalone trailer) | does NOT reset the series — the reset-cutoff test is full-body anchored (`^...$`), not a bare substring `test()`, mirroring `lib-dispatch.sh::authentic_verdict()`'s own anchored pattern (which itself was hardened against this exact class of false-match in earlier review rounds) |
 | TC-REVIEW-CONV-067b | Same fixture fed into `_review_cap_next_count` | returns `4` (accumulates), not falsely reset to `1` |
 | TC-REVIEW-CONV-068 | A bot-authored FAIL body mentioning "circuit-breaker" in passing (not the exact trip heading, no marker fence) | is not misread as a trip report — the genuine later marker still wins |
+
+### Group K — [INV-133] fail-closed severity corroboration against the full codex-turn region (issue #490, TC-CXREGION-001..008, TC-CORROB-001..010)
+
+[INV-132]'s `_codex_review_strip_prompt_echo` locates the final-response
+boundary by the LAST standalone `codex` turn marker. Final-response content
+that QUOTES tool/reviewed-file output can legitimately contain a line of
+that exact shape, hijacking the search and discarding a genuine finding
+that precedes it — reducing a real `[P1]` to a `[P2]`-only tail, which
+[INV-129]'s ratchet then demotes to a false PASS at round 5+. The fix adds a
+SECOND, wider scan (`_codex_review_full_response_region`: FIRST codex-role
+marker to EOF) and requires the two scans to agree before ever trusting a
+demotion (`_review_apply_severity_filter_corroborated`) — a semantics
+change, not a fifth heuristic-narrowing round (three prior rounds each
+narrowed the marker shape and each produced this same adjacent hole; no
+textual marker discipline has a floor against quoted content).
+
+| ID | Scenario | Expected |
+|----|----------|----------|
+| TC-CXREGION-001 | `_codex_review_full_response_region` on the new hijack fixture | both the genuine `[P1]` AND the trailing `[P2]` are inside the region; the `tokens used:` footer is stripped |
+| TC-CXREGION-002 | Capture with no header at all | returned UNCHANGED (fail-safe, mirrors `_codex_review_strip_prompt_echo`) |
+| TC-CXREGION-003 | Empty file / missing file / empty arg | empty, rc 0 (fail-safe) |
+| TC-CXREGION-004 | Header present, no `user` marker | returned UNCHANGED (fail-safe) |
+| TC-CXREGION-005 | `user` marker present, no `codex` marker after it | returned UNCHANGED (fail-safe — never guess a boundary) |
+| TC-CXREGION-006 | Multiple `codex` turns (reasoning, then final response) | the region INCLUDES the earlier reasoning-turn text — the opposite of the tail-only strip helper, which excludes everything but the final response |
+| TC-CXREGION-007 | The existing over-strip fixture (a fenced quote of `user`/`codex`/`system`) | the real `[P2]` finding still survives — the FIRST-marker search is not fooled by a fenced quote either |
+| TC-CXREGION-008 | Indented/trailing-content pseudo-markers | rejected, same column-0/exact-word discipline as the tail-only search |
+| TC-CORROB-001/002 | The hijack fixture: tail-only severity vs. region severity | tail = `P2` (the `[P1]` discarded); region = `P1` (still visible in the wider scan) |
+| TC-CORROB-003 | Regression pin: the OLD, uncorroborated `_review_apply_severity_filter` on the hijack fixture at round 5 | demotes to `pass` — proves the bug exists absent the fix |
+| TC-CORROB-004 | The FIX: `_review_apply_severity_filter_corroborated` on the hijack fixture at round 5 (and round 10) | REFUSES the demotion — stays `fail` (no false PASS, at round 5 or any later round) |
+| TC-CORROB-005 | No over-correction: the existing clean P2-only fixture, corroborated filter, round 5 vs. round 1 | demotes normally at round 5 (region agrees, no P0/P1 anywhere); still blocks at round 1 (ratchet floor unmodified) |
+| TC-CORROB-006 | `pass`/`unavailable`/`timed-out` verdicts through the corroborated filter | pass through unchanged (no region concept applies) |
+| TC-CORROB-007 | A tail severity that ALREADY blocks at this round (e.g. tail `[P1]`, or tail `[P2]` at round ≤4) | never reaches the region check at all — corroboration only gates an actual would-be demotion |
+| TC-CORROB-008 | Documented residual: the region extracts as `none` (untagged) | ALSO refuses the demotion — fail-safe; an unscoreable region is never "safe to demote against" |
+| TC-CORROB-009 | Wiring pins | the wrapper computes the region text via `_codex_review_full_response_region` ONLY on the codex-stdout-fallback lane, and routes that lane through the corroborated filter while every other channel keeps using the plain filter |
+| TC-CORROB-010 | End-to-end: a 7-round new-head-every-round simulation, every round the hijack shape | never demotes at ANY round across the ratchet's active range (round 1 through round 7) |
 
 ## Acceptance criteria for this change (pre-merge verifiable)
 

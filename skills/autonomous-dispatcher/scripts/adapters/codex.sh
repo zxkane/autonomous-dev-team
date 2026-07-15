@@ -663,6 +663,123 @@ _codex_review_strip_prompt_echo() {
   return 0
 }
 
+# _codex_review_full_response_region <stdout-file>
+#
+# Issue #490 (fail-closed corroboration, not another turn-marker heuristic
+# rung): locates the SAME structural header + FIRST `user` marker
+# `_codex_review_strip_prompt_echo` uses, but then finds the FIRST standalone
+# `codex` turn-marker line after it — not the LAST — and returns EVERYTHING
+# from that point to EOF: every codex-role turn (reasoning, tool-call, AND
+# final-response turns alike), not just the final response.
+#
+# WHY: `_codex_review_strip_prompt_echo`'s LAST-marker search is exactly right
+# for isolating "the final response text" — but a final response that QUOTES
+# tool/reviewed-file output can legitimately contain a line of the exact
+# turn-marker shape (column-0, exact word, unfenced, blank-line-preceded —
+# the round-3 hardening, [INV-132]). Such a quoted line wins the LAST-marker
+# search and discards every finding BEFORE it, including a genuine blocking
+# one. `_review_apply_severity_filter_corroborated` (lib-review-severity.sh)
+# cross-checks the tail's severity against THIS wider region before ever
+# demoting a `fail`: because this function anchors on the FIRST `codex`
+# marker (immediately after the echoed prompt), no quoted marker deeper in
+# the transcript can ever exclude a genuine finding from it — the only way a
+# real finding is missing from this region is if it precedes the FIRST codex
+# turn, which is structurally impossible (the ONLY thing before the first
+# `codex` marker is the echoed prompt, the `user` turn's content, never the
+# agent's own findings).
+#
+# Deliberately NOT a narrowing of the turn-marker heuristic (issue #490's own
+# "Out of Scope" — no new shape requirement is added to what counts as a
+# marker; the SAME column-0/exact-word/unfenced/blank-line-preceded
+# discipline `_codex_review_strip_prompt_echo` step 3 uses is reused
+# verbatim, just applied to find the FIRST match instead of the LAST). Steps
+# 1-2 (header validation + FIRST `user` marker) are duplicated rather than
+# shared with `_codex_review_strip_prompt_echo`, so this stays a standalone,
+# independently-testable pure function (mirrors this pipeline's established
+# duplicate-rather-than-share discipline for parallel pure helpers, e.g.
+# `_aggregate_has_p0p1_fail` vs `shouldBlockFinding`).
+#
+# Same fail-safe contract as `_codex_review_strip_prompt_echo`: any missing
+# piece of the structure (no header, no `user` marker, no `codex` marker
+# after it) echoes the ORIGINAL capture unchanged. Also drops the CLI's own
+# trailing `tokens used: <N>` footer line, same as the strip helper. rc 0
+# ALWAYS (fail-safe under `set -euo pipefail`).
+_codex_review_full_response_region() {
+  local f="${1:-}"
+  local original=""
+  if [[ -n "$f" && -f "$f" && -r "$f" ]]; then
+    original=$(cat -- "$f" 2>/dev/null || true)  # fail-safe: a read error yields empty, never a crash
+  fi
+  [[ -n "$original" ]] || { printf '%s' "$original"; return 0; }
+
+  # Steps 1-2: identical to `_codex_review_strip_prompt_echo` (header
+  # validation + FIRST `user` marker search).
+  local _first_nonempty _has_header=false
+  _first_nonempty=$(awk 'NF{print; exit}' "$f" 2>/dev/null) || _first_nonempty=""
+  if [[ "$_first_nonempty" =~ ^OpenAI\ Codex\ v[0-9] ]]; then
+    _has_header=true
+  else
+    local _leading_region
+    _leading_region=$(awk '
+      NR==1 && $0=="" { next }
+      /^[[:space:]]*$/ { exit }
+      /^[[:space:]]*```/ { exit }
+      /^[[:space:]]*#/ { exit }
+      /^(user|codex)[[:space:]]*$/ { exit }
+      { print }
+    ' "$f" 2>/dev/null) || _leading_region=""
+    if [[ -n "$_leading_region" ]] \
+       && grep -qiE '^workdir:' <<<"$_leading_region" 2>/dev/null \
+       && grep -qiE '^model:' <<<"$_leading_region" 2>/dev/null \
+       && grep -qiE '^provider:' <<<"$_leading_region" 2>/dev/null; then
+      _has_header=true
+    fi
+  fi
+  if [[ "$_has_header" != true ]]; then
+    printf '%s' "$original"
+    return 0
+  fi
+
+  local _user_line_no
+  _user_line_no=$(awk '
+    /^[[:space:]]*(```|~~~)/ { infence = !infence; next }
+    infence { next }
+    !infence && /^user[[:space:]]*$/ { print NR; exit }
+  ' "$f" 2>/dev/null) || _user_line_no=""
+  if [[ -z "$_user_line_no" ]]; then
+    printf '%s' "$original"
+    return 0
+  fi
+
+  # Step 3 — the ONE divergence from `_codex_review_strip_prompt_echo`:
+  # locate the FIRST standalone `codex` marker after the `user` marker — same
+  # column-0/exact-word/unfenced/blank-line-preceded discipline as step 3
+  # there, but stopping at the FIRST match (`print NR; exit`) rather than
+  # tracking the LAST one across the whole file.
+  local _codex_line_no
+  _codex_line_no=$(awk -v start="$_user_line_no" '
+    /^[[:space:]]*(```|~~~)/ { infence = !infence; prev = $0; next }
+    infence { prev = $0; next }
+    NR > start && !infence && /^codex[[:space:]]*$/ && NR > 1 && prev == "" { print NR; exit }
+    { prev = $0 }
+  ' "$f" 2>/dev/null) || _codex_line_no=""
+  if [[ -z "$_codex_line_no" ]]; then
+    printf '%s' "$original"
+    return 0
+  fi
+
+  local _region
+  _region=$(awk -v boundary="$_codex_line_no" '
+    NR > boundary && tolower($0) !~ /^[[:space:]]*tokens used:[[:space:]]*[0-9]+[[:space:]]*$/ { print }
+  ' "$f" 2>/dev/null) || _region=""
+  if [[ -z "$_region" ]]; then
+    printf '%s' "$original"
+  else
+    printf '%s' "$_region"
+  fi
+  return 0
+}
+
 # _codex_review_compose_body <verdict> <stdout-file>
 #
 # Composes the human body the wrapper hands to post-verdict.sh when codex did NOT

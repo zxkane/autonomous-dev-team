@@ -3340,6 +3340,8 @@ declare -a AGENT_HIGHEST_SEVERITY=()
 _any_severity_demotion=false
 for _i in "${!AGENT_NAMES[@]}"; do
   _sev_text=""
+  _sev_region_text=""
+  _is_codex_stdout_fallback=false
   if [[ "${AGENT_VERDICT_SOURCES[$_i]:-}" == "codex-stdout-fallback" && -n "${AGENT_CODEX_LOGS[$_i]:-}" && -f "${AGENT_CODEX_LOGS[$_i]}" ]]; then
     # [INV-132] (#481 R1): the ONLY branch that scores the raw capture — a
     # verdict resolved via the legacy stdout-classify route
@@ -3348,7 +3350,13 @@ for _i in "${!AGENT_NAMES[@]}"; do
     # or comment-poll channels do. Strip the echoed prompt before scoring —
     # the raw capture always leads with build_review_prompt's own echoed
     # checklist, which would otherwise fail-safe-collapse to `none`.
+    _is_codex_stdout_fallback=true
     _sev_text=$(_codex_review_strip_prompt_echo "${AGENT_CODEX_LOGS[$_i]}")
+    # [INV-133] (#490): the WIDER corroboration region (FIRST codex-role
+    # turn marker to EOF, adapters/codex.sh) a quoted-marker hijack of the
+    # LAST-marker tail above cannot exclude a genuine finding from — see
+    # `_review_apply_severity_filter_corroborated`'s call below.
+    _sev_region_text=$(_codex_review_full_response_region "${AGENT_CODEX_LOGS[$_i]}")
   else
     # Every other resolution channel — artifact, comment-fallback, or a
     # codex agent that self-posted via the ordinary poll loop — scores
@@ -3357,7 +3365,17 @@ for _i in "${!AGENT_NAMES[@]}"; do
   fi
   AGENT_HIGHEST_SEVERITY[$_i]=$(_review_extract_highest_severity "$_sev_text")
   _pre_filter_verdict="${AGENT_VERDICTS[$_i]}"
-  AGENT_VERDICTS[$_i]=$(_review_apply_severity_filter "${AGENT_VERDICTS[$_i]}" "$_sev_text" "$REVIEW_ROUND")
+  if [[ "$_is_codex_stdout_fallback" == true ]]; then
+    # [INV-133] (#490): corroborate a would-be demotion against the wider
+    # region before trusting it — a quoted turn-marker line inside the
+    # final response can hijack the narrow LAST-marker tail search
+    # (`_sev_text`) and discard a genuine [P0]/[P1] finding that precedes
+    # it, silently reducing the scored severity. Every other resolution
+    # channel is unaffected (no region concept applies to a rendered body).
+    AGENT_VERDICTS[$_i]=$(_review_apply_severity_filter_corroborated "${AGENT_VERDICTS[$_i]}" "$_sev_text" "$_sev_region_text" "$REVIEW_ROUND")
+  else
+    AGENT_VERDICTS[$_i]=$(_review_apply_severity_filter "${AGENT_VERDICTS[$_i]}" "$_sev_text" "$REVIEW_ROUND")
+  fi
   if [[ "$_pre_filter_verdict" == "fail" && "${AGENT_VERDICTS[$_i]}" == "pass" ]]; then
     _any_severity_demotion=true
     log "Issue #449: severity ratchet demoted '${AGENT_NAMES[$_i]}' fail→pass at round ${REVIEW_ROUND} (highest severity: ${AGENT_HIGHEST_SEVERITY[$_i]}, below this round's blocking floor)."
