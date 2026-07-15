@@ -270,9 +270,12 @@ itp_gitlab_transition_state() {
 
 # itp_gitlab_read_task <issue> <fields-csv>
 #
-# Spec §3.1 [W1b]. `FIELDS_CSV ⊆ title,body,state,labels,comments`.
+# Spec §3.1 [W1b]. `FIELDS_CSV ⊆ title,body,state,labels,comments,author`.
 # GitLab field renames: `description` → `body`; `state` `opened|closed` →
-# `OPEN|CLOSED` (uppercase — matches the §3.1 tokens `_next_action` consumes).
+# `OPEN|CLOSED` (uppercase — matches the §3.1 tokens `_next_action` consumes);
+# `author.username` → `author` (the issue-CREATOR login, [INV-134]; absent →
+# "") — the @-mention target for human-notice comments. GitLab's `author` is a
+# single user object, NOT the group/namespace that `REPO_OWNER` names.
 # Labels already name-strings in GitLab (no `.[].name` unwrap).
 # Fail-CLOSED capture-then-check on `_gl_api` rc≠0 or empty stdout.
 itp_gitlab_read_task() {
@@ -295,7 +298,8 @@ itp_gitlab_read_task() {
         else "" end
       ),
       labels: (.labels // []),
-      comments: $comments
+      comments: $comments,
+      author: (.author.username // "")
     }
   ' <<<"$raw" | _itp_gitlab_project_fields_object "$fields_csv"
 }
