@@ -224,6 +224,17 @@ CORRECT severity for `AGENT_HIGHEST_SEVERITY` (the array [INV-127]'s
 round-cap breaker reads) on both a refused and a corroborated demotion
 (TC-CORROB-008/011..014).
 
+A third bug — the review-round-1 finding on this PR itself — was that
+`_review_apply_severity_filter_corroborated` only ever demotes an EXISTING
+`fail`; it is a no-op pass-through on anything else. `_codex_review_
+classify_stdout` (the tail-only-scan classifier that produces the verdict
+the filter later receives) could itself resolve straight to `pass` — never
+reaching the filter at all — when the hijack discarded a genuine `[P1]`
+AND the surviving tail carried NO tag whatsoever (not merely a masked
+`[P2]`). TC-CXRS-CLS-14 (`tests/unit/test-lib-review-codex.sh`) pins the
+fix: the classifier itself now corroborates against the wider region
+before settling on `pass`, scoped to genuine turn-marker captures only.
+
 | ID | Scenario | Expected |
 |----|----------|----------|
 | TC-CXREGION-001 | `_codex_review_full_response_region` on the new hijack fixture | both the genuine `[P1]` AND the trailing `[P2]` are inside the region; the `tokens used:` footer is stripped |
@@ -249,6 +260,9 @@ round-cap breaker reads) on both a refused and a corroborated demotion
 | TC-CORROB-012 | `_review_highest_severity_corroborated` on the clean P2-only fixture (a corroborated demotion) | reports the tail's accurate `P2` |
 | TC-CORROB-013 | The false-fail-forever regression, end-to-end: a clean review whose reasoning turn recites ordinary numbered checklist prose with no tags | still corroborates and demotes normally at round 5; `AGENT_HIGHEST_SEVERITY` reports the tail's real `P2`, not a spurious `none` |
 | TC-CORROB-014 | Wiring pin | the wrapper computes `AGENT_HIGHEST_SEVERITY` via `_review_highest_severity_corroborated` on the stdout-fallback lane, not a bare extractor call on either text alone |
+| TC-CXRS-CLS-14 | [review-round-1 finding] `_codex_review_classify_stdout` on a hijack fixture whose tail carries NO tag at all after the quoted marker (`codex-review-stdout-turns-blankline-hijack-notag.txt`) | `fail` — the classifier corroborates against the region BEFORE settling on `pass`, so the corroborated filter downstream actually gets a chance to run |
+| TC-CXRS-CLS-14b | The ORIGINAL hijack fixture (tail retains a masked `[P2]`) through the classifier | unaffected — still `fail` via the tail scan alone, exactly as before this amendment |
+| TC-CXRS-CLS-14c | A genuinely clean turn-marker capture (no tag in tail or region) through the classifier | still `pass` — the amendment does not over-correct into a blanket `fail` for every turn-marker capture |
 
 ## Acceptance criteria for this change (pre-merge verifiable)
 

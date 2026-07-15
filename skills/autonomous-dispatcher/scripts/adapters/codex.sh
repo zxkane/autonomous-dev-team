@@ -478,28 +478,60 @@ _codex_review_stdout_is_malformed() {
 # but ONLY once the capture is confirmed to be a review, not the prompt echoed
 # back (#252), and ONLY over the text that is actually the review (not the
 # echoed prompt's own instruction text, #481 round 4).
+#
+# [INV-133 amendment] (#490, review round 1): if the tail scan above finds NO
+# tag at all, this function does NOT settle on `pass` yet for a genuine
+# turn-marker capture — it first corroborates against the WIDER region
+# (`_codex_review_full_response_region`: FIRST codex-role turn marker to EOF)
+# for a literal `[P0]`/`[P1]` tag. WHY THIS IS LOAD-BEARING, not redundant with
+# `_review_apply_severity_filter_corroborated` (lib-review-severity.sh): that
+# filter ONLY ever demotes an EXISTING `fail` — it is a no-op pass-through on
+# any other verdict. The hijack shape this whole fix (issue #490) exists for
+# can discard a genuine `[P1]` finding AND leave the tail with NO tag
+# whatsoever (not even a masked `[P2]`/`[P3]`) when the quoted marker sits
+# between the real finding and EVERY remaining tagged line. Pre-amendment,
+# THIS function would classify that capture `pass` directly — before the
+# corroborated filter ever runs — producing exactly the false PASS the issue
+# describes, undetected by every test that only exercised captures whose tail
+# retained a masked `[P2]` (the original hijack fixture always classified
+# `fail` here already; see the `-notag` fixture variant for the gap this
+# closes). Scoped to the SAME genuine-turn-marker condition the tail-only scan
+# above already requires (`_cls_has_turns`) — a legacy free-form capture with
+# no turn-marker structure at all has no region concept and keeps its
+# byte-identical whole-capture-scan `pass`. A region tag match here still only
+# flips `pass`→`fail`; the round-aware demotion decision (once a real `fail`
+# reaches the pre-aggregation filter) remains entirely lib-review-severity.sh's
+# job, unchanged.
 _codex_review_classify_stdout() {
   local f="${1:-}"
   if _codex_review_stdout_is_malformed "$f"; then
     printf 'malformed\n'
     return 0
   fi
-  local _scan_text=""
+  local _scan_text="" _cls_stripped="" _cls_original="" _cls_has_turns=false
   if [[ -n "$f" && -f "$f" && -r "$f" ]]; then
-    local _cls_stripped _cls_original
     _cls_stripped=$(_codex_review_strip_prompt_echo "$f") || _cls_stripped=""
     _cls_original=$(cat -- "$f" 2>/dev/null) || _cls_original=""
     if [[ -n "$_cls_stripped" && "$_cls_stripped" != "$_cls_original" ]]; then
       _scan_text="$_cls_stripped"
+      _cls_has_turns=true
     else
       _scan_text="$_cls_original"
     fi
   fi
   if [[ -n "$_scan_text" ]] && grep -qE '\[P[0123]\]' <<<"$_scan_text" 2>/dev/null; then
     printf 'fail\n'
-  else
-    printf 'pass\n'
+    return 0
   fi
+  if [[ "$_cls_has_turns" == true ]]; then
+    local _cls_region
+    _cls_region=$(_codex_review_full_response_region "$f") || _cls_region=""
+    if [[ -n "$_cls_region" ]] && grep -qE '\[P[01]\]' <<<"$_cls_region" 2>/dev/null; then
+      printf 'fail\n'
+      return 0
+    fi
+  fi
+  printf 'pass\n'
   return 0
 }
 
