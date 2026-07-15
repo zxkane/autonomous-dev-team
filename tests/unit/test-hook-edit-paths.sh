@@ -11,6 +11,7 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 HOOK_LIB="$PROJECT_ROOT/skills/autonomous-common/hooks/lib.sh"
 CHECK_TEST_PLAN="$PROJECT_ROOT/skills/autonomous-common/hooks/check-test-plan.sh"
 INSTALLER="$PROJECT_ROOT/skills/autonomous-common/scripts/install-codex-hooks.sh"
+CODEX_PAYLOAD_FIXTURE="$PROJECT_ROOT/tests/unit/fixtures/codex-pre-tool-use-apply-patch.json"
 source "$HOOK_LIB"
 
 TMPDIR=$(mktemp -d)
@@ -109,6 +110,13 @@ out=$(parse_edit_file_operations "$codex_payload" 2>/dev/null); rc=$?
 [[ "$rc" -eq 0 ]] && assert_eq "patch operations retain their semantics" \
   "$expected_operations" "$out" \
   || bad "patch operations retain their semantics (rc=$rc)"
+
+echo "=== TC-CDCR-022A: captured Codex PreToolUse payload ==="
+captured_codex_payload=$(cat "$CODEX_PAYLOAD_FIXTURE")
+out=$(parse_edit_file_operations "$captured_codex_payload" 2>/dev/null); rc=$?
+[[ "$rc" -eq 0 ]] && assert_eq "captured Codex payload emits its added file" \
+  $'add\tsrc/probe.ts' "$out" \
+  || bad "captured Codex payload emits its added file (rc=$rc)"
 
 echo "=== TC-CDCR-024/025: malformed recognized edits and unknown tools ==="
 malformed='{"tool_name":"apply_patch","tool_input":{"command":"*** Begin Patch\n*** End Patch"}}'
@@ -220,13 +228,12 @@ else
 fi
 
 malformed_file_payload='{"tool_name":"Write","tool_input":{"file_path":42}}'
-(cd "$repo" && CLAUDE_PROJECT_DIR="$repo" bash "$CHECK_TEST_PLAN" \
-  <<<"$malformed_file_payload" >/dev/null 2>&1)
-rc=$?
-if [[ "$rc" -eq 2 ]]; then
-  ok "malformed file path makes the hook exit exactly 2"
+policy_out=$(cd "$repo" && CLAUDE_PROJECT_DIR="$repo" bash "$CHECK_TEST_PLAN" \
+  <<<"$malformed_file_payload" 2>&1); rc=$?
+if [[ "$rc" -eq 0 && "$policy_out" == *"could not inspect this edit payload"* ]]; then
+  ok "malformed file path warns without blocking the edit"
 else
-  bad "malformed file path makes the hook exit exactly 2 (rc=$rc)"
+  bad "malformed file path warns without blocking the edit (rc=$rc)"
 fi
 
 pure_move_payload=$(jq -n --arg command '*** Begin Patch
@@ -245,13 +252,12 @@ else
   bad "pure move does not trigger a new-file reminder (rc=$rc)"
 fi
 
-(cd "$repo" && CLAUDE_PROJECT_DIR="$repo" bash "$CHECK_TEST_PLAN" \
-  <<<"$missing_boundary" >/dev/null 2>&1)
-rc=$?
-if [[ "$rc" -eq 2 ]]; then
-  ok "malformed direct hook invocation exits exactly 2"
+policy_out=$(cd "$repo" && CLAUDE_PROJECT_DIR="$repo" bash "$CHECK_TEST_PLAN" \
+  <<<"$missing_boundary" 2>&1); rc=$?
+if [[ "$rc" -eq 0 && "$policy_out" == *"could not inspect this edit payload"* ]]; then
+  ok "malformed direct hook invocation warns without blocking"
 else
-  bad "malformed direct hook invocation exits exactly 2 (rc=$rc)"
+  bad "malformed direct hook invocation warns without blocking (rc=$rc)"
 fi
 
 echo "=== TC-CDCR-026: generated command executes without CLAUDE_PROJECT_DIR ==="
@@ -274,13 +280,12 @@ if [[ "$rc" -eq 0 && "$generated_out" == *"Reminder: Test Plan First"* ]]; then
 else
   bad "generated hook resolves worktree root and applies policy (rc=$rc, command=$hook_command)"
 fi
-(cd "$repo/nested/dir" && unset CLAUDE_PROJECT_DIR && \
-  eval "$hook_command" <<<"$missing_boundary" >/dev/null 2>&1)
-rc=$?
-if [[ "$rc" -eq 2 ]]; then
-  ok "malformed generated hook invocation exits exactly 2"
+generated_out=$(cd "$repo/nested/dir" && unset CLAUDE_PROJECT_DIR && \
+  eval "$hook_command" <<<"$missing_boundary" 2>&1); rc=$?
+if [[ "$rc" -eq 0 && "$generated_out" == *"could not inspect this edit payload"* ]]; then
+  ok "malformed generated hook invocation warns without blocking"
 else
-  bad "malformed generated hook invocation exits exactly 2 (rc=$rc)"
+  bad "malformed generated hook invocation warns without blocking (rc=$rc)"
 fi
 
 echo "=== TC-CDCR-027: generated command isolates linked-worktree state ==="
@@ -309,6 +314,21 @@ if [[ "$rc" -eq 0 && "$linked_out" == *"Reminder: Test Plan First"* ]]; then
   ok "linked worktree does not consume the main checkout test-plan mark"
 else
   bad "linked worktree does not consume the main checkout test-plan mark (rc=$rc)"
+fi
+
+echo "=== TC-CDCR-027A: Claude hook sees mark written in linked worktree ==="
+CLAUDE_PROJECT_DIR="$main_repo" \
+  "$PROJECT_ROOT/skills/autonomous-common/hooks/state-manager.sh" \
+  clear test-plan >/dev/null
+(cd "$worktree" && unset CLAUDE_PROJECT_DIR && \
+  "$PROJECT_ROOT/skills/autonomous-common/hooks/state-manager.sh" \
+    mark test-plan >/dev/null)
+linked_out=$(cd "$worktree" && CLAUDE_PROJECT_DIR="$main_repo" \
+  bash "$CHECK_TEST_PLAN" <<<"$linked_payload" 2>&1); rc=$?
+if [[ "$rc" -eq 0 && "$linked_out" != *"Reminder: Test Plan First"* ]]; then
+  ok "Claude hook consumes the linked-worktree test-plan mark"
+else
+  bad "Claude hook consumes the linked-worktree test-plan mark (rc=$rc)"
 fi
 
 echo "=== Summary ==="

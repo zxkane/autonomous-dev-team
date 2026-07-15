@@ -41,6 +41,7 @@
 | TC-CDCR-019L | Operator creates a directory in the final placement window | Exact-target placement aborts without moving generated content inside the directory |
 | TC-CDCR-019M | Project `.codex` is replaced by an external symlink after final placement | Anchored rollback restores the original physical directory and writes nothing externally |
 | TC-CDCR-019N | Canonical rollback source disappears while an unrelated scratch object appears | Inode ownership check leaves both unowned objects untouched |
+| TC-CDCR-019O | Kiro/Windsurf translation deduplicates hooks that converge on one matcher/event | Duplicate commands are removed without changing canonical command order |
 
 ## Hook payload normalization and behavior
 
@@ -50,11 +51,13 @@
 | TC-CDCR-021 | Claude `Edit` path contains spaces | Emits `edit<TAB>path` without word splitting and does not trigger file-creation policy |
 | TC-CDCR-021A | Kiro `fs_write`/`write`/`fsWrite` uses `path` + `command`; Gemini/Kimi use `file_path`; Windsurf uses `tool_info.file_path` | Provider-native payloads retain add/edit semantics; Kiro `create` and Windsurf writes trigger policy |
 | TC-CDCR-022 | Codex patch adds, updates, moves, and deletes files | Emits all `add`/`edit`/`move`/`delete` records and compatibility paths in patch order |
+| TC-CDCR-022A | Real Codex 0.144.3 `PreToolUse` payload captured from an `apply_patch` invocation | Full runtime payload parses the bare patch body from `tool_input.command` |
 | TC-CDCR-023 | Codex multi-file patch has docs first and new `src/` file second | `check-test-plan.sh` emits the reminder; pure move does not |
-| TC-CDCR-024 | Missing boundaries, missing/non-string discriminator/path, or empty recognized edit payload | Parser fails and the direct/generated hook exits exactly `2` |
+| TC-CDCR-024 | Missing boundaries, missing/non-string discriminator/path, or empty recognized edit payload | Strict parser fails; advisory direct/generated hook warns and exits `0` without blocking the edit |
 | TC-CDCR-025 | `Read` carries a nonempty `file_path`; `apply_patch` carries a misleading one | `Read` is a no-op and `apply_patch` still parses every command header |
 | TC-CDCR-026 | Generated Codex hook command runs from a nested directory with `$CLAUDE_PROJECT_DIR` unset | Command finds the worktree hook and applies TC-CDCR-023/024 behavior |
 | TC-CDCR-027 | Main checkout has a fresh test-plan mark while Codex edits a linked worktree | Linked-worktree state stays isolated and the worktree edit still emits the reminder |
+| TC-CDCR-027A | Worktree has a fresh test-plan mark while a Claude hook carries the main checkout in `$CLAUDE_PROJECT_DIR` | Hook resolves state from its worktree `cwd`, sees the mark, and emits no reminder |
 
 ## Skills, roles, and topology
 

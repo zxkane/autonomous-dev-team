@@ -34,8 +34,17 @@ for Codex instead of copying Claude commands verbatim:
   `^apply_patch$` matcher group. Codex documents `Write` and `Edit` as aliases
   for `apply_patch`, but a direct matcher avoids running the same handler
   twice.
+- Shared installer deduplication preserves the canonical hook command order
+  while removing duplicate commands that converge on one matcher or event.
 - Other event groups, timeouts, and commands stay aligned with the canonical
   template.
+
+Shared workflow state is resolved from the hook process's current Git worktree,
+not `$CLAUDE_PROJECT_DIR`. Claude Code keeps that variable fixed to the project
+where the session started even after work moves into a linked worktree, while
+manual state-manager commands do not necessarily receive it. Resolving both
+paths from `git rev-parse --show-toplevel` prevents mark/check state from
+splitting across the main checkout and linked worktree.
 
 Project hooks execute only after the project layer and the current hook hash
 are trusted. Interactive operators review them with `/hooks`. Unattended runs
@@ -128,9 +137,11 @@ cannot become an edit merely by carrying `file_path`, and an `apply_patch`
 payload always parses its complete command even if another field is present.
 The parser requires matching `*** Begin Patch` / `*** End Patch` boundaries
 and structural header lines. Recognized edit tools with malformed/missing
-data return non-zero, allowing the edit-sensitive hook to fail loudly.
-Missing/non-string tool discriminators also fail loudly. Unknown tools with a
-valid nonempty string name remain a no-op.
+data return non-zero, as do missing/non-string tool discriminators. The
+test-plan hook reports that parser failure but exits successfully because its
+TDD policy is advisory; payload-shape drift must not block every edit while an
+actual missing test plan only produces a reminder. Unknown tools with a valid
+nonempty string name remain a no-op.
 
 Claude-style clients provide `tool_name` and `tool_input`; Windsurf's native
 payload uses `agent_action_name` and `tool_info`. Required path/command fields
@@ -161,8 +172,12 @@ Codex patch, while updates, deletes, and pure moves cannot produce a false
 
 - Installer matrix and Codex-specific rendering tests.
 - Shared parser tests for Claude and Codex payloads.
+- A captured Codex 0.144.3 `PreToolUse` payload proving that `apply_patch`
+  supplies the bare patch body in `tool_input.command`.
 - Behavioral execution of the generated Codex command from a nested
   directory with `$CLAUDE_PROJECT_DIR` unset.
+- Linked-worktree state tests in both directions, including a Claude hook that
+  carries the main checkout in `$CLAUDE_PROJECT_DIR`.
 - Static guidance tests for Codex dev review and Claude main-session verdict
   ownership.
 - Existing per-side CLI and launcher suites, followed by the full unit suite.

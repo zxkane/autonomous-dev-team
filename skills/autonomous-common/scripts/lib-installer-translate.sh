@@ -121,6 +121,17 @@ translate_template_hooks() {
   #      otherwise produce duplicate matcher entries that fire the same
   #      check twice (PR-11b code review C2).
   jq --argjson event_map "$event_remap" --argjson tool_map "$tool_remap" '
+    def stable_unique_by(f):
+      reduce .[] as $item (
+        {seen: {}, items: []};
+        ($item | f | tojson) as $key
+        | if (.seen | has($key))
+          then .
+          else .seen[$key] = true | .items += [$item]
+          end
+      )
+      | .items;
+
     .hooks
     | with_entries(
         .key |= ($event_map[.] // .)
@@ -147,7 +158,7 @@ translate_template_hooks() {
                     (if $entry | has("matcher") then .matcher = $entry.matcher else . end)
                     | .hooks += $entry.hooks
                   )
-                  | .hooks |= unique_by(
+                  | .hooks |= stable_unique_by(
                       [.type, .command, .timeout, .timeout_ms, .max_output_size]
                     )
                 )
@@ -222,6 +233,17 @@ fold_matcher_into_event() {
   local fold_array="[${fold_array_items%, }]"
 
   jq --argjson fold_map "$fold_array" '
+    def stable_unique_by(f):
+      reduce .[] as $item (
+        {seen: {}, items: []};
+        ($item | f | tojson) as $key
+        | if (.seen | has($key))
+          then .
+          else .seen[$key] = true | .items += [$item]
+          end
+      )
+      | .items;
+
     .hooks
     | to_entries
     | map(
@@ -252,7 +274,7 @@ fold_matcher_into_event() {
         key: .[0].__target,
         value: (
           map(del(.__target))
-          | unique_by(
+          | stable_unique_by(
               [.type, .command, .timeout, .timeout_ms, .max_output_size]
             )
         )

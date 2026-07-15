@@ -21,13 +21,13 @@ read_hook_stdin() {
 # Workflow state is per worktree; only fall back to the common checkout when
 # no worktree toplevel can be resolved.
 resolve_project_root() {
-  if [[ -n "${CLAUDE_PROJECT_DIR:-}" ]]; then
-    echo "$CLAUDE_PROJECT_DIR"
+  local root
+  if root=$(git rev-parse --show-toplevel 2>/dev/null); then
+    printf '%s\n' "$root"
+  elif root=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null); then
+    printf '%s\n' "${root%/.git}"
   else
-    git rev-parse --show-toplevel 2>/dev/null ||
-      git rev-parse --path-format=absolute --git-common-dir 2>/dev/null |
-        sed 's|/\.git$||' ||
-      pwd
+    pwd
   fi
 }
 

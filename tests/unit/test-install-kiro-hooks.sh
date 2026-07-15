@@ -145,6 +145,19 @@ else
   FAIL=$((FAIL + 1))
 fi
 
+# Deduplication must retain the canonical execution order within each matcher.
+mapfile -t execute_bash_hooks < <(
+  jq -r '.hooks.preToolUse[] | select(.matcher == "execute_bash") | .hooks[].command' "$target"
+)
+if [[ "${execute_bash_hooks[0]:-}" == *"block-push-to-main.sh"* &&
+      "${execute_bash_hooks[1]:-}" == *"block-commit-outside-worktree.sh"* ]]; then
+  echo -e "  ${GREEN}PASS${NC}: dedup preserves canonical Bash hook order"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: dedup reordered canonical Bash hooks"
+  FAIL=$((FAIL + 1))
+fi
+
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== TC-KIRO-05: --agent <name> overrides default agent name ==="

@@ -98,6 +98,17 @@ else
   FAIL=$((FAIL + 1))
 fi
 
+# Deduplication must retain the canonical execution order within each event.
+mapfile -t pre_run_hooks < <(jq -r '.hooks.pre_run_command[].command' "$target")
+if [[ "${pre_run_hooks[0]:-}" == *"block-push-to-main.sh"* &&
+      "${pre_run_hooks[1]:-}" == *"block-commit-outside-worktree.sh"* ]]; then
+  echo -e "  ${GREEN}PASS${NC}: dedup preserves canonical command order"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: dedup reordered canonical commands"
+  FAIL=$((FAIL + 1))
+fi
+
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== TC-WS-05: re-install creates a backup ==="

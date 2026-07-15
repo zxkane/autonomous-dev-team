@@ -8,8 +8,8 @@ STATE_MANAGER="$SCRIPT_DIR/state-manager.sh"
 
 input=$(read_hook_stdin)
 if ! edit_operations=$(parse_edit_file_operations "$input"); then
-  echo "Error: could not normalize edit operations; refusing to skip the test-plan gate" >&2
-  exit 2
+  echo "Warning: could not inspect this edit payload; test-plan reminder skipped because this hook is advisory." >&2
+  exit 0
 fi
 
 # Skip non-edit tools.
