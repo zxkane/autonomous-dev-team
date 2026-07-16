@@ -1898,7 +1898,7 @@ handle_completed_session_routing() {
         if itp_list_comments "$issue_num" 2>/dev/null \
             | jq -r "[.[].body | select(contains(\"${_na_marker}\"))] | length" \
             2>/dev/null | grep -q '^0$'; then
-          # INV-137 (#488) D4: surface the matched REVIEW_PROTECTED_PATHS
+          # INV-136 (#488) D4: surface the matched REVIEW_PROTECTED_PATHS
           # pattern(s) when the review wrapper's `inv92-matched-patterns:`
           # marker is present on the issue FOR THIS HEAD; otherwise fall back
           # to the unchanged generic wording (no new failure mode). (codex
@@ -3285,7 +3285,7 @@ last_reviewed_head() {
     | jq -r '[.[].body | capture("Reviewed HEAD: `(?<sha>[0-9a-f]{7,40})`"; "g") | .sha] | last // empty'
 }
 
-# INV-137 (#488) D4: echoes the newest `inv92-matched-patterns:` marker's
+# INV-136 (#488) D4: echoes the newest `inv92-matched-patterns:` marker's
 # space-separated pattern list posted by the review wrapper's non-actionable
 # findings comment (autonomous-review.sh), or empty if no such marker exists
 # on the issue FOR THE GIVEN HEAD. The dispatcher's own stall notices (Branch
@@ -3837,7 +3837,7 @@ _same_head_verdict_aware_recovery() {
     if itp_list_comments "$issue_num" 2>/dev/null \
         | jq -r "[.[].body | select(contains(\"${_na_marker}\"))] | length" \
         2>/dev/null | grep -q '^0$'; then
-      # INV-137 (#488) D4: same marker-surfacing fallback as Branch B′ above,
+      # INV-136 (#488) D4: same marker-surfacing fallback as Branch B′ above,
       # bound to `current_head` (codex review round-2, PR #498) — the head
       # this verdict was reviewed against — so a stale marker from an
       # earlier, unrelated round can never be misattributed here.
