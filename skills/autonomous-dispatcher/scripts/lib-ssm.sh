@@ -256,7 +256,18 @@ _ssm_run_remote_command() {
   # by the command's actual guaranteed terminal deadline rather than an
   # independent short window.
   local cmd_sent_at t_deadline now status get_out stdout_content
-  cmd_sent_at=$(date +%s)
+  cmd_sent_at=$(date +%s) || cmd_sent_at=""
+  if ! [[ "$cmd_sent_at" =~ ^[0-9]+$ ]]; then
+    # A failed/garbage `date +%s` here is not a bare cosmetic bug: under
+    # `set -u`, an EMPTY (not unset) cmd_sent_at silently evaluates as 0 in
+    # arithmetic rather than erroring, which would collapse BOTH this
+    # loop's deadline and (worse) _ssm_poll_timeout_recover's anchored
+    # deadline to an epoch in the distant past — the very race this fix
+    # exists to close would reopen on the very first poll. Fail loudly
+    # instead of proceeding with a corrupted anchor.
+    echo "[lib-ssm] ERROR: date +%s failed while anchoring the poll deadline" >&2
+    return 2
+  fi
   t_deadline=$(( cmd_sent_at + poll_timeout ))
   while :; do
     sleep 0.5
@@ -344,6 +355,16 @@ _ssm_poll_timeout_recover() {
 
   local recover_margin="${REMOTE_POLL_TIMEOUT_RECOVER_SECONDS:-5}"
   [[ "$recover_margin" =~ ^[0-9]+$ ]] || recover_margin=5
+  # cmd_sent_at/exec_timeout are the caller's anchors this whole recovery
+  # deadline depends on — under `set -u`, an EMPTY (not unset) value
+  # silently evaluates as 0 in arithmetic rather than erroring, which
+  # would collapse recover_deadline to near cmd_sent_at (or near-zero if
+  # BOTH are empty) and reopen exactly the race this fix closes. Validate
+  # rather than let bad args silently corrupt the deadline.
+  if ! [[ "$cmd_sent_at" =~ ^[0-9]+$ ]] || ! [[ "$exec_timeout" =~ ^[0-9]+$ ]]; then
+    echo "[lib-ssm] ERROR: _ssm_poll_timeout_recover called with invalid cmd_sent_at/exec_timeout ('$cmd_sent_at'/'$exec_timeout')" >&2
+    return 2
+  fi
   local recover_deadline
   recover_deadline=$(( cmd_sent_at + exec_timeout + recover_margin ))
 
