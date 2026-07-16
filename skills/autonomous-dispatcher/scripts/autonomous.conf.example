@@ -331,6 +331,15 @@ AGENT_REVIEW_EXTRA_ARGS=""
 #   AGENT_DEV_MODEL="opus[1m]"
 #   AGENT_REVIEW_MODEL="Gemini 3.5 Flash (High)"  # an agy-namespace model — see agy block
 #
+# Canonical Codex-dev/Claude-review: AGENT_DEV_CMD=codex, AGENT_REVIEW_CMD=claude
+#
+#   AGENT_CMD="claude"
+#   AGENT_DEV_CMD="codex"
+#   AGENT_REVIEW_CMD="claude"
+#   AGENT_LAUNCHER=""           # clear a legacy shared Claude-only bridge
+#   AGENT_DEV_LAUNCHER=""       # do not leak a Claude bridge into Codex
+#   AGENT_REVIEW_AGENTS=""      # one wrapper-assigned Claude verdict agent
+#
 # AGENT_LAUNCHER (claude-only) is gated per-side by INV-38: each side's
 # launcher requires THAT side's CLI to be claude. The natural mixed-
 # CLI deployment (claude dev with cc + non-claude review without

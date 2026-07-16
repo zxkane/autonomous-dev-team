@@ -1,0 +1,14 @@
+{
+  "session_id": "019f644b-0931-72d0-b829-95c9bdadb19d",
+  "turn_id": "019f644b-1160-7df2-91ac-61557120ec56",
+  "transcript_path": null,
+  "cwd": "/tmp/codex-hook-capture",
+  "hook_event_name": "PreToolUse",
+  "model": "openai.gpt-5.6-sol",
+  "permission_mode": "bypassPermissions",
+  "tool_name": "apply_patch",
+  "tool_input": {
+    "command": "*** Begin Patch\n*** Add File: src/probe.ts\n+export const probe = true;\n*** End Patch\n"
+  },
+  "tool_use_id": "call_2"
+}

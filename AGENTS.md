@@ -43,8 +43,9 @@ requests and bug reports.
 ## Hooks
 
 Workflow enforcement hooks are bundled in `skills/autonomous-common/hooks/`.
-Hook commands in `autonomous-dev` and `autonomous-review` SKILL.md frontmatter
-reference `$CLAUDE_PROJECT_DIR/hooks/`, so a symlink is required at the project root.
+Claude frontmatter commands reference `$CLAUDE_PROJECT_DIR/hooks/`; the Codex
+installer renders equivalent git-worktree-root commands. Both require the
+project-root `hooks` symlink.
 
 **Template users** already have `hooks -> skills/autonomous-common/hooks`.
 
@@ -55,8 +56,8 @@ ln -sf .claude/skills/autonomous-common/hooks hooks
 ln -sf .claude/skills/autonomous-dispatcher/scripts scripts
 ```
 
-Hooks are supported by Claude Code and Kiro CLI. Other IDEs follow the
-workflow steps manually. See `hooks/README.md` for the full reference.
+Hooks are supported by Claude Code, Codex CLI, and Kiro CLI. Other IDEs follow
+the workflow steps manually. See `hooks/README.md` for the full reference.
 
 ## Scripts
 

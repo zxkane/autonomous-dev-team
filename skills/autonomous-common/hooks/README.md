@@ -1,6 +1,9 @@
 # Workflow Enforcement Hooks
 
-These hooks enforce the TDD development workflow defined in `CLAUDE.md`. They ensure that every code change follows the mandatory steps: design canvas, git worktree isolation, test-first development, code review, PR review, CI verification, and E2E testing.
+These hooks enforce the autonomous-dev TDD workflow across supported coding
+agents. They ensure that every code change follows the mandatory steps: design
+canvas, git worktree isolation, test-first development, code review, PR
+review, CI verification, and E2E testing.
 
 ## Claude Code Setup
 
@@ -27,6 +30,16 @@ Each hook entry specifies a `matcher` (the tool name it applies to), the shell c
 
 Kiro CLI supports hooks. Adapt the Claude Code hook configuration for Kiro's hook format. See Kiro CLI documentation for details.
 
+## Codex CLI Setup
+
+Run `install-codex-hooks.sh` from the project root. It writes
+`.codex/hooks.json`, uses canonical `[features] hooks = true`, and renders
+commands that resolve the active git worktree without
+`$CLAUDE_PROJECT_DIR`. The installer requires Python 3.11+ so `tomllib` can
+validate the complete existing config before migration. Codex project hooks
+and changed hook definitions must be reviewed and trusted with `/hooks`;
+vetted unattended automation may use `--dangerously-bypass-hook-trust`.
+
 ## Other IDEs
 
 IDEs without hook support (Cursor, Windsurf, etc.) rely on skill instructions for workflow enforcement. Follow each step in the autonomous-dev skill manually.
@@ -40,7 +53,7 @@ IDEs without hook support (Cursor, Windsurf, etc.) rely on skill instructions fo
 | `check-design-canvas.sh` | PreToolUse | Bash | Reminds about design canvas before coding |
 | `check-code-simplifier.sh` | PreToolUse | Bash | Blocks commits until code-simplifier review |
 | `check-pr-review.sh` | PreToolUse | Bash | Blocks pushes until PR review complete |
-| `check-test-plan.sh` | PreToolUse | Write/Edit | Reminds about test plan before code changes |
+| `check-test-plan.sh` | PreToolUse | Write/Edit or Codex apply_patch | Reminds about a test plan before creating implementation files; checks every add in a multi-file patch without treating updates/moves as creates |
 | `check-shellcheck.sh` | PreToolUse | Bash | Blocks commits if staged .sh files have shellcheck errors |
 | `check-unit-tests.sh` | PreToolUse | Bash | Warns about unrun unit tests |
 | `warn-skip-verification.sh` | PreToolUse | Bash | Warns about --no-verify usage |

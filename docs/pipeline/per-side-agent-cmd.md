@@ -53,6 +53,35 @@ The wrapper override exists only to make the case statements in
 `run_agent` / `resume_agent` dispatch to the right CLI; it does not
 re-trigger the guard.
 
+## Canonical Codex-dev / Claude-review topology
+
+The first-class mixed topology uses Codex for development and one
+wrapper-assigned Claude session for final review:
+
+```bash
+AGENT_CMD="claude"
+AGENT_DEV_CMD="codex"
+AGENT_REVIEW_CMD="claude"
+AGENT_LAUNCHER=""
+AGENT_DEV_LAUNCHER=""
+AGENT_REVIEW_AGENTS=""
+```
+
+`AGENT_LAUNCHER` must be empty because the per-side `:-` defaults intentionally
+treat an explicit empty value as inheritance for backward compatibility.
+`AGENT_REVIEW_LAUNCHER` may then be set when Claude needs a bridge while Codex
+runs unwrapped; the per-side
+[INV-38](invariants.md#inv-38-per-side-agent_launcher-precedence) guard evaluates
+it independently.
+
+An empty `AGENT_REVIEW_AGENTS` means the wrapper launches exactly one
+verdict-reaching session, resolved from `AGENT_REVIEW_CMD`. Internal Codex or
+Claude subagents do not belong in `AGENT_REVIEW_AGENTS`; they are advisory
+workers inside their parent session. `REVIEW_BOTS` is separate again: it names
+external code-host reviewers whose comments become review evidence. See
+[`review-agent-flow.md`](review-agent-flow.md#internal-subagents-are-advisory)
+for final-decision ownership.
+
 ## Backwards compatibility
 
 Existing deployments do not set `AGENT_DEV_CMD` or `AGENT_REVIEW_CMD`.
