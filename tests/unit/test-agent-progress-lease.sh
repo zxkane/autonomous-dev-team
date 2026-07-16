@@ -16,24 +16,27 @@
 #   - R4: the Claude stream-json migration does not break the three existing
 #     consumers of the final `{"type":"result",...}` log line.
 #
-# TC-LEASE-024..027 (issue #508): the recorder's shared-nonblocking-pipe
+# TC-LEASE-024..028 (issue #508): the recorder's shared-nonblocking-pipe
 # EAGAIN hazard — the wrapper's `exec > >(tee -a run.log)` stdout is the SAME
 # open file description the Claude CLI (Node.js) inherits as its stderr, and
 # Node's O_NONBLOCK flag on that shared pipe can make the recorder's own
 # printf fail transiently. Driven through a REAL O_NONBLOCK pipe via a
-# python3 fcntl helper with a stalling/never-draining reader (skipped if
-# python3 is unavailable): byte-identical passthrough (checksum + line count
-# + the no-trailing-newline final line) under real EAGAIN pressure, zero
-# write-error diagnostics for the transient case, bounded-retry exhaustion
-# completing instead of hanging with exactly one diagnostic, and the
+# python3 fcntl helper with a stalling/never-draining/closed reader (skipped
+# if python3 is unavailable): byte-identical passthrough (checksum + line
+# count + the no-trailing-newline final line) under real EAGAIN pressure,
+# zero write-error diagnostics for the transient case, bounded-retry
+# exhaustion completing instead of hanging with exactly one diagnostic, the
 # zero-AGENT_PROGRESS_FILE fast path staying a byte-identical bare `cat`
-# under the same pressure.
+# under the same pressure, and (TC-LEASE-028, round-1 review finding) a
+# genuinely dead reader (closed read end, real EPIPE) failing FAST instead
+# of misclassifying as retryable EAGAIN and burning the full per-record
+# retry budget.
 #
 # Strategy: source lib-agent.sh (+ lib-dispatch.sh / lib-metrics.sh where
 # needed) in sandboxed subshells with stub CLIs on PATH, mirroring
 # test-lib-agent-codex.sh / test-lib-agent-agy.sh. No real sleeps — a fake
 # `date` stub or explicit epoch arithmetic stands in for a frozen clock where
-# ordering matters (except TC-LEASE-024..027's pipe-pressure harness, which
+# ordering matters (except TC-LEASE-024..028's pipe-pressure harness, which
 # needs real wall-clock timing to force genuine EAGAIN and to prove the
 # bounded-retry loop does not hang).
 #
@@ -624,7 +627,7 @@ done
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== TC-LEASE-024..027: EAGAIN on the shared nonblocking pipe (issue #508) ==="
+echo "=== TC-LEASE-024..028: EAGAIN on the shared nonblocking pipe (issue #508) ==="
 # ---------------------------------------------------------------------------
 # Root cause: the wrapper's stdout is `exec > >(tee -a run.log)`, the SAME
 # open file description the Claude CLI (Node.js) inherits as its stderr.
@@ -863,6 +866,74 @@ PYEOF
   assert_eq "TC-LEASE-026 exactly one best-effort stderr diagnostic for the exhausted record" "1" "$diag_count"
 
   # ---------------------------------------------------------------------
+  # TC-LEASE-028 (round-1 review finding): a dead reader (closed read end,
+  # real EPIPE — not EAGAIN) must fail FAST, not burn the ~2s-per-slice
+  # retry budget. Distinguishes this from TC-LEASE-026's never-draining-but-
+  # still-open reader, which legitimately exhausts the budget. Asserted via
+  # wall-clock: a fixture with multiple undeliverable records must complete
+  # in well under (record_count * retry_budget) if EPIPE short-circuits
+  # correctly, and blow past it if it doesn't (pre-fix behavior: EPIPE was
+  # misclassified as retryable EAGAIN and looped the full budget per record).
+  # ---------------------------------------------------------------------
+  DEADREADER_DRIVER="$TMPROOT/drive_deadreader.py"
+  cat > "$DEADREADER_DRIVER" <<'PYEOF'
+# Closes the pipe's read end immediately (no reader at all — a real dead
+# reader, distinct from drive_stuck.py's "reader exists but never drains").
+# Any write the child attempts raises genuine EPIPE.
+#   drive_deadreader.py -- <cmd...>
+import os, sys, time
+
+args = sys.argv[1:]
+sep = args.index('--')
+cmd = args[sep + 1:]
+
+r, w = os.pipe()
+os.close(r)
+
+start = time.time()
+pid = os.fork()
+if pid == 0:
+    os.dup2(w, 1)
+    os.close(w)
+    os.execvp(cmd[0], cmd)
+    os._exit(127)
+
+os.close(w)
+_, status = os.waitpid(pid, 0)
+print(f"{time.time() - start:.2f}")
+PYEOF
+
+  # Several records, each individually undeliverable — if EPIPE is
+  # misclassified as EAGAIN, this fixture would burn ~2s PER record.
+  DEADREADER_FIXTURE="$TMPROOT/deadreader-fixture.jsonl"
+  : > "$DEADREADER_FIXTURE"
+  for i in 1 2 3; do
+    printf '{"type":"assistant","message":{"content":[{"type":"text","text":"rec-%d"}]}}\n' "$i" >> "$DEADREADER_FIXTURE"
+  done
+  DEADREADER_ERR="$TMPROOT/deadreader-err.log"
+  DEADREADER_PROGRESS_DIR="$TMPROOT/deadreader-pd"
+  rm -rf "$DEADREADER_PROGRESS_DIR"
+
+  elapsed=$(timeout 15 python3 "$DEADREADER_DRIVER" -- \
+    bash "$RECORDER_DRIVER" "$LIB" "$DEADREADER_FIXTURE" "$DEADREADER_PROGRESS_DIR/progress.json" json "$DEADREADER_ERR")
+  deadreader_driver_rc=$?
+
+  assert_eq "TC-LEASE-028 driver completes without the test's own timeout firing" "0" "$deadreader_driver_rc"
+  # Budget: well under "3 records * 2s/record" (6s) if EPIPE short-circuits;
+  # generous margin (3s) above genuine fast-fail overhead on a loaded box.
+  if [[ -n "$elapsed" ]] && awk -v e="$elapsed" 'BEGIN{exit !(e < 3.0)}'; then
+    ok "TC-LEASE-028 dead reader (EPIPE) fails fast (${elapsed}s), not the full multi-record retry budget"
+  else
+    bad "TC-LEASE-028 dead reader (EPIPE) took ${elapsed}s — should fail fast, not retry the EAGAIN budget"
+  fi
+
+  if grep -q "Broken pipe" "$DEADREADER_ERR" 2>/dev/null; then
+    ok "TC-LEASE-028 diagnostic correctly attributes the drop to Broken pipe (EPIPE), not EAGAIN"
+  else
+    bad "TC-LEASE-028 diagnostic did not mention Broken pipe — got: $(cat "$DEADREADER_ERR" 2>/dev/null)"
+  fi
+
+  # ---------------------------------------------------------------------
   # TC-LEASE-027: the zero-AGENT_PROGRESS_FILE fast path (bare `cat`) is
   # unaffected by the retry helper — still byte-identical, still a plain
   # `cat`, even under the same EAGAIN pressure.
@@ -878,7 +949,7 @@ PYEOF
   assert_eq "TC-LEASE-027 fast path (AGENT_PROGRESS_FILE unset) stays byte-identical under the same pressure" \
     "$expected_sha" "$fastpath_sha"
 else
-  echo "  SKIP: TC-LEASE-024..027 require python3 (not found on PATH) — the fcntl-based nonblocking-pipe harness has no shell-only equivalent"
+  echo "  SKIP: TC-LEASE-024..028 require python3 (not found on PATH) — the fcntl-based nonblocking-pipe harness has no shell-only equivalent"
 fi
 
 # ---------------------------------------------------------------------------

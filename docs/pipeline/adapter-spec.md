@@ -493,13 +493,19 @@ this gap: both `printf` sites in the read loop go through it instead of a
 bare `printf`, retrying a failed `PIPE_BUF`-sized write slice for up to ~2s
 before giving up. This does not weaken R3 — the byte-identical contract still
 holds for every write that lands within the retry budget (`tee` always
-drains, so a `SIGPIPE`-free EAGAIN is transient by construction). The ONLY
-carve-out is bound exhaustion (a reader that stalls, not dies, for the full
-~2s): that record is dropped with exactly one best-effort stderr diagnostic,
-never a silent drop and never an unbounded hang. See
+drains, so `EAGAIN` here is transient by construction). A genuinely dead
+reader (`EPIPE`) is distinguished from transient `EAGAIN` by inspecting
+`printf`'s own error text and fails FAST instead of consuming the retry
+budget — bash's `printf` does not die to `SIGPIPE` on a broken pipe, so
+without this check `EPIPE` would otherwise be misclassified as retryable
+`EAGAIN` (round-1 review finding). The ONLY carve-outs are bound exhaustion
+(a reader that stalls, not dies, for the full ~2s) and the dead-reader case:
+either way, that record is dropped with exactly one best-effort stderr
+diagnostic, never a silent drop and never an unbounded hang. See
 [INV-135](invariants.md#inv-135-the-agent-progress-lease-is-a-producer-only-signal-refreshed-on-launch-and-per-complete-output-record-never-by-the-heartbeat)
-for the full rationale and the atomic-`PIPE_BUF`-slicing mechanics (why a
-naive whole-string retry would risk resending already-delivered bytes).
+for the full rationale, the atomic-`PIPE_BUF`-slicing mechanics (why a naive
+whole-string retry would risk resending already-delivered bytes), and the
+EPIPE-vs-EAGAIN classification detail.
 
 **Clause R4 (exit-status transparency).** The recorder's own exit status
 (always `0`) **MUST NOT** be read by any caller. Every call site appends the

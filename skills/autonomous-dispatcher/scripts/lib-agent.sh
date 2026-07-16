@@ -1313,8 +1313,19 @@ _agent_progress_cleanup() {
 # Node's own writes fill the pipe buffer this recorder's `printf` can get
 # EAGAIN and — bash `printf` does not retry EAGAIN itself — silently drop the
 # record. `tee` is a fast, always-draining reader, so EAGAIN here is
-# transient by construction; retrying the write is correct. A genuinely dead
-# reader raises SIGPIPE/EPIPE (not EAGAIN) and is unaffected by this loop.
+# transient by construction; retrying the write is correct.
+#
+# A genuinely dead reader raises EPIPE, NOT EAGAIN — but (round-1 review
+# finding) bash's `printf` builtin does NOT die to SIGPIPE on that error the
+# way a raw write(2) caller might expect; it catches the failure internally
+# and returns non-zero with "write error: Broken pipe" on its OWN stderr,
+# same code path as EAGAIN's "Resource temporarily unavailable". Blindly
+# retrying every non-zero `printf` (discarding that message via `2>/dev/null`)
+# would burn the full ~2s retry budget PER RECORD against a dead reader
+# instead of failing fast — this helper captures the message (via a saved
+# fd-dup, so `printf`'s OWN successful output still reaches the real
+# destination) and classifies "Broken pipe" as terminal: drop immediately,
+# don't retry. Only unrecognized/EAGAIN-shaped failures retry.
 #
 # Bytes ALREADY accepted by a partial write() must never be resent — bash's
 # printf can itself return a short count before erroring (observed: an
@@ -1330,33 +1341,48 @@ _agent_progress_cleanup() {
 # boundary landing mid-UTF-8-codepoint still round-trips byte-for-byte.
 _agent_progress_write_retry() {
   local LC_ALL=C
-  local data="$1" total wrote=0 off=0 chunk=4096 take piece attempts
+  local data="$1" total wrote=0 off=0 chunk=4096 take piece attempts err
+  local write_fd
   total=${#data}
   [[ "$total" -eq 0 ]] && return 0
+  # Duplicate the CURRENT fd 1 once so `printf`'s stderr can be captured via
+  # command substitution without losing its (successful-case) stdout to the
+  # substitution's own subshell — the write target is fd 1 at call time,
+  # matching every other write site in this recorder.
+  exec {write_fd}>&1
   while (( off < total )); do
     take=$(( total - off < chunk ? total - off : chunk ))
     piece="${data:off:take}"
     attempts=0
     while :; do
-      if printf '%s' "$piece" 2>/dev/null; then
+      err=$(printf '%s' "$piece" 2>&1 1>&"$write_fd")
+      if [[ $? -eq 0 ]]; then
         off=$(( off + take ))
         wrote=$(( wrote + take ))
         break
       fi
+      if [[ "$err" == *"Broken pipe"* ]]; then
+        # Dead reader (EPIPE) — not transient, retrying cannot help. Drop
+        # immediately instead of burning the retry budget.
+        printf 'lib-agent.sh: _agent_progress_recorder: dropping output record (%d of %d bytes written) — write error: Broken pipe\n' \
+          "$wrote" "$total" >&2 || true
+        exec {write_fd}>&-
+        return 1
+      fi
       attempts=$(( attempts + 1 ))
       # ~2s total budget per slice (40 * 0.05s), matches the issue's
-      # "bounded total (e.g. ~2s worth)" guidance. A dead reader would have
-      # already raised SIGPIPE/EPIPE (fatal, not looped here) rather than
-      # EAGAIN, so this bound only ever protects against a pathological
-      # stall in an otherwise-live reader.
+      # "bounded total (e.g. ~2s worth)" guidance — bounds a pathological
+      # stall in an otherwise-live (non-EPIPE) reader.
       if (( attempts >= 40 )); then
         printf 'lib-agent.sh: _agent_progress_recorder: dropping output record (%d of %d bytes written) after %d retries — write error: Resource temporarily unavailable\n' \
           "$wrote" "$total" "$attempts" >&2 || true
+        exec {write_fd}>&-
         return 1
       fi
       sleep 0.05
     done
   done
+  exec {write_fd}>&-
   return 0
 }
 
