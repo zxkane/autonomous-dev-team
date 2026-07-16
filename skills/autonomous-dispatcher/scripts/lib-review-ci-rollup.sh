@@ -59,10 +59,11 @@ _classify_ci_rollup_gate() {
 
 # _ci_rollup_wait_max — read CI_ROLLUP_WAIT_MAX with the same
 # regex-then-fallback shape as lib-review-e2e.sh's _gate_breaker_threshold
-# (INV-122), plus an explicit floor of 1 and a logged WARNING on any
-# fallback (issue #489: "non-numeric or <1 falls back to default with a
-# WARN — mirror BOT_REVIEW_WAIT_MAX / GATE_FAIL_STALL_THRESHOLD validation
-# style").
+# (INV-122: GATE_FAIL_STALL_THRESHOLD), plus an explicit floor of 1 and a
+# logged WARNING on any fallback. Note: BOT_REVIEW_WAIT_MAX itself (read
+# inline in autonomous-review.sh) has NO such validation — only
+# _gate_breaker_threshold's actual regex-then-fallback-with-WARNING shape is
+# the real precedent this helper mirrors.
 _ci_rollup_wait_max() {
   local raw="${CI_ROLLUP_WAIT_MAX:-3}"
   local val="$raw"

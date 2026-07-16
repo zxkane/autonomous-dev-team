@@ -4310,7 +4310,8 @@ if [[ "$PASSED_VERDICT" == "true" ]]; then
     emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-non-substantive" "head-changed" 2>/dev/null || true
     # [INV-129 [P3]] round=0 second reset channel (see the R3 comment near the AGGREGATE=="pass" branch).
     itp_post_comment "$ISSUE_NUMBER" "$(_review_round_marker "$ISSUE_NUMBER" "$PR_HEAD_SHA" 0)" 2>/dev/null || true
-    itp_transition_state "$ISSUE_NUMBER" "reviewing" "pending-review" 2>/dev/null || true
+    itp_transition_state "$ISSUE_NUMBER" "reviewing" "pending-review" 2>/dev/null \
+      || log "WARNING: itp_transition_state reviewing→pending-review failed for issue #${ISSUE_NUMBER} (CI-rollup gate, head-changed) — label may not reflect the posted verdict."
     RESULT_PARSED=true
     exit 0
   }
@@ -4327,7 +4328,11 @@ if [[ "$PASSED_VERDICT" == "true" ]]; then
   CI_ROLLUP_RAW=$(chp_ci_rollup "$PR_NUMBER" 2>/dev/null || true)
   CI_ROLLUP_TOKEN=""
   CI_ROLLUP_FAILED_CHECKS="[]"
-  if [[ -n "$CI_ROLLUP_RAW" ]] && jq -e 'type == "object" and has("token") and has("failed_checks")' >/dev/null 2>&1 <<<"$CI_ROLLUP_RAW"; then
+  # (.failed_checks | type) == "array" is required too — a provider leaf that
+  # returns the right keys but the wrong .failed_checks TYPE (e.g. a bare
+  # string) must degrade to block-nonsubstantive here, not crash the
+  # CI_ROLLUP_NAMES join below under `set -e`.
+  if [[ -n "$CI_ROLLUP_RAW" ]] && jq -e 'type == "object" and has("token") and has("failed_checks") and (.failed_checks | type) == "array"' >/dev/null 2>&1 <<<"$CI_ROLLUP_RAW"; then
     CI_ROLLUP_TOKEN=$(jq -r '.token' <<<"$CI_ROLLUP_RAW" 2>/dev/null)
     CI_ROLLUP_FAILED_CHECKS=$(jq -c '.failed_checks' <<<"$CI_ROLLUP_RAW" 2>/dev/null)
   fi
@@ -4343,7 +4348,7 @@ if [[ "$PASSED_VERDICT" == "true" ]]; then
     # `failed` — a real, dev-actionable finding naming every failed check.
     # A re-push re-triggers CI (mirrors the bot-gate give-up rationale) —
     # never infer protected-path ownership from check names.
-    CI_ROLLUP_NAMES=$(jq -r 'if length > 0 then join(", ") else "(unnamed)" end' <<<"$CI_ROLLUP_FAILED_CHECKS" 2>/dev/null)
+    CI_ROLLUP_NAMES=$(jq -r 'if length > 0 then map(. // "(unnamed)") | join(", ") else "(unnamed)" end' <<<"$CI_ROLLUP_FAILED_CHECKS" 2>/dev/null)
     log "BLOCKING: PR #${PR_NUMBER} has failed CI check(s) [${CI_ROLLUP_NAMES}] — overriding PASS verdict, routing to pending-dev."
 
     itp_post_comment "$ISSUE_NUMBER" \
@@ -4363,8 +4368,9 @@ Findings->Decision Gate: 1 blocking finding(s) -- FAIL.
       || log "WARNING: submit_request_changes returned non-zero (best-effort); continuing the FAIL route."
 
     # Best-effort label flip: the FAIL verdict trailer above already recorded
-    # the decision; a failed transition here is logged, not fatal.
-    itp_transition_state "$ISSUE_NUMBER" "reviewing" "pending-dev" 2>/dev/null || true
+    # the decision; a failed transition here is non-fatal but IS logged below.
+    itp_transition_state "$ISSUE_NUMBER" "reviewing" "pending-dev" 2>/dev/null \
+      || log "WARNING: itp_transition_state reviewing→pending-dev failed for issue #${ISSUE_NUMBER} (CI-rollup gate, failed check) — label may not reflect the posted verdict."
 
     log "Issue #${ISSUE_NUMBER} moved to pending-dev (failed CI check — dev must fix and push)."
     RESULT_PARSED=true
@@ -4411,8 +4417,9 @@ Findings->Decision Gate: 1 blocking finding(s) -- FAIL.
         "${CI_ROLLUP_REASON^} after ${CI_ROLLUP_WAIT_COUNT} wait(s) (CI-rollup hard gate, INV-134). reviewDecision is CHANGES_REQUESTED until CI resolves." \
         || log "WARNING: submit_request_changes returned non-zero (best-effort); continuing the FAIL route."
       # Best-effort label flip: the FAIL verdict trailer above already recorded
-      # the decision; a failed transition here is logged, not fatal.
-      itp_transition_state "$ISSUE_NUMBER" "reviewing" "pending-dev" 2>/dev/null || true
+      # the decision; a failed transition here is non-fatal but IS logged below.
+      itp_transition_state "$ISSUE_NUMBER" "reviewing" "pending-dev" 2>/dev/null \
+        || log "WARNING: itp_transition_state reviewing→pending-dev failed for issue #${ISSUE_NUMBER} (CI-rollup gate, wait-cap give-up) — label may not reflect the posted verdict."
       RESULT_PARSED=true
       exit 0
     fi
@@ -4426,7 +4433,8 @@ Findings->Decision Gate: 1 blocking finding(s) -- FAIL.
     emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-non-substantive" "$CI_ROLLUP_CAUSE" 2>/dev/null || true
     # [INV-129 [P3]] round=0 second reset channel (see the R3 comment near the AGGREGATE=="pass" branch).
     itp_post_comment "$ISSUE_NUMBER" "$(_review_round_marker "$ISSUE_NUMBER" "$PR_HEAD_SHA" 0)" 2>/dev/null || true
-    itp_transition_state "$ISSUE_NUMBER" "reviewing" "pending-review" 2>/dev/null || true
+    itp_transition_state "$ISSUE_NUMBER" "reviewing" "pending-review" 2>/dev/null \
+      || log "WARNING: itp_transition_state reviewing→pending-review failed for issue #${ISSUE_NUMBER} (CI-rollup gate, bounded wait) — label may not reflect the posted verdict."
     RESULT_PARSED=true
     exit 0
   fi
