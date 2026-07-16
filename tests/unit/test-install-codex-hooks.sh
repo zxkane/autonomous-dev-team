@@ -109,6 +109,72 @@ else
   bad "Bash matcher remains present"
 fi
 
+echo "=== TC-CDCR-002A: rendered hooks.json is schema-legal for Codex's strict parser (#501) ==="
+if [[ "$(jq -c '(keys | sort)' "$hooks_file")" == '["description","hooks"]' ]]; then
+  ok "top-level keys are exactly description and hooks"
+else
+  bad "top-level keys are exactly description and hooks"
+fi
+assert_file_not_contains "no _managed_by key leaks into hooks.json" "$hooks_file" '"_managed_by"'
+assert_file_not_contains "no _managed_note key leaks into hooks.json" "$hooks_file" '"_managed_note"'
+if [[ "$(jq -r '.description' "$hooks_file")" == \
+      "Managed by skills/autonomous-common/scripts/install-codex-hooks.sh — hand-edits are overwritten on the next install." ]]; then
+  ok "description carries the exact provenance string"
+else
+  bad "description carries the exact provenance string"
+fi
+
+echo "=== TC-CDCR-002B: canonical template and a non-Codex installer output are unchanged (#501) ==="
+TEMPLATE="$PROJECT_ROOT/skills/autonomous-common/scripts/claude-settings.template.json"
+if jq -e 'has("_managed_by") and has("_managed_note")' "$TEMPLATE" >/dev/null; then
+  ok "canonical template still carries _managed_by/_managed_note"
+else
+  bad "canonical template still carries _managed_by/_managed_note"
+fi
+kiro_repo=$(new_repo kiro_unaffected)
+if (
+  cd "$kiro_repo" &&
+    bash "$PROJECT_ROOT/skills/autonomous-common/scripts/install-kiro-hooks.sh" --no-git-hook >/dev/null 2>&1
+); then
+  ok "kiro installer still runs"
+else
+  bad "kiro installer still runs"
+fi
+if jq -e 'has("_managed_by") and has("_managed_note")' \
+    "$kiro_repo/.kiro/agents/default.json" >/dev/null; then
+  ok "kiro output still carries the _managed_by/_managed_note markers"
+else
+  bad "kiro output still carries the _managed_by/_managed_note markers"
+fi
+
+echo "=== TC-CDCR-002C: render-time validation fails loudly on an illegal top-level key (#501) ==="
+# render_codex_hooks only ever deletes _managed_by/_managed_note; any OTHER
+# top-level key the template introduces rides straight through the jq
+# transform, so it is the case this validation exists to catch. Run against
+# a private copy of the scripts dir (never mutate the shared repo template —
+# tests/unit/README.md forbids repo-level shared state across concurrent tests).
+scripts_copy="$TMPDIR/scripts-copy-illegal-key"
+cp -r "$PROJECT_ROOT/skills/autonomous-common/scripts" "$scripts_copy"
+jq '. + {"extra_top_level_key": true}' "$scripts_copy/claude-settings.template.json" \
+  > "$scripts_copy/claude-settings.template.json.next"
+mv "$scripts_copy/claude-settings.template.json.next" \
+  "$scripts_copy/claude-settings.template.json"
+repo=$(new_repo illegal_key)
+if (
+  cd "$repo" &&
+    bash "$scripts_copy/install-codex-hooks.sh" --no-git-hook \
+      >/dev/null 2>"$repo/install.err"
+); then
+  bad "render-time validation must refuse an illegal top-level key"
+else
+  ok "render-time validation refuses an illegal top-level key"
+fi
+[[ ! -f "$repo/.codex/hooks.json" ]] \
+  && ok "illegal-key refusal happens before hooks.json is written" \
+  || bad "illegal-key refusal happens before hooks.json is written"
+assert_file_contains "illegal-key diagnostic is surfaced" "$repo/install.err" \
+  'failed validation'
+
 echo "=== TC-CDCR-003: re-run remains idempotent ==="
 install "$repo" || bad "second install succeeds"
 canonical_count=$(grep -cE '^[[:space:]]*hooks[[:space:]]*=[[:space:]]*true' "$config_file")

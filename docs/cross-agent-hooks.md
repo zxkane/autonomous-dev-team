@@ -74,6 +74,15 @@ Each installer is idempotent and preserves any other top-level keys you have in 
   definition must be trusted with `/hooks`. Vetted unattended automation can
   pass `--dangerously-bypass-hook-trust`. See the official
   [Codex hooks documentation](https://developers.openai.com/codex/hooks/).
+  **`.codex/hooks.json` schema is strict**: Codex's parser only accepts
+  top-level `description` and `hooks` — any other top-level key (e.g. the
+  `_managed_by`/`_managed_note` markers other installers extract from the
+  canonical template) makes it reject the file wholesale and silently
+  disables every project hook for the session (#501). `render_codex_hooks`
+  therefore deletes those two keys and puts the provenance note in the
+  legal `description` field instead; a render-time validation refuses to
+  emit any other top-level key. See
+  `tests/unit/test-install-codex-hooks.sh` (TC-CDCR-002A/B/C).
 - **Windsurf**: no per-tool matcher field — `pre_run_command` fires for every shell command, `pre_write_code` for every file write/edit. Hooks must self-filter inside the script (e.g., `block-push-to-main.sh` already inspects the command). The installer folds Claude's `(event, matcher)` pairs into Windsurf's tool-specific events.
 - **Kimi CLI**: TOML config, beta feature upstream. Tool names differ (`WriteFile`/`StrReplaceFile`/`RunShell` rather than Claude's `Write`/`Edit`/`Bash`). Default install target is user-level (`~/.kimi/config.toml`); `--project` writes `.kimi/config.toml` (experimental — Kimi may only read user-level).
 

@@ -299,8 +299,13 @@ EOF
 
 render_codex_hooks() {
   local template="$1" output="$2"
+  # Codex's hooks-config parser is strict: top-level keys are limited to
+  # `description` and `hooks`. Provenance therefore rides in `description`
+  # instead of the `_managed_by`/`_managed_note` markers other installers
+  # extract from the canonical template (issue #501).
   if ! jq '
-    ._managed_note = "This hooks block is maintained by skills/autonomous-common/scripts/install-codex-hooks.sh. Hand-edits inside this block are overwritten on the next install."
+    del(._managed_by, ._managed_note)
+    | .description = "Managed by skills/autonomous-common/scripts/install-codex-hooks.sh — hand-edits are overwritten on the next install."
     | .hooks.PreToolUse as $pre
     | ([
         $pre[]
@@ -325,6 +330,7 @@ render_codex_hooks() {
   if ! jq -e '
     ([.hooks.PreToolUse[] | select(.matcher == "^apply_patch$")] | length == 1)
     and ([.. | strings | select(contains("$CLAUDE_PROJECT_DIR"))] | length == 0)
+    and ((keys | sort) == ["description", "hooks"])
   ' "$output" >/dev/null; then
     echo "ERROR: rendered Codex hooks failed validation" >&2
     return 1
