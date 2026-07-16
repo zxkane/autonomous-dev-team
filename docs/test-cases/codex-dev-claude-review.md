@@ -44,6 +44,16 @@
 | TC-CDCR-019O | Kiro/Windsurf translation deduplicates hooks that converge on one matcher/event | Duplicate commands are removed without changing canonical command order |
 | TC-CDCR-019P | An existing destination is replaced by a symlink after the shell snapshot but before atomic capture | Capture rejects the changed source type and leaves the concurrent symlink at the canonical path |
 
+## Codex hooks.json schema legality (#501)
+
+Codex's hooks-config parser is strict: top-level keys are limited to `description` and `hooks`. `render_codex_hooks` (install-codex-hooks.sh) deletes the `_managed_by`/`_managed_note` markers and moves provenance into `description`; a render-time validation fails loudly if a future template change would reintroduce an illegal key.
+
+| ID | Scenario | Expected |
+|---|---|---|
+| TC-CDCR-002A | Rendered `.codex/hooks.json` | Top-level keys are exactly `["description","hooks"]`; `_managed_by`/`_managed_note` are absent; `description` equals the exact provenance string |
+| TC-CDCR-002B | Canonical template and a non-Codex installer (kiro) | `_managed_by`/`_managed_note` still ride in the template and in kiro's output — the Codex-only fix leaves them untouched |
+| TC-CDCR-002C | Template renders an illegal top-level key | Render-time validation refuses before `hooks.json` is written and surfaces a diagnostic |
+
 ## Hook payload normalization and behavior
 
 | ID | Scenario | Expected |
