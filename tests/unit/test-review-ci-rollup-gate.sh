@@ -155,6 +155,11 @@ rc="${row%%|*}"; out="${row#*|}"
 assert_eq "TC-CIR-LEAF-GH-03 SKIPPED+SUCCESS → green" \
   "green" "$(jq -r '.token' <<<"$out" 2>/dev/null)"
 
+row="$(_drive_gh_rollup '[{"name":"a","state":"NEUTRAL"},{"name":"b","state":"SUCCESS"}]' 1)"
+rc="${row%%|*}"; out="${row#*|}"
+assert_eq "TC-CIR-LEAF-GH-03b NEUTRAL+SUCCESS → green (NEUTRAL is non-blocking, same as SUCCESS/SKIPPED)" \
+  "green" "$(jq -r '.token' <<<"$out" 2>/dev/null)"
+
 row="$(_drive_gh_rollup '[]' 0)"
 rc="${row%%|*}"; out="${row#*|}"
 assert_eq "TC-CIR-LEAF-GH-04 empty array → none" \
@@ -295,6 +300,65 @@ else
 fi
 assert_grep "TC-CIR-HEAD-02 head-changed guard requires non-empty PR_HEAD_SHA (empty never matches)" \
   '\[\[ -n "\$reviewed" \]\] \|\| return 1' "$WRAPPER"
+
+# TC-CIR-HEAD-03 — BEHAVIORAL proof (not just a call-count grep) that the two
+# head-pin checks are independent LIVE queries, not a cached first answer: a
+# regression that made the second check reuse the first query's result would
+# leave the TC-CIR-HEAD-01 call-count pattern completely unchanged (the text
+# "_cir_head_matches ..." would still appear twice) while silently defeating
+# the mid-call HEAD-drift detection the docs claim. Extract the REAL
+# _cir_head_matches body verbatim from the wrapper (sed, mirrors the
+# _render_close_keyword extraction idiom in run-provider-conformance.sh) and
+# CALL IT TWICE in one subshell — exactly like the real gate's before/after
+# call sites — against a stubbed chp_pr_view that answers DIFFERENTLY on the
+# 2nd call than the 1st, modeling a HEAD that changed mid-gate. Echoes
+# "<first_rc>|<second_rc>".
+_cir_drive_twice() {
+  local reviewed="$1" first_answer="$2" second_answer="$3"
+  local call_count_file; call_count_file="$(mktemp)"; printf '0' > "$call_count_file"
+  # A counter kept in a plain shell var would NOT persist across the two
+  # _cir_head_matches invocations below: each call does `current=$(chp_pr_view
+  # | jq ...)`, and command substitution always forks a subshell, so any
+  # in-process var chp_pr_view mutates is lost the instant that subshell
+  # exits. A file is the only counter that survives both calls.
+  env -u PROJECT_DIR PR_NUMBER=42 \
+      _CIR_FIRST="$first_answer" _CIR_SECOND="$second_answer" \
+      _CIR_CALL_FILE="$call_count_file" \
+  bash -c '
+    eval "$(sed -n "/^  _cir_head_matches() {/,/^  }$/p" "'"$WRAPPER"'" | sed "s/^  //")"
+    chp_pr_view() {
+      local n; n=$(<"$_CIR_CALL_FILE"); n=$((n + 1))
+      printf "%s" "$n" > "$_CIR_CALL_FILE"
+      if [[ "$n" -eq 1 ]]; then
+        [[ -n "$_CIR_FIRST" ]] && printf "{\"headRefOid\":\"%s\"}" "$_CIR_FIRST"
+      else
+        [[ -n "$_CIR_SECOND" ]] && printf "{\"headRefOid\":\"%s\"}" "$_CIR_SECOND"
+      fi
+    }
+    _cir_head_matches "'"$reviewed"'"; rc1=$?
+    _cir_head_matches "'"$reviewed"'"; rc2=$?
+    printf "%s|%s" "$rc1" "$rc2"
+  '
+  rm -f "$call_count_file"
+}
+
+_res=$(_cir_drive_twice "sha-aaa" "sha-aaa" "sha-aaa")
+if [[ "$_res" == "0|0" ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-CIR-HEAD-03a stable HEAD across both calls -> both match (proceed)"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-CIR-HEAD-03a stable HEAD across both calls -> expected 0|0, got $_res"
+  FAIL=$((FAIL + 1))
+fi
+
+_res=$(_cir_drive_twice "sha-aaa" "sha-aaa" "sha-bbb")
+if [[ "$_res" == "0|1" ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-CIR-HEAD-03b HEAD changes between the 1st and 2nd call -> 1st matches, 2nd drifts (never approve)"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-CIR-HEAD-03b HEAD changes between the 1st and 2nd call -> expected 0|1 (drift caught post-call), got $_res"
+  FAIL=$((FAIL + 1))
+fi
 
 # ---------------------------------------------------------------------------
 echo ""
