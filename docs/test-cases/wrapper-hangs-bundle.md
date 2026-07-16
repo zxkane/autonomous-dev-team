@@ -66,7 +66,7 @@ Covers tests for #59 (INV-12), #60 (INV-13), #67 (INV-15), #500 (INV-15 rev 2).
 
 **Given** `RECEIVED_SIGTERM=1` and a stubbed `chp_pr_list` that fails on both call 1 and call 2
 **When** `cleanup()` runs
-**Then** exactly 2 `chp_pr_list` calls and exactly 1 sleep occur (bounded, not unbounded), a WARN is logged naming the failed read, and NO wrapper label transition of any kind is written — neither `pending-review` nor `pending-dev`. Regression: fails before the fix (the failure branch always wrote `pending-dev`).
+**Then** exactly 2 `chp_pr_list` calls and exactly 1 sleep occur (bounded, not unbounded), a WARN is logged naming the failed read, NO wrapper label transition of any kind is written — neither `pending-review` nor `pending-dev` — and the bot-trigger broker (gated on `PR_EXISTS>0`, which is unknown here) is also skipped. Regression: fails before the fix (the failure branch always wrote `pending-dev`).
 
 ## TC-500-03: jq parse failure on a successful transport read follows the same UNKNOWN path
 

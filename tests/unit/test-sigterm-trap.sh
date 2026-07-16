@@ -300,6 +300,8 @@ assert_contains "TC-500-02 logs a WARN naming the failed read" \
   "WARN" "$STDERR_LOG"
 assert_not_contains "TC-500-02 performs NO wrapper label transition" \
   "GH issue edit" "$GH_LOG"
+assert_not_contains "TC-500-02 skips the bot-trigger broker on the defer path" \
+  "BOT-TRIGGER-DRAIN" "$GH_LOG"
 
 # ---------------------------------------------------------------------------
 echo ""
