@@ -153,6 +153,51 @@ result line), and the next tick's probe would re-detect the same stale
 line — turning a park into an infinite `dev-new` loop. `--truncate`
 resets the log on Box B, the same host `--probe` read it from.
 
+### 4. Agent-progress snapshot + compare-and-signal transport ([INV-136], #485)
+
+**File pattern**: `agent-progress-snapshot-${BACKEND}.sh`. Today: `agent-progress-snapshot-remote-aws-ssm.sh`.
+
+**Behavior**: Step 5a's SIGTERM decision needs the SAME current-run
+agent-progress lease ([INV-135]'s `issue-<N>.progress.json` /
+`issue-<N>.run-id`) the local backend reads directly — but under
+`remote-aws-ssm` those sidecars live on Box B, and the freshness
+computation must happen there too: the controller must NEVER compute
+remote age from its OWN clock (a clock-skew or transport-latency
+artifact would then leak into the FRESH/STALE decision). This transport
+has TWO modes, both running the identical snapshot-classification logic
+entirely on Box B:
+
+**`--snapshot <issue_num>` stdout contract** (exactly one line):
+- `{"state":"FRESH","age":N,"pid":N,"run_id":"..."}` or `{"state":"STALE","age":N,"pid":N,"run_id":"..."}`
+- `{"state":"UNKNOWN","reason":"<token>"}` — `reason` is diagnostic-only.
+
+**`--compare-and-signal <issue_num> <expected_pid> <expected_run_id>` stdout contract** (exactly one line):
+- `SIGNALED` — the remote shell re-ran the snapshot classification, confirmed it STILL reports `STALE` with the SAME `pid`/`run_id` the caller expects, AND sent `kill -TERM` to that pid — all inside ONE remote invocation, so there is no gap between the recheck and the signal for a race to land in.
+- `ABORTED:<reason>` — the recheck found a mismatch (not stale / pid changed / run_id changed / the kill itself failed); no signal was sent.
+
+**Exit codes** (both modes):
+- `0` — definitive result printed (including a printed UNKNOWN/ABORTED — that is NOT a transport error).
+- `1` — input/env validation failure.
+- `2` — indeterminate: SSM transport fault, timeout, or a remote reply that isn't valid single-line JSON matching one of the known shapes.
+
+**Hard rule**: on `--snapshot` indeterminate (`rc=2`), the caller
+(`_remote_dev_progress_snapshot_query`, `lib-dispatch.sh`) treats it
+identically to `UNKNOWN` — NEVER fabricates STALE from a transport
+fault, mirroring the terminal-state probe's fail-closed direction (never
+the liveness transport's ALIVE-biasing direction: fabricating progress
+that didn't happen is exactly the false-SIGTERM bug this feature
+closes). On `--compare-and-signal` indeterminate, the caller
+(`_remote_dev_progress_compare_and_signal`) treats it identically to
+`ABORTED:remote-transport-failure` — never assumes the signal was sent.
+
+**Why the recheck and the signal are ONE remote call, not two**: a
+separate "recheck" SSM round-trip followed by a separate "kill" SSM
+round-trip would reopen exactly the race the final pre-kill recheck
+exists to close — the wrapper could legitimately resume progress in the
+gap between the two round-trips, and the second call would kill it
+anyway. Folding both into a single remote shell invocation closes that
+window entirely.
+
 ## `pid_alive` switching contract
 
 `lib-dispatch.sh::pid_alive` MUST consult the liveness transport BEFORE
@@ -237,6 +282,46 @@ that always misses under the new backend, silently disabling [INV-98] /
 [INV-12] PTL recovery for it (the exact #356 bug, on a different
 backend).
 
+## `dev_progress_snapshot` switching contract ([INV-136], #485)
+
+`dispatcher-tick.sh`'s Step 5a MUST consult the remote agent-progress
+transport under `EXECUTION_BACKEND=remote-aws-ssm`, mirroring the shape
+of the two switching contracts above:
+
+```bash
+# Initial snapshot (Step 5a's STALE/FRESH/UNKNOWN gate):
+if [ "${EXECUTION_BACKEND:-local}" = "remote-aws-ssm" ]; then
+  snapshot=$(_remote_dev_progress_snapshot_query "$issue_num")
+else
+  snapshot=$(dev_progress_snapshot "$issue_num")
+fi
+
+# Final pre-kill recheck + signal (only reached when the initial snapshot is STALE):
+if [ "${EXECUTION_BACKEND:-local}" = "remote-aws-ssm" ]; then
+  cas_result=$(_remote_dev_progress_compare_and_signal "$issue_num" "$snap_pid" "$snap_run_id")
+  # SIGNALED -> proceed to comment+transition; anything else -> abort.
+else
+  # local: kill -0 recheck, get_pid equality, dev_progress_snapshot recheck, then kill "$pid"
+fi
+```
+
+Local-backend installations never call the remote functions; the local
+`dev_progress_snapshot` reads [INV-135]'s sidecars directly and the
+final recheck reuses the pre-existing local `kill -0`/`get_pid` calls
+unchanged.
+
+**Adding a new non-local backend**: implement
+`agent-progress-snapshot-<your-name>.sh` per the [transport
+contract](#4-agent-progress-snapshot--compare-and-signal-transport-inv-136-485)
+above (both `--snapshot` and `--compare-and-signal` modes), then extend
+the `EXECUTION_BACKEND` equality checks in `dispatcher-tick.sh`'s Step
+5a block to also match the new backend's name. Same whitelist-not-blanket
+rule as the other two contracts: relaxing either check to `!= "local"`
+would fall through to a local read that always misses under the new
+backend, silently disabling the progress gate for it (UNKNOWN on every
+tick, which is fail-safe but defeats the point of the feature — Step 5a
+would never SIGTERM a genuinely stale wrapper on that backend).
+
 ## Failure-mode policy: indeterminate biases toward ALIVE
 
 **Rule**: when the liveness transport returns rc≠0 or stdout is neither
@@ -296,6 +381,7 @@ Common to all backends:
 | `REMOTE_LIVENESS_CHECK_TIMEOUT_SECONDS` | `8` | Dispatcher-side bound on synchronous polling (`lib-ssm.sh::_ssm_run_remote_command` honors this) |
 | `SSM_COMMAND_TIMEOUT_SECONDS` | `30` | SSM-side cap (`aws ssm send-command --timeout-seconds`) so a hung remote shell can't tie up an SSM slot for the default 600s. 30 is AWS's hard API minimum for this flag (#369) |
 | `HEARTBEAT_INTERVAL_SECONDS` | `120` | Wrapper-side heartbeat cadence; threshold = `× 3 = 360s` (consumed remote-side in the liveness snippet) |
+| `DEV_PROGRESS_STALE_SECONDS` | `1800` | Agent-progress freshness threshold ([INV-136]) — a fixed shared constant, deliberately NOT an operator-tunable `autonomous.conf` knob; overridable only for test fixtures |
 
 `remote-aws-ssm`-specific (mirrors `dispatch-remote-aws-ssm.sh`):
 
@@ -340,14 +426,17 @@ upgrade channel is separate from the wrapper-host's.
 - [`invariants.md::INV-30`](invariants.md#inv-30-pid_alive-is-authoritative-under-all-execution-backends) — the liveness rule this contract enforces; [INV-101] mirrors its shape for terminal-state detection.
 - [`invariants.md::INV-98`](invariants.md#inv-98-the-step-4a5-same-head-pr-exists-park-is-not-terminal--a-completed-session-delegates-to-the-inv-35-router-only-the-residual-cases-park) — the delegation [INV-101] makes reachable under remote backend.
 - [`invariants.md::INV-101`](invariants.md#inv-101-is_session_completed-is-authoritative-under-all-execution-backends--terminal-state-detection-consults-a-backend-specific-log-probe-mirroring-inv-30s-pid_alive-shape) — the terminal-state rule this contract's [3rd transport](#3-terminal-state-probe-transport-synchronous-probe-truncate) enforces.
-- [`dispatcher-flow.md`](dispatcher-flow.md) — Step 4a.5 / Step 4b.5 / Step 5 flows; all inherit remote awareness through the unified `pid_alive` / `is_session_completed` interfaces.
+- [`invariants.md::INV-135`](invariants.md#inv-135-the-agent-progress-lease-is-a-producer-only-signal-refreshed-on-launch-and-per-complete-output-record-never-by-the-heartbeat) — the lease sidecars the [4th transport](#4-agent-progress-snapshot--compare-and-signal-transport-inv-136-485) reads.
+- [`invariants.md::INV-136`](invariants.md#inv-136-step-5a-gates-sigterm-on-a-current-run-agent-progress-lease-not-pr-updatedat-age-alone) — the Step 5a decision rule the [4th transport](#4-agent-progress-snapshot--compare-and-signal-transport-inv-136-485) and its switching contract enforce.
+- [`dispatcher-flow.md`](dispatcher-flow.md) — Step 4a.5 / Step 4b.5 / Step 5 flows; all inherit remote awareness through the unified `pid_alive` / `is_session_completed` / `dev_progress_snapshot` interfaces.
 
 ## Adding a new backend
 
 1. Define `EXECUTION_BACKEND=<your-name>` and document the required env in this file.
-2. Implement `dispatch-<your-name>.sh` (spawn), `liveness-check-<your-name>.sh` (liveness), and `session-log-probe-<your-name>.sh` (terminal-state probe + truncate) following the contracts above.
+2. Implement `dispatch-<your-name>.sh` (spawn), `liveness-check-<your-name>.sh` (liveness), `session-log-probe-<your-name>.sh` (terminal-state probe + truncate), and `agent-progress-snapshot-<your-name>.sh` (agent-progress snapshot + compare-and-signal) following the contracts above.
 3. Add a `case` arm to `dispatcher-tick.sh::dispatch` to invoke the spawn transport.
 4. Add a `case` arm or refactor the existing condition to invoke your liveness transport from `_remote_pid_alive_query`.
 5. Add a `case` arm or refactor the existing condition to invoke your terminal-state probe transport from BOTH `_remote_session_log_probe` and `_reset_session_log`.
-6. Add unit tests mirroring `test-liveness-check-remote-aws-ssm.sh` / `test-pid-alive-remote-aws-ssm.sh` (liveness) and `test-session-log-probe-remote-aws-ssm.sh` / `test-is-session-completed-remote.sh` (terminal-state).
-7. Update [INV-30]'s and [INV-101]'s rules to mention the new backend.
+6. Add a `case` arm or refactor the existing condition to invoke your agent-progress transport from `_remote_dev_progress_snapshot_query` and `_remote_dev_progress_compare_and_signal`, and extend the equivalent checks in `dispatcher-tick.sh`'s Step 5a block.
+7. Add unit tests mirroring `test-liveness-check-remote-aws-ssm.sh` / `test-pid-alive-remote-aws-ssm.sh` (liveness), `test-session-log-probe-remote-aws-ssm.sh` / `test-is-session-completed-remote.sh` (terminal-state), and `test-step5a-progress-gate.sh` (agent-progress snapshot + compare-and-signal).
+8. Update [INV-30]'s, [INV-101]'s, and [INV-136]'s rules to mention the new backend.

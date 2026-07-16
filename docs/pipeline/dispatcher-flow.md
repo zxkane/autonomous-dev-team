@@ -624,7 +624,7 @@ For each match:
    - **DEAD + `in-progress`** → Step 5b in-progress branch.
    - **DEAD + `reviewing`** → Step 5b reviewing branch.
 
-### Step 5a: ALIVE in-progress + PR ready for review (#54, #56)
+### Step 5a: ALIVE in-progress + PR ready for review (#54, #56; progress-gated since [INV-136], #485)
 
 The dev wrapper might have finished its real work — pushed a passing CI build — and then hung in some auxiliary code (polling loop, stuck stdio). Without intervention the issue stays `in-progress` forever and no review fires.
 
@@ -636,14 +636,21 @@ All these gates must hold before sending SIGTERM (any one failing → leave alon
 |---|---|---|
 | **PR exists** | `gh pr list` finds an open PR whose body references `#N` | Agent still developing; leave alone. |
 | **CI green** | `gh pr checks <pr>` returns ≥1 check, all `SUCCESS` | CI pending or failed; agent still working. |
-| **Idle** | `now - PR.updatedAt > 300s` (strict `-gt`, [INV-10](invariants.md#inv-10-5-minute-idle-gate-before-sigterm)) | Recent activity; agent may be cleaning up. |
-| **PID still alive on recheck** | `kill -0 $PID` after the prior gates | Wrapper exited between the original probe and the SIGTERM decision; defer to next tick which will hit Step 5b DEAD. |
+| **Idle** | `now - PR.updatedAt > 300s` (strict `-gt`, [INV-10](invariants.md#inv-10-5-minute-idle-gate-before-sigterm)) | Recent activity; agent may be cleaning up. Necessary but — since [INV-136] — no longer sufficient on its own. |
+| **Agent-progress snapshot is STALE** | `dev_progress_snapshot <issue>` (local) / `_remote_dev_progress_snapshot_query` (remote-aws-ssm) reports `state=STALE` against [INV-135]'s current-run lease, threshold `DEV_PROGRESS_STALE_SECONDS=1800` | `FRESH` (agent is actively working locally) or `UNKNOWN` (fail-safe — sidecar missing/malformed/mismatched/transport failure) both leave the issue alone, logging a WARN on UNKNOWN. Never falls back to the idle gate alone. |
+| **Final pre-kill recheck passes** | Re-validated immediately before signaling — see below | Any mismatch aborts with no comment, no transition; the next tick re-evaluates from scratch. |
 
-When all gates hold:
+When all gates hold, the **final recheck + signal** differs by backend ([INV-136]):
 
-1. `kill $PID` (SIGTERM, NOT SIGKILL — wrapper trap needs to clean up).
-2. Comment: "Dev process still alive but PR #N is ready (all CI checks passed, idle Ns). Sent SIGTERM to PID. Moving to pending-review."
-3. `gh issue edit --remove-label in-progress --add-label pending-review`.
+- **Local**: re-read `issue-<N>.pid` (must equal the pid the STALE snapshot captured), re-run `kill -0 $PID` (unchanged from pre-[INV-136]), re-run `dev_progress_snapshot` and require STALE with the SAME `pid`/`run_id` as the initial snapshot. Only then `kill $PID` (SIGTERM, NOT SIGKILL — wrapper trap needs to clean up).
+- **Remote (`remote-aws-ssm`)**: dispatcher-side `get_pid`/`kill -0` are structurally blind here (the PID file lives on the wrapper box, [INV-30]), so ONE additional SSM round-trip (`agent-progress-snapshot-remote-aws-ssm.sh --compare-and-signal`) re-validates pid-file equality + STALE/pid/run_id match AND sends `kill -TERM` — all atomically, on the wrapper host, in a single remote invocation. A returned `ABORTED:<reason>` or any transport failure aborts identically to a local mismatch.
+
+Then, on a successful signal only:
+
+1. Comment: "Dev process still alive but PR #N is ready (all CI checks passed, PR inactive `<pr-age>`s, no agent progress for `<progress-age>`s). Sent SIGTERM to PID `<pid>`. Moving to pending-review."
+2. `gh issue edit --remove-label in-progress --add-label pending-review`.
+
+No state-machine label edge changed — the transition is still `in-progress → pending-review`, exactly as before [INV-136].
 
 **Convergence with the wrapper trap** ([INV-15](invariants.md#inv-15-step-5a-sigterm-race-is-non-deterministic)) — fixed in PR-6: the dev wrapper installs `trap on_sigterm TERM` that sets `RECEIVED_SIGTERM=1` and forwards SIGTERM to descendants. Its `cleanup()` rewrites `exit_code 143 → 0` when a PR exists, so the wrapper's own label edit also targets `+pending-review`. Both writers now agree on the target; the dispatcher's edit here is belt-and-suspenders against SIGKILL escalation (where the trap may not fire at all). See [`state-machine.md` § Wrapper trap vs. dispatcher Step 5](state-machine.md#wrapper-trap-vs-dispatcher-step-5).
 
@@ -654,6 +661,7 @@ The Step 5a code does fail-closed on malformed inputs, by design:
 - `gh pr list` returns malformed JSON or empty → log WARN, leave issue alone.
 - `gh pr checks` errors (token expiry, transport) → treat as "CI not green" (since we cannot prove it green). Captures stderr to a `mktemp` file (not a fixed `/tmp` path — concurrent dispatcher instances would collide; CWE-377).
 - `date -d` (GNU) and `date -j -f` (BSD/macOS) both fail → log WARN, leave alone (otherwise `IDLE_SECONDS = NOW - 0` would always exceed 300s and unconditionally fire SIGTERM).
+- Any agent-progress snapshot classified `UNKNOWN` ([INV-136]) → log WARN naming the reason token, leave issue alone. UNKNOWN never falls back to the idle gate alone — that would resurrect the exact false-SIGTERM bug this invariant closes.
 
 ### Step 5b: DEAD branches
 

@@ -62,7 +62,8 @@ Guard grounded here: `deps-resolved` (precondition for `dispatch-new`).
 | `pr.review_decision` | `autonomous-review.sh` (INV-52, wrapper-owned `--approve`/`--request-changes`) | `gh pr view --json reviewDecision` |
 | `pr.mergeable` | `autonomous-review.sh:2480-2493` (PASS branch) | `gh pr view --json mergeable`; retried up to `MERGEABLE_RETRIES` (default 3) while `UNKNOWN`; classified by `lib-review-mergeable.sh::_classify_mergeable_gate` ([INV-44](invariants.md#inv-44-mergeable-hard-gate--a-conflicting-pr-can-never-reach-approved)) |
 | `pr.ci_state` | `dispatcher-tick.sh` Step 5a | aggregate of `gh pr checks`; all `SUCCESS` required for the ALIVE+PR-ready transition |
-| `pr.updated_at` | `dispatcher-tick.sh:499` | `fetch_pr_for_issue … updatedAt`; the 5-minute idle gate ([INV-10](invariants.md#inv-10-5-minute-idle-gate-before-sigterm)) |
+| `pr.updated_at` | `dispatcher-tick.sh` Step 5a | `fetch_pr_for_issue … updatedAt`; the 5-minute idle gate ([INV-10](invariants.md#inv-10-5-minute-idle-gate-before-sigterm)) — necessary but, since [INV-136](invariants.md#inv-136-step-5a-gates-sigterm-on-a-current-run-agent-progress-lease-not-pr-updatedat-age-alone), no longer sufficient alone |
+| `dev_progress.state`/`age`/`pid`/`run_id` | `dispatcher-tick.sh` Step 5a | `dev_progress_snapshot` (local) / `_remote_dev_progress_snapshot_query` (remote-aws-ssm); classifies [INV-135]'s current-run lease as FRESH/STALE/UNKNOWN — the [INV-136](invariants.md#inv-136-step-5a-gates-sigterm-on-a-current-run-agent-progress-lease-not-pr-updatedat-age-alone) gate that must also report STALE before SIGTERM |
 
 Guards grounded here: `pr-exists-for-issue`, `no-pr-for-issue`,
 `mergeable-conflicting`, `mergeable-unknown`, `pr-still-open`, `pr-not-open`,
