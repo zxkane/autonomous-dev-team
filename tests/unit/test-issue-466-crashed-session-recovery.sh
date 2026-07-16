@@ -65,7 +65,7 @@ _MOCK_ACQUIRE_RC=0
 _MOCK_LABEL_SWAP_RC=0
 _MOCK_DISPATCH_RC=0
 _MOCK_COMMENT_FETCH_RC=0        # 1 = itp_list_comments fails (rate-limit/auth/transport blip)
-_MOCK_MATCHED_PATTERNS_MARKER='' # INV-135 (#488) D4: inv92-matched-patterns marker text, if any
+_MOCK_MATCHED_PATTERNS_MARKER='' # INV-136 (#488) D4: inv92-matched-patterns marker text, if any
 _MOCK_MATCHED_PATTERNS_HEAD=''   # (codex review round-2, PR #498) head= field the marker carries;
                                   # defaults to _MOCK_CURRENT_HEAD (same head) — set to a different
                                   # sha to simulate a STALE marker from an earlier, unrelated round.

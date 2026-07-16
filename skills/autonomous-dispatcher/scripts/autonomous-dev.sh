@@ -448,6 +448,16 @@ install_agent_sigterm_trap
 acquire_pid_guard "$PID_FILE" "autonomous-dev" "$ISSUE_NUMBER"
 export AGENT_PID_FILE="$PID_FILE"
 
+# [#493 R1] Current-run agent-progress lease sidecars, alongside PID_FILE in
+# the same per-user PID dir. Dev-side only — the review wrapper never sets
+# these, so lib-agent.sh's lease helpers stay a no-op there. Initialized
+# (run-id file + an initial lease) BEFORE run_agent/resume_agent is ever
+# called below, so this run's freshness can never be satisfied by a PRIOR
+# run's leftover lease (R1 requirement).
+export AGENT_PROGRESS_FILE="${PID_DIR}/issue-${ISSUE_NUMBER}.progress.json"
+export AGENT_PROGRESS_RUNID_FILE="${PID_DIR}/issue-${ISSUE_NUMBER}.run-id"
+_agent_progress_init
+
 # [INV-79] PR-create broker file. When the scoped agent token is armed
 # (AGENT_GH_TOKEN_FILE set by setup_agent_token), `gh pr create` (which needs
 # pull_requests:write) is brokered: the agent writes the PR title+body here and
@@ -895,6 +905,13 @@ cleanup() {
 
   # Cleanup PID file and heartbeat sibling (INV-29) always.
   rm -f "$PID_FILE" "${PID_FILE%.pid}.heartbeat" 2>/dev/null || true
+
+  # [#493 R1] Remove THIS run's progress-lease sidecars — own-run-only
+  # (compare-then-unlink on run_id inside _agent_progress_cleanup), so a
+  # newer run's files that raced this teardown are never deleted. Guarded
+  # (like every other optional-helper call in this function) because some
+  # test harnesses extract cleanup() without sourcing lib-agent.sh.
+  declare -F _agent_progress_cleanup >/dev/null 2>&1 && _agent_progress_cleanup
 
   # [Lane-GC PR-5 / INV-118] Guardian clean-exit handshake — replaces the
   # feature-guarded no-op INV-115 (PR-3) reserved this slot for ("there is

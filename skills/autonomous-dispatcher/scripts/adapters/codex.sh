@@ -29,8 +29,12 @@
 #   mode ∈ { dev-new, dev-resume }  (review goes through _run_codex_review below)
 #
 # Returns PIPESTATUS[1] — codex's rc (printf at [0] is always 0; the capture awk
-# at [2] is well-behaved). Stdin marker `-` reads the prompt from stdin (INV-34);
-# `--json` streams JSONL events incl. `thread.started` for thread-id capture.
+# at [2] and the [#493 R3] progress recorder at [3] are both well-behaved
+# pass-through filters that never change codex's own rc, and neither shifts
+# the CLI stage's own index since both are appended AFTER it). Stdin marker
+# `-` reads the prompt from stdin (INV-34); `--json` streams JSONL events
+# incl. `thread.started` for thread-id capture AND (json framing) one
+# complete-record progress refresh per line.
 adapter_invoke_codex() {
   local mode="$1" session_id="$2" prompt="$3" model="${4:-}" session_name="${5:-}"
   local extra_args=()
@@ -50,7 +54,8 @@ adapter_invoke_codex() {
           ${model:+--model "$model"} \
           "${extra_args[@]}" \
           - \
-        | _codex_capture_thread "$session_id"
+        | _codex_capture_thread "$session_id" \
+        | _agent_progress_recorder json
       return "${PIPESTATUS[1]}"
     else
       echo "[lib-agent] no captured codex thread_id for session $session_id; starting a new codex session" >&2
@@ -65,7 +70,8 @@ adapter_invoke_codex() {
       ${model:+--model "$model"} \
       "${extra_args[@]}" \
       - \
-    | _codex_capture_thread "$session_id"
+    | _codex_capture_thread "$session_id" \
+    | _agent_progress_recorder json
   return "${PIPESTATUS[1]}"
 }
 

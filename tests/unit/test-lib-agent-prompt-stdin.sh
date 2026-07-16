@@ -356,8 +356,8 @@ assert_contains "TC-EXEC-001 argv keeps --session-id (structural)" \
   "--session-id $SESSION_ID" "$claude_argv"
 assert_contains "TC-EXEC-001 argv keeps -p (structural)" \
   "-p" "$claude_argv"
-assert_contains "TC-EXEC-001 argv keeps --output-format json (structural)" \
-  "--output-format json" "$claude_argv"
+assert_contains "TC-EXEC-001 argv keeps --output-format stream-json (structural, #493 R4)" \
+  "--output-format stream-json" "$claude_argv"
 
 # ---------------------------------------------------------------------------
 echo ""

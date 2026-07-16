@@ -1,10 +1,10 @@
-# Test Cases: INV-135 capability-aware default for `REVIEW_PROTECTED_PATHS` (#488)
+# Test Cases: INV-136 capability-aware default for `REVIEW_PROTECTED_PATHS` (#488)
 
 Covers wiring the existing `agent_token_has_workflow_scope()` probe
 (`lib-review-classify.sh`, previously dead code) into the built-in DEFAULT
 derivation for `REVIEW_PROTECTED_PATHS`, the matching prompt-rule wiring, and
 the classification-time stall diagnostics. See `docs/pipeline/invariants.md`
-INV-135 and INV-92. Driven by `tests/unit/test-review-classify.sh` (D1/D2/D4
+INV-136 and INV-92. Driven by `tests/unit/test-review-classify.sh` (D1/D2/D4
 lib-level), `tests/unit/test-autonomous-review-prompt.sh` (D2 prompt-wiring
 regression pin), and `tests/unit/test-handle-completed-session-routing.sh` /
 `tests/unit/test-issue-466-crashed-session-recovery.sh` (D4 dispatcher-side
@@ -115,7 +115,7 @@ The marker is now HEAD-BOUND: `<!-- inv92-matched-patterns: head=<sha|unknown> <
 
 ## D5 — docs (verified structurally, not by these unit tests)
 
-- `docs/pipeline/invariants.md` has an `INV-135` entry; the `INV-92` entry
+- `docs/pipeline/invariants.md` has an `INV-136` entry; the `INV-92` entry
   cross-references it.
 - `docs/pipeline/review-agent-flow.md`'s classification section describes the
   capability-aware default + the D4 marker.

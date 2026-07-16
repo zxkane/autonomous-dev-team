@@ -38,7 +38,7 @@
 # for the caller, which only ESCALATES — marks a finding non-actionable — when the
 # scope is absent). A `jq` parse failure or missing `jq` therefore also yields rc 1.
 #
-# Defined ABOVE the REVIEW_PROTECTED_PATHS default (INV-135, #488) so the
+# Defined ABOVE the REVIEW_PROTECTED_PATHS default (INV-136, #488) so the
 # capability-aware default below can call it.
 agent_token_has_workflow_scope() {
   [ -n "${AGENT_TOKEN_PERMISSIONS:-}" ] || return 1
@@ -49,7 +49,7 @@ agent_token_has_workflow_scope() {
   return 1
 }
 
-# _review_protected_paths_default_list — INV-135 (#488) capability-aware DEFAULT.
+# _review_protected_paths_default_list — INV-136 (#488) capability-aware DEFAULT.
 #
 # Echoes the built-in REVIEW_PROTECTED_PATHS default: `.github/workflows/**` is
 # OMITTED iff CODE_HOST == "github" (or unset, which defaults to "github" —
@@ -92,7 +92,7 @@ _review_protected_paths_default_list() {
 #                             token does NOT carry by default (AGENT_TOKEN_PERMISSIONS,
 #                             INV-79) — OMITTED from the default when App mode +
 #                             `agent_token_has_workflow_scope` prove otherwise
-#                             (INV-135, #488; see _review_protected_paths_default_list).
+#                             (INV-136, #488; see _review_protected_paths_default_list).
 #   - CODEOWNERS / .github/CODEOWNERS — code-ownership policy a maintainer owns.
 #
 # `${VAR-default}` (NO colon) — the default is applied ONLY when the var is UNSET.
@@ -110,7 +110,7 @@ REVIEW_PROTECTED_PATHS="${REVIEW_PROTECTED_PATHS-$(_review_protected_paths_defau
 # Echoes the FIRST pattern in REVIEW_PROTECTED_PATHS that <path> matches, and
 # returns 0; echoes nothing and returns 1 if no pattern matches (or <path> is
 # empty — a finding with no `file` field cannot be a protected-path finding).
-# `review_path_is_protected` is a thin boolean wrapper around this (INV-135,
+# `review_path_is_protected` is a thin boolean wrapper around this (INV-136,
 # #488 D4: the stall-notice diagnostics need the MATCHED pattern text, not
 # just a yes/no, so the matching logic is factored out once here).
 #
@@ -204,7 +204,7 @@ NO_PROTECTED
     return 0
   fi
   # Non-empty: advertise the exact protected glob list the lib matcher uses.
-  # INV-135 (#488) D2: whether the dev agent's token has the `workflows` scope
+  # INV-136 (#488) D2: whether the dev agent's token has the `workflows` scope
   # in THIS configuration is resolved from the SAME capability check (incl. the
   # CODE_HOST=github gate) D1's default derivation uses — never a hardcoded "it
   # does by default" claim, so the prompt cannot assert a scope gap the running
@@ -296,7 +296,7 @@ review_classify_artifact_dev_actionable() {
 
 # review_classify_artifact_matched_patterns <canonical-json>
 #
-# INV-135 (#488) D4: echoes the sorted, unique, newline-separated
+# INV-136 (#488) D4: echoes the sorted, unique, newline-separated
 # REVIEW_PROTECTED_PATHS pattern(s) matched by ANY blocking finding's `file` in
 # the artifact — the evidence the stall-notice diagnostics need to name WHICH
 # pattern forced a finding non-actionable (the dispatcher only ever sees the

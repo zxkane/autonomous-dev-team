@@ -1,5 +1,5 @@
 #!/bin/bash
-# test-autonomous-review-inv134-matched-patterns.sh — INV-135 / issue #488 D4.
+# test-autonomous-review-inv134-matched-patterns.sh — INV-136 / issue #488 D4.
 #
 # Proves the WRAPPER-SIDE wiring of the matched-protected-path-pattern
 # stall-notice diagnostics in autonomous-review.sh: the block that computes
@@ -44,7 +44,7 @@ assert_eq() {
 
 [ -f "$WRAPPER" ] || { echo "FATAL: wrapper missing"; exit 2; }
 
-# Extract the INV-135 D4 block verbatim from the wrapper: from the comment
+# Extract the INV-136 D4 block verbatim from the wrapper: from the comment
 # marking the start of the matched-patterns aggregation through the closing
 # `fi` of the comment-post `if` (the SECOND top-level `if`/`fi` pair after the
 # start marker — a plain `/start/,/^    fi$/` range would stop at the first
@@ -52,13 +52,13 @@ assert_eq() {
 BLOCK_SLICE=$(mktemp)
 trap 'rm -f "$BLOCK_SLICE"' EXIT
 awk '
-  /^    # INV-135 \(#488\) D4: collect the sorted\/unique matched$/ { active=1 }
+  /^    # INV-136 \(#488\) D4: collect the sorted\/unique matched$/ { active=1 }
   active {
     print
     if ($0 == "    fi") { fi_count++; if (fi_count == 2) { exit } }
   }
 ' "$WRAPPER" > "$BLOCK_SLICE"
-[ -s "$BLOCK_SLICE" ] || { echo "FATAL: could not extract the INV-135 D4 block from the wrapper — has it moved/been renamed?"; exit 2; }
+[ -s "$BLOCK_SLICE" ] || { echo "FATAL: could not extract the INV-136 D4 block from the wrapper — has it moved/been renamed?"; exit 2; }
 # Sanity: the slice must contain both the aggregation loop and the comment post.
 grep -q 'AGENT_MATCHED_PATTERNS' "$BLOCK_SLICE" || { echo "FATAL: extracted slice missing AGENT_MATCHED_PATTERNS reference"; exit 2; }
 grep -q 'inv92-matched-patterns' "$BLOCK_SLICE" || { echo "FATAL: extracted slice missing the marker literal"; exit 2; }

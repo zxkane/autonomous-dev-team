@@ -158,15 +158,19 @@ run_dispatch() {
   '
 }
 
-# TC-010 claude → adapter assembles --session-id / --output-format json.
+# TC-010 claude → adapter assembles --session-id / --output-format stream-json.
 REC="$TMPG/rec-claude"; : > "$REC"; run_dispatch claude run_agent "$REC"
 claude_argv=$(cat "$REC")
 assert_contains "TC-010 claude run_agent routes to adapter (--session-id present)" '--session-id' "$claude_argv"
-assert_contains "TC-010 claude argv carries --output-format json" '--output-format json' "$claude_argv"
+assert_contains "TC-010 claude argv carries --output-format stream-json (#493 R4)" '--output-format stream-json' "$claude_argv"
+assert_contains "TC-010 claude dev-new argv carries --verbose (#493 R4, required alongside stream-json)" '--verbose' "$claude_argv"
 
 # TC-012 mode routing: claude resume uses --resume.
 REC="$TMPG/rec-claude-r"; : > "$REC"; run_dispatch claude resume_agent "$REC"
-assert_contains "TC-012 claude resume_agent → adapter dev-resume (--resume)" '--resume' "$(cat "$REC")"
+claude_resume_argv=$(cat "$REC")
+assert_contains "TC-012 claude resume_agent → adapter dev-resume (--resume)" '--resume' "$claude_resume_argv"
+assert_contains "TC-012 claude resume_agent argv carries --output-format stream-json (#493 R4)" '--output-format stream-json' "$claude_resume_argv"
+assert_contains "TC-012 claude resume_agent argv carries --verbose (#493 R4, required alongside stream-json)" '--verbose' "$claude_resume_argv"
 
 # TC-020..025 per-CLI run_agent structural argv (kiro binary alias → kiro-cli).
 REC="$TMPG/rec-codex"; : > "$REC"; run_dispatch codex run_agent "$REC"
