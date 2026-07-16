@@ -456,6 +456,23 @@ assert_eq "TC-INV134-D1-07 GH_AUTH_MODE unset ⇒ conservative default" \
   "list=[.github/workflows/** CODEOWNERS .github/CODEOWNERS]" "$(grep '^list=' /tmp/d1-07-$$.out)"
 rm -f /tmp/d1-07-$$.out
 
+# TC-INV134-D1-08: App mode + workflows scope present in the var, but `jq` is
+# UNAVAILABLE (command -v jq fails) ⇒ fail-closed default (agent_token_has_
+# workflow_scope's own `command -v jq` guard, exercised via the D1 default
+# derivation rather than only directly against agent_token_has_workflow_scope
+# in isolation, as the earlier "agent_token_has_workflow_scope" test section
+# above already does).
+( unset REVIEW_PROTECTED_PATHS
+  export GH_AUTH_MODE=app
+  export AGENT_TOKEN_PERMISSIONS='{"contents":"write","workflows":"write"}'
+  command() { [ "$1" = "-v" ] && [ "$2" = "jq" ] && return 1; builtin command "$@"; }
+  source "$CLASSIFY_LIB"
+  echo "list=[$REVIEW_PROTECTED_PATHS]"
+) > /tmp/d1-08-$$.out 2>&1
+assert_eq "TC-INV134-D1-08 jq unavailable ⇒ fail-closed default" \
+  "list=[.github/workflows/** CODEOWNERS .github/CODEOWNERS]" "$(grep '^list=' /tmp/d1-08-$$.out)"
+rm -f /tmp/d1-08-$$.out
+
 echo "--- explicit REVIEW_PROTECTED_PATHS never rewritten (either direction) ---"
 
 # TC-INV134-D1-09: explicit empty + App mode + scope present ⇒ still "" (not
@@ -671,6 +688,31 @@ assert_eq "TC-INV134-D4-03 non-JSON input ⇒ empty (fail-empty)" \
 assert_eq "TC-INV134-D4-04 duplicate matches deduped to one entry" \
   "d4-04=[.github/workflows/**,]" "$(grep '^d4-04=' /tmp/d4-$$.out)"
 rm -f /tmp/d4-$$.out
+
+# TC-INV134-D4-05b [D1+D4 end-to-end]: under an App+scope-present config
+# (D1 unlocks workflows, so it is NOT in the effective REVIEW_PROTECTED_PATHS),
+# a mixed artifact whose findings touch BOTH a workflow file and CODEOWNERS
+# must report ONLY CODEOWNERS as matched — proving
+# review_classify_artifact_matched_patterns delegates to the SAME
+# capability-aware $REVIEW_PROTECTED_PATHS value D1 computes, rather than
+# hardcoding the full default pattern set independently (a regression here
+# would let the capability-aware default leak only into
+# review_path_is_protected/dev_actionable while this diagnostics function
+# kept reporting workflows as "matched" under an unlocked config — a
+# confusing, wrong stall notice naming a pattern that isn't even protected).
+( unset REVIEW_PROTECTED_PATHS
+  export GH_AUTH_MODE=app
+  export AGENT_TOKEN_PERMISSIONS='{"contents":"write","workflows":"write"}'
+  source "$CLASSIFY_LIB"
+  echo "list=[$REVIEW_PROTECTED_PATHS]"
+  J_MIXED='{"verdict":"FAIL","blockingFindings":[{"title":"wf","file":".github/workflows/ci.yml"},{"title":"owners","file":"CODEOWNERS"},{"title":"code","file":"src/foo.ts"}]}'
+  echo "matched=[$(review_classify_artifact_matched_patterns "$J_MIXED" | tr '\n' ',')]"
+) > /tmp/d4-05b-$$.out 2>&1
+assert_eq "TC-INV134-D4-05b capability-unlocked default omits workflows" \
+  "list=[CODEOWNERS .github/CODEOWNERS]" "$(grep '^list=' /tmp/d4-05b-$$.out)"
+assert_eq "TC-INV134-D4-05b matched patterns report ONLY CODEOWNERS (workflows correctly excluded)" \
+  "matched=[CODEOWNERS,]" "$(grep '^matched=' /tmp/d4-05b-$$.out)"
+rm -f /tmp/d4-05b-$$.out
 
 # ---------------------------------------------------------------------------
 echo ""

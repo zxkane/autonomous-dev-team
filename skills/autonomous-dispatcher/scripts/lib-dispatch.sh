@@ -3104,11 +3104,19 @@ last_reviewed_head() {
 # the stall comment can name it instead of pointing at [INV-92] alone. A
 # transport failure / no match yields empty — the caller's existing generic
 # wording is the fallback, never a new failure mode (D4's own spec).
+#
+# `|| true` is REQUIRED, not decorative: both call sites live under
+# `set -euo pipefail`, so a transient `itp_list_comments` failure (rate-limit
+# / auth / network blip) would otherwise propagate through the pipe's exit
+# status and ABORT the caller (mark_stalled never runs) instead of degrading
+# to the documented empty/fallback — the exact crash this function's own
+# contract promises never happens.
 _inv92_matched_patterns() {
   local issue_num="$1"
+  # A transient itp_list_comments failure must degrade to empty (fail-empty), never abort the caller under set -e/pipefail — see the docstring above.
   itp_list_comments "$issue_num" 2>/dev/null \
     | jq -r '[.[].body | select(type == "string") | capture("<!-- inv92-matched-patterns: (?<p>[^\\n]*) -->"; "g") | .p] | last // empty' \
-    2>/dev/null
+    2>/dev/null || true
 }
 
 # [INV-85] (#274): returns 0 (true) if any issue comment carries the

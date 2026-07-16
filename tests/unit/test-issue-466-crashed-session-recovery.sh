@@ -429,6 +429,66 @@ assert_eq   "TC-466-FETCH-002 returns 0 (handled via park)" "0" "$rc"
 assert_eq   "TC-466-FETCH-002 ZERO dev-new dispatched" "0" "$(_trace_verbs | grep -c '^dispatch$')"
 assert_no_match "TC-466-FETCH-002 mark_stalled NOT fired" "^mark_stalled" "$(_trace_all)"
 
+# ===========================================================================
+echo
+echo "=== TC-INV134-D4-13 [set -e regression, mirrors TC-INV134-D4-12 / TC-LIVENESS-075..078]: ==="
+echo "=== _same_head_verdict_aware_recovery's dev-actionable=false branch must not abort under real set -e ==="
+# ===========================================================================
+# This harness runs under `set +e` (line 85 above) so it can keep counting
+# PASS/FAIL after an assertion failure — that posture CANNOT catch a bare
+# `_inv92_matched_patterns` call that would abort the caller under REAL
+# `set -e` if `itp_list_comments` (inside it) transiently fails. Spawn a
+# FRESH bash subshell with real `set -euo pipefail` (mirroring
+# dispatcher-tick.sh:583's `if handle_pending_dev_pr_exists ...; then`) and
+# prove mark_stalled is still reached. This call site is CURRENTLY only ever
+# reached via that `if` context — under which bash already suppresses
+# errexit for the whole call chain (the codebase's own INV-108 precedent,
+# lib-dispatch.sh:2160) — so the `|| true` fix in _inv92_matched_patterns is
+# defense-in-depth here, not load-bearing at THIS specific call site (unlike
+# the direct dispatcher-tick.sh:693 call TC-INV134-D4-12 pins). Kept as a
+# regression pin anyway: a future refactor that calls
+# _same_head_verdict_aware_recovery as a plain (non-`if`) statement would
+# make this call site load-bearing too, and this test would still pass
+# either way — the fix's absence would only be caught by TC-INV134-D4-12.
+_d4_13_sete_probe() {
+  bash -euo pipefail -c '
+    export REPO=zxkane/autonomous-dev-team REPO_OWNER=zxkane PROJECT_ID=d4-13-sete-probe-$$ MAX_RETRIES=3 MAX_CONCURRENT=5
+    source "'"$LIB"'"
+    log() { :; }
+    extract_dev_session_id() { printf "%s" ""; }
+    fetch_pr_for_issue() { printf "%s" "{\"number\":42,\"headRefOid\":\"sha-A\"}"; }
+    last_reviewed_head() { printf "%s" "sha-A"; }
+    may_stall_now() { return 0; }
+    classify_recent_review_verdict() {
+      local _v="$3" _c="$4" _da="${5:-}"
+      printf -v "$_v" "%s" "failed-substantive"; printf -v "$_c" "%s" ""
+      [ -n "$_da" ] && printf -v "$_da" "%s" "false"
+    }
+    _d4_13_count_file="$(mktemp)"; echo 0 > "$_d4_13_count_file"
+    itp_list_comments() {
+      local _n; _n=$(<"$_d4_13_count_file"); _n=$((_n + 1)); echo "$_n" > "$_d4_13_count_file"
+      if [ "$_n" -le 1 ]; then
+        printf "%s" "[]"
+        return 0
+      fi
+      echo "gh: rate limit exceeded" >&2
+      return 1
+    }
+    itp_post_comment() { :; }
+    itp_transition_state() { :; }
+    mark_stalled() { echo "MARK_STALLED_CALLED"; }
+    if handle_pending_dev_pr_exists 99; then
+      echo "HANDLE_PENDING_RETURNED_TRUE"
+    fi
+    echo "REACHED_END"
+  ' 2>/dev/null
+}
+_D4_13_SETE_OUT="$(_d4_13_sete_probe)"
+assert_match "TC-INV134-D4-13 mark_stalled reached despite itp_list_comments failure under real set -e" \
+  "MARK_STALLED_CALLED" "$_D4_13_SETE_OUT"
+assert_match "TC-INV134-D4-13 function returns normally (does not abort the caller)" \
+  "REACHED_END" "$_D4_13_SETE_OUT"
+
 echo
 echo "=== Summary ==="
 echo "Passed: $PASS"

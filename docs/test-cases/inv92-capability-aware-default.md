@@ -73,6 +73,7 @@ check only ever touches `.github/workflows/**` membership.
 | TC-INV134-D4-02 | `src/foo.ts` only (no protected match) | empty |
 | TC-INV134-D4-03 | non-JSON input | empty (fail-empty) |
 | TC-INV134-D4-04 | two findings both matching `.github/workflows/**` | single entry (deduped) |
+| TC-INV134-D4-05b [D1+D4 end-to-end] | App + scope present (workflows unlocked), mixed artifact touching `.github/workflows/ci.yml` + `CODEOWNERS` + `src/foo.ts` | Matched patterns report `CODEOWNERS` ONLY — proves the diagnostics function delegates to the SAME capability-aware `REVIEW_PROTECTED_PATHS`, not an independently hardcoded default |
 
 ### Wrapper-side: findings comment + marker (autonomous-review.sh)
 
@@ -90,6 +91,8 @@ check only ever touches `.github/workflows/**` membership.
 | TC-INV134-D4-09 | Branch B′ fires, no marker present | The escalation notice is byte-identical to the pre-#488 generic wording (no new sentence, no failure) |
 | TC-INV134-D4-10 | `_same_head_verdict_aware_recovery`'s dev-actionable=false branch fires, marker present | Same pattern-surfacing sentence appears in that notice too |
 | TC-INV134-D4-11 | `_inv92_matched_patterns` helper: `itp_list_comments` transport failure | Returns empty (fail-empty; caller falls back to generic wording, never crashes) |
+| TC-INV134-D4-12 [set -e regression] | `handle_completed_session_routing` Branch B′, called as a bare top-level statement (mirrors `dispatcher-tick.sh:693`) under REAL `set -euo pipefail`, with the idempotency check succeeding but the `_inv92_matched_patterns`-internal `itp_list_comments` call transiently failing | `mark_stalled` is still reached and the caller returns normally — does NOT abort under `set -e`/`pipefail` (regression: `_inv92_matched_patterns`'s pipe needs `\|\| true`, or a transient transport blip aborts the entire dispatcher tick, silently skipping every other in-flight issue for that cycle) |
+| TC-INV134-D4-13 [set -e regression, defense-in-depth] | Same failure injection, but through `_same_head_verdict_aware_recovery` via `handle_pending_dev_pr_exists` under the SAME `if handle_pending_dev_pr_exists ...; then` context `dispatcher-tick.sh:583` uses | `mark_stalled` still reached; this call site is currently shielded by bash's errexit-suppression-inside-an-if-condition rule regardless of the fix, but the pin locks in the fix as defense-in-depth (a future refactor to a bare-statement call would make this call site load-bearing too) |
 
 ## D5 — docs (verified structurally, not by these unit tests)
 
