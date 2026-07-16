@@ -3,7 +3,7 @@
 **Branch**: `feat/issue-485-progress-gated-sigterm`
 **Closes**: #485
 **Depends on**: #493 (merged, INV-135 — the agent-progress lease sidecars)
-**Pipeline-docs touched**: `docs/pipeline/invariants.md` (new INV-136), `docs/pipeline/dispatcher-flow.md` (Step 5a rewrite), `docs/pipeline/remote-backend.md` (new snapshot + compare-and-signal contract), `autonomous.conf.example` (document the 1800s constant as non-configurable here).
+**Pipeline-docs touched**: `docs/pipeline/invariants.md` (new INV-137), `docs/pipeline/dispatcher-flow.md` (Step 5a rewrite), `docs/pipeline/remote-backend.md` (new snapshot + compare-and-signal contract), `autonomous.conf.example` (document the 1800s constant as non-configurable here).
 
 ---
 

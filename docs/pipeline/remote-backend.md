@@ -153,7 +153,7 @@ result line), and the next tick's probe would re-detect the same stale
 line — turning a park into an infinite `dev-new` loop. `--truncate`
 resets the log on Box B, the same host `--probe` read it from.
 
-### 4. Agent-progress snapshot + compare-and-signal transport ([INV-136], #485)
+### 4. Agent-progress snapshot + compare-and-signal transport ([INV-137], #485)
 
 **File pattern**: `agent-progress-snapshot-${BACKEND}.sh`. Today: `agent-progress-snapshot-remote-aws-ssm.sh`.
 
@@ -282,7 +282,7 @@ that always misses under the new backend, silently disabling [INV-98] /
 [INV-12] PTL recovery for it (the exact #356 bug, on a different
 backend).
 
-## `dev_progress_snapshot` switching contract ([INV-136], #485)
+## `dev_progress_snapshot` switching contract ([INV-137], #485)
 
 `dispatcher-tick.sh`'s Step 5a MUST consult the remote agent-progress
 transport under `EXECUTION_BACKEND=remote-aws-ssm`, mirroring the shape
@@ -312,7 +312,7 @@ unchanged.
 
 **Adding a new non-local backend**: implement
 `agent-progress-snapshot-<your-name>.sh` per the [transport
-contract](#4-agent-progress-snapshot--compare-and-signal-transport-inv-136-485)
+contract](#4-agent-progress-snapshot--compare-and-signal-transport-inv-137-485)
 above (both `--snapshot` and `--compare-and-signal` modes), then extend
 the `EXECUTION_BACKEND` equality checks in `dispatcher-tick.sh`'s Step
 5a block to also match the new backend's name. Same whitelist-not-blanket
@@ -381,7 +381,7 @@ Common to all backends:
 | `REMOTE_LIVENESS_CHECK_TIMEOUT_SECONDS` | `8` | Dispatcher-side bound on synchronous polling (`lib-ssm.sh::_ssm_run_remote_command` honors this) |
 | `SSM_COMMAND_TIMEOUT_SECONDS` | `30` | SSM-side cap (`aws ssm send-command --timeout-seconds`) so a hung remote shell can't tie up an SSM slot for the default 600s. 30 is AWS's hard API minimum for this flag (#369) |
 | `HEARTBEAT_INTERVAL_SECONDS` | `120` | Wrapper-side heartbeat cadence; threshold = `× 3 = 360s` (consumed remote-side in the liveness snippet) |
-| `DEV_PROGRESS_STALE_SECONDS` | `1800` | Agent-progress freshness threshold ([INV-136]) — a fixed shared constant, deliberately NOT an operator-tunable `autonomous.conf` knob; overridable only for test fixtures |
+| `DEV_PROGRESS_STALE_SECONDS` | `1800` | Agent-progress freshness threshold ([INV-137]) — a fixed shared constant, deliberately NOT an operator-tunable `autonomous.conf` knob; overridable only for test fixtures |
 
 `remote-aws-ssm`-specific (mirrors `dispatch-remote-aws-ssm.sh`):
 
@@ -426,8 +426,8 @@ upgrade channel is separate from the wrapper-host's.
 - [`invariants.md::INV-30`](invariants.md#inv-30-pid_alive-is-authoritative-under-all-execution-backends) — the liveness rule this contract enforces; [INV-101] mirrors its shape for terminal-state detection.
 - [`invariants.md::INV-98`](invariants.md#inv-98-the-step-4a5-same-head-pr-exists-park-is-not-terminal--a-completed-session-delegates-to-the-inv-35-router-only-the-residual-cases-park) — the delegation [INV-101] makes reachable under remote backend.
 - [`invariants.md::INV-101`](invariants.md#inv-101-is_session_completed-is-authoritative-under-all-execution-backends--terminal-state-detection-consults-a-backend-specific-log-probe-mirroring-inv-30s-pid_alive-shape) — the terminal-state rule this contract's [3rd transport](#3-terminal-state-probe-transport-synchronous-probe-truncate) enforces.
-- [`invariants.md::INV-135`](invariants.md#inv-135-the-agent-progress-lease-is-a-producer-only-signal-refreshed-on-launch-and-per-complete-output-record-never-by-the-heartbeat) — the lease sidecars the [4th transport](#4-agent-progress-snapshot--compare-and-signal-transport-inv-136-485) reads.
-- [`invariants.md::INV-136`](invariants.md#inv-136-step-5a-gates-sigterm-on-a-current-run-agent-progress-lease-not-pr-updatedat-age-alone) — the Step 5a decision rule the [4th transport](#4-agent-progress-snapshot--compare-and-signal-transport-inv-136-485) and its switching contract enforce.
+- [`invariants.md::INV-135`](invariants.md#inv-135-the-agent-progress-lease-is-a-producer-only-signal-refreshed-on-launch-and-per-complete-output-record-never-by-the-heartbeat) — the lease sidecars the [4th transport](#4-agent-progress-snapshot--compare-and-signal-transport-inv-137-485) reads.
+- [`invariants.md::INV-137`](invariants.md#inv-137-step-5a-gates-sigterm-on-a-current-run-agent-progress-lease-not-pr-updatedat-age-alone) — the Step 5a decision rule the [4th transport](#4-agent-progress-snapshot--compare-and-signal-transport-inv-137-485) and its switching contract enforce.
 - [`dispatcher-flow.md`](dispatcher-flow.md) — Step 4a.5 / Step 4b.5 / Step 5 flows; all inherit remote awareness through the unified `pid_alive` / `is_session_completed` / `dev_progress_snapshot` interfaces.
 
 ## Adding a new backend
@@ -439,4 +439,4 @@ upgrade channel is separate from the wrapper-host's.
 5. Add a `case` arm or refactor the existing condition to invoke your terminal-state probe transport from BOTH `_remote_session_log_probe` and `_reset_session_log`.
 6. Add a `case` arm or refactor the existing condition to invoke your agent-progress transport from `_remote_dev_progress_snapshot_query` and `_remote_dev_progress_compare_and_signal`, and extend the equivalent checks in `dispatcher-tick.sh`'s Step 5a block.
 7. Add unit tests mirroring `test-liveness-check-remote-aws-ssm.sh` / `test-pid-alive-remote-aws-ssm.sh` (liveness), `test-session-log-probe-remote-aws-ssm.sh` / `test-is-session-completed-remote.sh` (terminal-state), and `test-step5a-progress-gate.sh` (agent-progress snapshot + compare-and-signal).
-8. Update [INV-30]'s, [INV-101]'s, and [INV-136]'s rules to mention the new backend.
+8. Update [INV-30]'s, [INV-101]'s, and [INV-137]'s rules to mention the new backend.

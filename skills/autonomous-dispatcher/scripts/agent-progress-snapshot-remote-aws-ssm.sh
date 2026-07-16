@@ -1,7 +1,7 @@
 #!/bin/bash
 # agent-progress-snapshot-remote-aws-ssm.sh — Synchronous SSM-driven
 # agent-progress-lease probe (and compare-and-signal) for the dispatcher's
-# Step 5a under EXECUTION_BACKEND=remote-aws-ssm (#485, [INV-136]).
+# Step 5a under EXECUTION_BACKEND=remote-aws-ssm (#485, [INV-137]).
 #
 # Mirrors liveness-check-remote-aws-ssm.sh's shape (INV-30): the dispatcher
 # tick runs on the controller host, but #493's lease sidecars
@@ -54,7 +54,7 @@
 #   REMOTE_LIVENESS_CHECK_TIMEOUT_SECONDS — dispatcher-side poll cap
 #                                            (default 8, lib-ssm.sh)
 #   DEV_PROGRESS_STALE_SECONDS — fixed shared threshold (default 1800,
-#                                 [INV-136] — NOT a conf knob; only
+#                                 [INV-137] — NOT a conf knob; only
 #                                 overridable here for test fixtures)
 #
 # See docs/pipeline/remote-backend.md for the full backend contract.

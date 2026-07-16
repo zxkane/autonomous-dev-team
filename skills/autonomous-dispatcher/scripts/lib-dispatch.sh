@@ -1898,7 +1898,7 @@ handle_completed_session_routing() {
         if itp_list_comments "$issue_num" 2>/dev/null \
             | jq -r "[.[].body | select(contains(\"${_na_marker}\"))] | length" \
             2>/dev/null | grep -q '^0$'; then
-          # INV-136 (#488) D4: surface the matched REVIEW_PROTECTED_PATHS
+          # INV-137 (#488) D4: surface the matched REVIEW_PROTECTED_PATHS
           # pattern(s) when the review wrapper's `inv92-matched-patterns:`
           # marker is present on the issue FOR THIS HEAD; otherwise fall back
           # to the unchanged generic wording (no new failure mode). (codex
@@ -3102,7 +3102,7 @@ pr_idle_seconds() {
   _iso_age_seconds "$1"
 }
 
-# [INV-136] DEV_PROGRESS_STALE_SECONDS — a fixed shared threshold, NOT a
+# [INV-137] DEV_PROGRESS_STALE_SECONDS — a fixed shared threshold, NOT a
 # conf knob (issue #485 explicitly scopes this out of autonomous.conf).
 # Exceeds the observed 5-10+ min local verification windows (typecheck/
 # test/build between pushes) while staying far faster than the 4h
@@ -3121,7 +3121,7 @@ DEV_PROGRESS_STALE_SECONDS=1800
 #
 # `reason` is diagnostic-only (matches [a-z0-9-]+) — callers/tests MUST
 # assert on `state` and the absence of side effects, never on a specific
-# reason spelling ([INV-136] normative text).
+# reason spelling ([INV-137] normative text).
 #
 # UNKNOWN is fail-safe: any of missing/unreadable sidecar, symlink or
 # non-regular file, mode other than 0600 on progress.json, malformed JSON /
@@ -3285,7 +3285,7 @@ last_reviewed_head() {
     | jq -r '[.[].body | capture("Reviewed HEAD: `(?<sha>[0-9a-f]{7,40})`"; "g") | .sha] | last // empty'
 }
 
-# INV-136 (#488) D4: echoes the newest `inv92-matched-patterns:` marker's
+# INV-137 (#488) D4: echoes the newest `inv92-matched-patterns:` marker's
 # space-separated pattern list posted by the review wrapper's non-actionable
 # findings comment (autonomous-review.sh), or empty if no such marker exists
 # on the issue FOR THE GIVEN HEAD. The dispatcher's own stall notices (Branch
@@ -3837,7 +3837,7 @@ _same_head_verdict_aware_recovery() {
     if itp_list_comments "$issue_num" 2>/dev/null \
         | jq -r "[.[].body | select(contains(\"${_na_marker}\"))] | length" \
         2>/dev/null | grep -q '^0$'; then
-      # INV-136 (#488) D4: same marker-surfacing fallback as Branch B′ above,
+      # INV-137 (#488) D4: same marker-surfacing fallback as Branch B′ above,
       # bound to `current_head` (codex review round-2, PR #498) — the head
       # this verdict was reviewed against — so a stale marker from an
       # earlier, unrelated round can never be misattributed here.

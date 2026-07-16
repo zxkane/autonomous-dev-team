@@ -1,6 +1,6 @@
 #!/bin/bash
 # test-step5a-progress-gate.sh — Unit tests for the progress-gated Step 5a
-# SIGTERM decision (issue #485, [INV-136], consumer half of #493's
+# SIGTERM decision (issue #485, [INV-137], consumer half of #493's
 # agent-progress lease).
 #
 # Covers docs/test-cases/step5a-progress-gate.md:
@@ -489,10 +489,10 @@ echo "=== Step 5a decision matrix (real extracted control-flow block) ==="
 
 STEP5_BODY=$(awk '/^for i in \$\(seq 0 \$\(\(cand_count - 1\)\)\); do$/{f=1} f{print} f && /^done$/{exit}' "$TICK")
 
-if [[ -n "$STEP5_BODY" ]] && grep -q 'INV-136' <<<"$STEP5_BODY"; then
-  ok "Extraction control: Step 5 loop body extracted and contains the INV-136 marker"
+if [[ -n "$STEP5_BODY" ]] && grep -q 'INV-137' <<<"$STEP5_BODY"; then
+  ok "Extraction control: Step 5 loop body extracted and contains the INV-137 marker"
 else
-  bad "Extraction control: Step 5 loop body extraction is empty OR missing the INV-136 marker — the awk range no longer matches dispatcher-tick.sh's structure; every assertion below is UNRELIABLE until fixed"
+  bad "Extraction control: Step 5 loop body extraction is empty OR missing the INV-137 marker — the awk range no longer matches dispatcher-tick.sh's structure; every assertion below is UNRELIABLE until fixed"
 fi
 
 # _build_harness <harness> <backend> <initial_state> <initial_age>

@@ -808,15 +808,15 @@ for i in $(seq 0 $((cand_count - 1))); do
       continue
     fi
 
-    # [INV-10] strict > 300s. Necessary but — since [INV-136] — no longer
+    # [INV-10] strict > 300s. Necessary but — since [INV-137] — no longer
     # sufficient on its own: PR.updatedAt does not move while the agent
-    # edits/tests/builds locally between pushes ([INV-136]).
+    # edits/tests/builds locally between pushes ([INV-137]).
     if [ "$idle_seconds" -le 300 ]; then
       # Recent activity — agent may be cleaning up. Leave alone.
       continue
     fi
 
-    # [INV-136] Initial agent-progress-lease snapshot. FRESH and UNKNOWN
+    # [INV-137] Initial agent-progress-lease snapshot. FRESH and UNKNOWN
     # both mean "do not SIGTERM" — UNKNOWN is fail-safe by construction
     # (never falls back to the idle gate alone). Only STALE proceeds.
     _dps_backend="${EXECUTION_BACKEND:-local}"
@@ -830,7 +830,7 @@ for i in $(seq 0 $((cand_count - 1))); do
     if [ "$snap_state" != "STALE" ]; then
       if [ "$snap_state" = "UNKNOWN" ]; then
         snap_reason=$(jq -r '.reason // "unknown"' <<<"$snapshot" 2>/dev/null) || snap_reason="unknown"
-        echo "WARN: issue ${issue_num} agent-progress snapshot is UNKNOWN (reason=${snap_reason}) — leaving as-is [INV-136]" >&2
+        echo "WARN: issue ${issue_num} agent-progress snapshot is UNKNOWN (reason=${snap_reason}) — leaving as-is [INV-137]" >&2
       fi
       # FRESH (or UNKNOWN) — agent is actively working (or we cannot prove
       # otherwise). Leave alone.
@@ -841,11 +841,11 @@ for i in $(seq 0 $((cand_count - 1))); do
     snap_run_id=$(jq -r '.run_id // empty' <<<"$snapshot" 2>/dev/null)
     snap_age=$(jq -r '.age // empty' <<<"$snapshot" 2>/dev/null)
     if [ -z "$snap_pid" ] || [ -z "$snap_run_id" ] || [ -z "$snap_age" ]; then
-      echo "WARN: issue ${issue_num} STALE snapshot missing pid/run_id/age fields — leaving as-is [INV-136]" >&2
+      echo "WARN: issue ${issue_num} STALE snapshot missing pid/run_id/age fields — leaving as-is [INV-137]" >&2
       continue
     fi
 
-    # Final pre-kill recheck ([INV-136]): re-verify liveness AND re-run the
+    # Final pre-kill recheck ([INV-137]): re-verify liveness AND re-run the
     # snapshot, requiring STALE with the SAME pid/run_id observed above.
     # Any mismatch/FRESH/UNKNOWN aborts — no comment, no transition.
     if [ "$_dps_backend" = "remote-aws-ssm" ]; then
@@ -863,7 +863,7 @@ for i in $(seq 0 $((cand_count - 1))); do
           kill_note="Sent SIGTERM to PID ${snap_pid}"
           ;;
         *)
-          echo "INFO: issue ${issue_num} remote compare-and-signal aborted (${cas_result}); deferring to next cycle [INV-136]" >&2
+          echo "INFO: issue ${issue_num} remote compare-and-signal aborted (${cas_result}); deferring to next cycle [INV-137]" >&2
           continue
           ;;
       esac
@@ -874,14 +874,14 @@ for i in $(seq 0 $((cand_count - 1))); do
       fi
       recheck_pid=$(get_pid "$kind" "$issue_num")
       if [ "$recheck_pid" != "$snap_pid" ]; then
-        echo "INFO: issue ${issue_num} PID changed between checks (was ${snap_pid}, now ${recheck_pid}); deferring to next cycle [INV-136]" >&2
+        echo "INFO: issue ${issue_num} PID changed between checks (was ${snap_pid}, now ${recheck_pid}); deferring to next cycle [INV-137]" >&2
         continue
       fi
       recheck_snapshot=$(dev_progress_snapshot "$issue_num")
       recheck_state=$(jq -r '.state // "UNKNOWN"' <<<"$recheck_snapshot" 2>/dev/null) || recheck_state="UNKNOWN"
       recheck_run_id=$(jq -r '.run_id // empty' <<<"$recheck_snapshot" 2>/dev/null)
       if [ "$recheck_state" != "STALE" ] || [ "$recheck_run_id" != "$snap_run_id" ]; then
-        echo "INFO: issue ${issue_num} progress snapshot changed on final recheck (state=${recheck_state}); deferring to next cycle [INV-136]" >&2
+        echo "INFO: issue ${issue_num} progress snapshot changed on final recheck (state=${recheck_state}); deferring to next cycle [INV-137]" >&2
         continue
       fi
 
@@ -892,7 +892,7 @@ for i in $(seq 0 $((cand_count - 1))); do
       if kill "$snap_pid" 2>/dev/null; then
         kill_note="Sent SIGTERM to PID ${snap_pid}"
       else
-        echo "INFO: issue ${issue_num} PID ${snap_pid} already gone at signal time; deferring to next cycle [INV-136]" >&2
+        echo "INFO: issue ${issue_num} PID ${snap_pid} already gone at signal time; deferring to next cycle [INV-137]" >&2
         continue
       fi
     fi
