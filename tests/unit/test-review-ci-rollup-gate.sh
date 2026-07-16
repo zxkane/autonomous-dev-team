@@ -520,6 +520,100 @@ fi
 
 # ---------------------------------------------------------------------------
 echo ""
+echo "=== TC-CIR-REG-02: BEHAVIORAL regression — drive the REAL gate block, not just source order ==="
+# ---------------------------------------------------------------------------
+# TC-CIR-REG-01 above only proves chp_approve's call site sits after the
+# gate's classify line — a control-flow bug INSIDE the block (e.g. a
+# mis-routed branch) would not trip it. Extract the actual gate block
+# verbatim (mirrors test-autonomous-review-diffcap-wiring.sh's BLOCK_SLICE
+# strategy) and drive it in a sandbox for both a `failed` and a `green`
+# rollup, asserting on real side effects: chp_approve call count, the
+# posted finding's content, and the label transition.
+_CIR_BLOCK_SLICE=$(mktemp)
+awk '/^# CI-rollup hard gate \(INV-134, issue #489\)$/,/^fi$/' "$WRAPPER" > "$_CIR_BLOCK_SLICE"
+if [[ -s "$_CIR_BLOCK_SLICE" ]]; then
+  # The block's blocking branches call `exit 0`, which kills the subshell
+  # immediately — any command written AFTER `source "$_CIR_BLOCK_SLICE"`
+  # inside that subshell never runs on the blocking path. So the tracking
+  # files are created HERE, in the PARENT scope, before the subshell starts;
+  # they survive the subshell's exit and are read back afterward.
+  _run_cir_block() {
+    # $1 = chp_ci_rollup stdout payload, $2 = chp_ci_rollup rc, $3 = approve-count file,
+    # $4 = transition file, $5 = comment file
+    local payload="$1" rc="$2" approve_f="$3" trans_f="$4" comment_f="$5"
+    (
+      set +e
+      # shellcheck source=../../skills/autonomous-dispatcher/scripts/lib-review-ci-rollup.sh
+      source "$CIR_LIB"
+      PASSED_VERDICT=true
+      PR_NUMBER=497
+      ISSUE_NUMBER=489
+      REPO="o/r"
+      PR_HEAD_SHA="deadbeef"
+      RESULT_PARSED=false
+      log() { :; }
+      chp_pr_view() { printf '{"headRefOid":"%s"}' "$PR_HEAD_SHA"; }
+      chp_ci_rollup() { printf '%s' "$payload"; return "$rc"; }
+      chp_approve() {
+        local n; n=$(<"$approve_f"); n=$((n + 1)); echo "$n" > "$approve_f"
+      }
+      itp_post_comment() { printf '%s' "$2" >> "$comment_f"; }
+      emit_verdict_trailer() { :; }
+      _review_round_marker() { printf 'round-marker'; }
+      itp_transition_state() { printf '%s\n' "$*" >> "$trans_f"; }
+      submit_request_changes() { :; }
+      # shellcheck source=/dev/null
+      source "$_CIR_BLOCK_SLICE"
+      echo "$RESULT_PARSED" > "${trans_f}.result_parsed"
+    )
+  }
+
+  # --- failed rollup: must block, never approve, name the failed check ---
+  _approve_f=$(mktemp); echo 0 > "$_approve_f"
+  _trans_f=$(mktemp)
+  _comment_f=$(mktemp)
+  rm -f "${_trans_f}.result_parsed" 2>/dev/null
+  _run_cir_block '{"token":"failed","failed_checks":["ci/build"]}' 0 \
+    "$_approve_f" "$_trans_f" "$_comment_f"
+  # `exit 0` inside the sourced block kills the subshell BEFORE the
+  # `.result_parsed` sentinel line runs — its ABSENCE proves the block took
+  # a blocking exit path (rather than falling through to `proceed`).
+  if [[ -f "${_trans_f}.result_parsed" ]]; then
+    echo -e "  ${RED}FAIL${NC}: TC-CIR-REG-02 failed rollup: block fell through instead of blocking (sentinel file present)"
+    FAIL=$((FAIL + 1))
+  else
+    echo -e "  ${GREEN}PASS${NC}: TC-CIR-REG-02 failed rollup: block took a blocking exit path (sentinel absent)"
+    PASS=$((PASS + 1))
+  fi
+  assert_eq "TC-CIR-REG-02 failed rollup: chp_approve is NEVER called" "0" "$(<"$_approve_f")"
+  assert_grep "TC-CIR-REG-02 failed rollup: routes -reviewing +pending-dev" \
+    'reviewing pending-dev' "$_trans_f"
+  assert_grep "TC-CIR-REG-02 failed rollup: posted finding names the failed check" \
+    'ci/build' "$_comment_f"
+  rm -f "$_approve_f" "$_trans_f" "$_comment_f" "${_trans_f}.result_parsed" 2>/dev/null
+
+  # --- green rollup: must fall through, never block, never approve from
+  # inside THIS block (approval happens later in the wrapper's own PASS
+  # branch, outside the slice under test) ---
+  _approve_f2=$(mktemp); echo 0 > "$_approve_f2"
+  _trans_f2=$(mktemp)
+  _comment_f2=$(mktemp)
+  rm -f "${_trans_f2}.result_parsed" 2>/dev/null
+  _run_cir_block '{"token":"green","failed_checks":[]}' 0 \
+    "$_approve_f2" "$_trans_f2" "$_comment_f2"
+  assert_eq "TC-CIR-REG-02 green rollup: block falls through (sentinel present, RESULT_PARSED stays false)" \
+    "false" "$(cat "${_trans_f2}.result_parsed" 2>/dev/null || echo MISSING)"
+  assert_eq "TC-CIR-REG-02 green rollup: chp_approve NOT called by this block (approval happens later in the wrapper's PASS branch)" \
+    "0" "$(<"$_approve_f2")"
+  rm -f "$_approve_f2" "$_trans_f2" "$_comment_f2" "${_trans_f2}.result_parsed" 2>/dev/null
+else
+  echo -e "  ${RED}FAIL${NC}: TC-CIR-REG-02 could not extract the CI-rollup gate block from the wrapper — has it moved/been renamed?"
+  FAIL=$((FAIL + 1))
+fi
+rm -f "$_CIR_BLOCK_SLICE"
+
+# ---------------------------------------------------------------------------
+echo ""
 echo "=== TC-CIR-SRC-15: wrapper passes bash -n ==="
 # ---------------------------------------------------------------------------
 if bash -n "$WRAPPER" 2>/dev/null; then

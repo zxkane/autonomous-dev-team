@@ -34,9 +34,9 @@ rc≠0 on transport/parse failure with empty stdout.
 | TC-CIR-D1-03 | `SKIPPED` + `SUCCESS` mix | `green` | `[]` |
 | TC-CIR-D1-04 | `[]` (zero checks) | `none` | `[]` |
 | TC-CIR-D1-05 | `SUCCESS` + `FAILURE` | `failed` | `["<failing check name>"]` |
-| TC-CIR-D1-06 | `PENDING`/`QUEUED`/`IN_PROGRESS`/`EXPECTED` present, no failure | `pending` | `[]` |
+| TC-CIR-D1-06 | `PENDING`/`QUEUED`/`IN_PROGRESS`/`EXPECTED` present, no failure | `pending` | `["<still-unresolved check name>"]` (D3's wait-cap give-up finding needs them) |
 | TC-CIR-D1-07 | `FAILURE` + `PENDING` mix | `failed` (rule 1 beats rule 2) | `["<failing check name>"]` |
-| TC-CIR-D1-08 | unrecognized future state, no failure | `pending` | `[]` |
+| TC-CIR-D1-08 | unrecognized future state, no failure | `pending` | `["<still-unresolved check name>"]` |
 | TC-CIR-D1-09 | rc-0 non-array/non-object payload (`{}`, error-shaped object, scalar) | leaf rc≠0, empty stdout | — |
 | TC-CIR-D1-10 | transport failure (stub rc≠0, empty stdout) | leaf rc≠0, empty stdout | — |
 
@@ -56,7 +56,7 @@ jobs fetch (`GET /pipelines/:id/jobs`) when `head_pipeline` is non-null.
 | TC-CIR-GL-02 | jobs all `success` | `green` |
 | TC-CIR-GL-03 | jobs `success` + `failed` | `failed`, `failed_checks` names only the failed job |
 | TC-CIR-GL-04 | jobs all `skipped` | `green` |
-| TC-CIR-GL-05 | jobs `success` + `running` | `pending` |
+| TC-CIR-GL-05 | jobs `success` + `running` | `pending`, `failed_checks` names only the still-running job |
 | TC-CIR-GL-06 | jobs `[]` (pipeline exists, zero jobs reported) | `none` |
 | TC-CIR-GL-07 | first `_gl_api` call (MR view) fails | leaf rc≠0, empty stdout |
 | TC-CIR-GL-08 | second `_gl_api` call (jobs fetch) fails | leaf rc≠0, empty stdout |
