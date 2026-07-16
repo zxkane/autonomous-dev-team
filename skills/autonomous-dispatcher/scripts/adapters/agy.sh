@@ -71,6 +71,10 @@ adapter_invoke_agy() {
     conv_flag=(--conversation "$_agy_cid")
   fi
 
+  # [#493 R3] line framing (agy has no JSON event stream — see the adapter
+  # comparison table in docs/pipeline/agy-cli-support.md). Recorder is
+  # appended AFTER _run_with_timeout so PIPESTATUS[1] still holds agy's rc
+  # (index 0 is the leading printf, always 0).
   printf '%s' "$prompt" \
     | _run_with_timeout "$AGENT_CMD" \
         "${conv_flag[@]}" \
@@ -79,8 +83,9 @@ adapter_invoke_agy() {
         --print-timeout "$AGENT_TIMEOUT" \
         --log-file "$agy_log" \
         "${agy_model_args[@]}" \
-        "${extra_args[@]}"
-  local rc=$?
+        "${extra_args[@]}" \
+    | _agent_progress_recorder line
+  local rc="${PIPESTATUS[1]}"
 
   # Self-healing re-capture: on dev-new this captures the freshly-minted UUID; on
   # dev-resume it is a no-op overwrite under normal operation (agy keeps the id),

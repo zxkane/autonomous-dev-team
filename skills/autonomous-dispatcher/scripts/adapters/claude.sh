@@ -15,6 +15,17 @@
 #   mode ∈ { dev-new, dev-resume }
 #
 # Prompt-channel contract ([INV-34]): prompt is fed on stdin, never argv.
+#
+# [#493 R4] --output-format stream-json --verbose (NOT the old single-shot
+# --output-format json): one complete JSON record per line, no partial-
+# message chunking, so the shared progress recorder (R2/R3, json framing)
+# can refresh the lease once per record. --verbose is required alongside
+# stream-json (the CLI rejects stream-json without it). The final
+# `{"type":"result",...}` record keeps the SAME shape as the old
+# single-shot format's sole output object — byte-preserved at column zero
+# in the captured log — so the three existing consumers (is_session_completed,
+# session-log-probe-remote-aws-ssm.sh, metrics_parse_tokens) keep parsing the
+# last such line unmodified. See docs/pipeline/adapter-spec.md.
 adapter_invoke_claude() {
   local mode="$1" session_id="$2" prompt="$3" model="${4:-}" session_name="${5:-}"
   local extra_args=()
@@ -36,7 +47,8 @@ adapter_invoke_claude() {
       ${model:+--model "$model"}
       "${extra_args[@]}"
       -p
-      --output-format json
+      --output-format stream-json
+      --verbose
     )
   else
     claude_args=(
@@ -46,7 +58,8 @@ adapter_invoke_claude() {
       ${model:+--model "$model"}
       "${extra_args[@]}"
       -p
-      --output-format json
+      --output-format stream-json
+      --verbose
     )
   fi
   # Two invocation paths:
@@ -63,9 +76,16 @@ adapter_invoke_claude() {
   #     `$CLAUDE_CMD "$@"`, so we pass ONLY flags as "$@" —
   #     NOT the binary name and NOT `env -u`. CLAUDECODE handling is
   #     delegated to the launcher.
+  #
+  # [#493 R3] The shared progress recorder is appended as a pass-through
+  # pipeline stage AFTER _run_with_timeout (never before — the CLI stage's
+  # PIPESTATUS index must not shift). It streams stdout unchanged and
+  # refreshes the lease once per complete JSON record. Exit status is read
+  # from PIPESTATUS[1] (the CLI stage), never the recorder's own (always 0).
   if [[ ${#AGENT_LAUNCHER_ARGV[@]} -gt 0 ]]; then
-    printf '%s' "$prompt" | _run_with_timeout "${claude_args[@]}"
+    printf '%s' "$prompt" | _run_with_timeout "${claude_args[@]}" | _agent_progress_recorder json
   else
-    printf '%s' "$prompt" | _run_with_timeout env -u CLAUDECODE "$AGENT_CMD" "${claude_args[@]}"
+    printf '%s' "$prompt" | _run_with_timeout env -u CLAUDECODE "$AGENT_CMD" "${claude_args[@]}" | _agent_progress_recorder json
   fi
+  return "${PIPESTATUS[1]}"
 }

@@ -20,7 +20,8 @@
       "sonnet",
       "-p",
       "--output-format",
-      "json"
+      "stream-json",
+      "--verbose"
     ],
     "stdinSha256": "d5c930c8f8082ce538446ac727a28c19d83bbdb927fae14e2a72af7444cfd25e",
     "rc": 0,
