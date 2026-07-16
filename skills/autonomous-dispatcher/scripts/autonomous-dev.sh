@@ -1090,7 +1090,12 @@ EOF
   # (D2: PR_EXISTS stays a plain count for its other three consumers — the
   # bot-trigger broker gate, exit-0 success routing, and the metrics gate —
   # all byte-unchanged).
-  local _pr_list_e PR_EXISTS _pr_read_ok=0 _pr_attempt
+  # [#402 review round-1 [P1], TC-STR-001] `local PR_EXISTS` stays a
+  # standalone declaration (not folded into the multi-variable line below) —
+  # the source-order test greps for this literal anchor to prove PR_EXISTS is
+  # declared after the session-report post.
+  local PR_EXISTS
+  local _pr_list_e _pr_read_ok=0 _pr_attempt
   for _pr_attempt in 1 2; do
     _pr_list_e=$(_teardown_call chp_pr_list open "body" 2>/dev/null) || _pr_list_e=""
     if [[ -n "$_pr_list_e" ]]; then
@@ -1122,9 +1127,14 @@ EOF
     # residue on terminal issues), so Step 5b — not INV-25 — owns this.
     log "WARN: SIGTERM-path PR lookup failed after retry; deferring — no label write this run (INV-15/#500). Next dispatcher tick (Step 5b) reconciles."
     _emit_dev_end "$exit_code"
+    # [INV-81] Write the run end marker (rc + timing) to meta.json. Best-effort,
+    # observe-only — a failure here must not block the UNKNOWN-defer return.
     if declare -F run_artifacts_finalize >/dev/null 2>&1; then
       run_artifacts_finalize "${RUN_DIR:-}" "$exit_code" || true
     fi
+    # [INV-109] STATE=clean-exit: this defer path is still a GRACEFUL wrapper
+    # exit (no wrapper label write, but cleanup() ran to completion) — a
+    # failure to record the marker must not block the return either.
     if [[ -n "${ADT_LANE_DIR:-}" ]] && declare -F lane_set_state >/dev/null 2>&1; then
       lane_set_state "$ADT_LANE_DIR" clean-exit || true
     fi

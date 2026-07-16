@@ -88,6 +88,12 @@ Covers tests for #59 (INV-12), #60 (INV-13), #67 (INV-15), #500 (INV-15 rev 2).
 
 (TC-500-01 through TC-500-05 are covered by `tests/unit/test-sigterm-trap.sh`'s extraction-based harness, which runs the real `cleanup()` fragment against a stubbed `chp_pr_list` scripted per-call — see [`docs/pipeline/invariants.md` INV-15 rev 2](../pipeline/invariants.md#inv-15-step-5a-sigterm-race-is-non-deterministic).)
 
+## TC-CPC-006: non-SIGTERM exit-0 + successful zero-match read stays byte-unchanged
+
+**Given** `RECEIVED_SIGTERM=0`, `exit_code=0`, and a stubbed `chp_pr_list` that succeeds with a body matching no `#<issue>` reference
+**When** `cleanup()` runs
+**Then** exactly 1 `chp_pr_list` call occurs (no retry — this path never enters the SIGTERM-scoped retry loop), the "no PR was created" comment is posted, and the label transition flips `in-progress` → `pending-dev`, unchanged by #500's SIGTERM-scoped fix. Covered by `tests/unit/test-cleanup-pr-check.sh` (review round-1 [P3]: the required non-SIGTERM contract had only been pinned in `test-sigterm-trap.sh`'s TC-500-05, which exercises a failed lookup after exit 143 — not this exit-0/zero-match/pending-dev shape).
+
 ## TC-WH-010: Step 4 skips dispatch when session is completed
 
 **Given** dispatcher-tick.sh Step 4 sees an issue with `pending-dev`, valid session id, log shows completed terminal state
