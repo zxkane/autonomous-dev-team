@@ -170,7 +170,7 @@ chp_broken_ci_rollup() {
     if any(.[]; .state | is_failed) then
       {token: "failed", failed_checks: [.[] | select(.state | is_failed) | .name]}
     elif any(.[]; .state | is_nonblocking | not) then
-      {token: "pending", failed_checks: []}
+      {token: "pending", failed_checks: [.[] | select(.state | is_nonblocking | not) | .name]}
     elif length == 0 then
       {token: "none", failed_checks: []}
     else

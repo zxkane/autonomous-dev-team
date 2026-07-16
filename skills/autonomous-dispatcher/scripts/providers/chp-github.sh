@@ -434,13 +434,25 @@ chp_github_ci_status() {
 # Stdout: one JSON object `{"token":"<green|pending|failed|none>",
 # "failed_checks":["<name>",...]}`. rc≠0 on transport/parse failure with
 # EMPTY stdout (fail-closed, mirrors chp_github_ci_status's empty-stdout and
-# non-array payload guards verbatim).
+# non-array payload guards verbatim) — EXCEPT the one well-known case below.
+#
+# gh no-checks quirk: on a PR with ZERO checks configured, `gh pr checks`
+# prints "no checks reported on the '<branch>' branch" to STDERR, empty
+# STDOUT, and exits non-zero — indistinguishable from a transport failure by
+# stdout alone. Unlike chp_github_ci_status (whose consumer's SKIPPED→
+# `pending` mapping never needs to special-case this), THIS leaf's contract
+# requires `none` to reach `proceed` (D3: "a repo with zero checks must not
+# block approval") — so a raw empty-stdout→rc≠0 read here would permanently
+# route every zero-checks repo through the bounded-wait/give-up path instead.
+# Detect gh's specific message on stderr and map it to `none`; anything else
+# on an empty-stdout failure stays fail-closed exactly as before.
 #
 # Decision order over the per-check {name,state} multiset (issue #489 D1):
 #   (1) any ∈ {FAILURE,ERROR,CANCELLED,TIMED_OUT} → `failed`
 #       (failed_checks lists exactly those checks' names)
 #   (2) else any ∈ {PENDING,QUEUED,IN_PROGRESS,EXPECTED} or any state not
-#       otherwise listed → `pending`
+#       otherwise listed → `pending` (failed_checks lists those still-
+#       unresolved checks' names — D3's wait-cap give-up finding needs them)
 #   (3) else zero checks → `none`
 #   (4) else → `green` (SUCCESS, SKIPPED, NEUTRAL are all non-blocking; an
 #       all-SKIPPED set is `green`, not `none`)
@@ -455,6 +467,11 @@ chp_github_ci_rollup() {
   # rc long enough for the empty-stdout check below to classify it.
   raw="$(gh pr checks "$pr" --repo "$REPO" --json name,state 2>"$gh_err" || true)"
   if [[ -z "$raw" ]]; then
+    if grep -qi 'no checks reported' "$gh_err" 2>/dev/null; then
+      rm -f "$gh_err"
+      printf '%s' '{"token":"none","failed_checks":[]}'
+      return 0
+    fi
     [ -s "$gh_err" ] && cat "$gh_err" >&2
     rm -f "$gh_err"
     return 1
@@ -473,7 +490,7 @@ chp_github_ci_rollup() {
     if any(.[]; .state | is_failed) then
       {token: "failed", failed_checks: [.[] | select(.state | is_failed) | .name]}
     elif any(.[]; .state | is_nonblocking | not) then
-      {token: "pending", failed_checks: []}
+      {token: "pending", failed_checks: [.[] | select(.state | is_nonblocking | not) | .name]}
     elif length == 0 then
       {token: "none", failed_checks: []}
     else

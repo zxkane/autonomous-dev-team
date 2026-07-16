@@ -4388,18 +4388,36 @@ Findings->Decision Gate: 1 blocking finding(s) -- FAIL.
       CI_ROLLUP_REASON="the wrapper could not read the CI-rollup status for PR #${PR_NUMBER} (transport/parse failure)"
     else
       CI_ROLLUP_CAUSE="awaiting-ci"
-      CI_ROLLUP_REASON="CI checks on PR #${PR_NUMBER} have not completed yet (token=\`${CI_ROLLUP_TOKEN}\`)"
+      # D3: the wait-cap give-up finding must name the still-pending checks
+      # (mirrors the `failed` branch's CI_ROLLUP_NAMES) — the leaf populates
+      # failed_checks for `pending` too (the still-unresolved check names),
+      # not only for `failed`.
+      CI_ROLLUP_PENDING_NAMES=$(jq -r 'if length > 0 then map(. // "(unnamed)") | join(", ") else "(unnamed)" end' <<<"$CI_ROLLUP_FAILED_CHECKS" 2>/dev/null)
+      CI_ROLLUP_REASON="CI checks on PR #${PR_NUMBER} have not completed yet (token=\`${CI_ROLLUP_TOKEN}\`, pending: ${CI_ROLLUP_PENDING_NAMES})"
     fi
 
     CI_ROLLUP_WAIT_MARKER=$(_ci_rollup_wait_marker "$ISSUE_NUMBER" "${PR_HEAD_SHA:-unknown}")
+    CI_ROLLUP_WAIT_MAX_VAL=$(_ci_rollup_wait_max)
     # [INV-87]/[W1c2] normalized-shape (#398): mirrors the bot-review-wait
     # count read verbatim (chp_pr_view <PR> "comments" + jq contains()).
     # `.body` is chp_pr_view's own null→"" normalization (never null), so no
     # separate `type == "string"` guard is needed here.
-    CI_ROLLUP_WAIT_COUNT=$(chp_pr_view "$PR_NUMBER" "comments" 2>/dev/null \
-      | jq -r "[.comments[] | select(.body | contains(\"ci-rollup-wait: issue=${ISSUE_NUMBER} head=${PR_HEAD_SHA:-unknown}\"))] | length" 2>/dev/null || echo 0)
-    [[ "$CI_ROLLUP_WAIT_COUNT" =~ ^[0-9]+$ ]] || CI_ROLLUP_WAIT_COUNT=0
-    CI_ROLLUP_WAIT_MAX_VAL=$(_ci_rollup_wait_max)
+    #
+    # A read failure here (chp_pr_view or jq) is NOT the same thing as a
+    # true zero-prior-waits count: this counter is the ONLY state the
+    # bounded-wait cap has across ticks (no persistent storage outside PR
+    # comments), so defaulting a read failure to 0 would let a SUSTAINED
+    # chp_pr_view outage reset the clock every tick and loop pending-review
+    # forever — the exact failure mode the cap exists to bound. Fail closed:
+    # treat an unreadable count as already-at-cap, not as "zero waits so far".
+    if CI_ROLLUP_WAIT_RAW=$(chp_pr_view "$PR_NUMBER" "comments" 2>/dev/null) \
+        && CI_ROLLUP_WAIT_COUNT=$(jq -r "[.comments[] | select(.body | contains(\"ci-rollup-wait: issue=${ISSUE_NUMBER} head=${PR_HEAD_SHA:-unknown}\"))] | length" <<<"$CI_ROLLUP_WAIT_RAW" 2>/dev/null) \
+        && [[ "$CI_ROLLUP_WAIT_COUNT" =~ ^[0-9]+$ ]]; then
+      :
+    else
+      log "WARNING: CI-rollup hard gate could not read prior wait markers for issue #${ISSUE_NUMBER} — treating as already at the wait cap (fail-closed) rather than resetting to 0."
+      CI_ROLLUP_WAIT_COUNT="$CI_ROLLUP_WAIT_MAX_VAL"
+    fi
 
     if [[ "$CI_ROLLUP_WAIT_COUNT" -ge "$CI_ROLLUP_WAIT_MAX_VAL" ]]; then
       log "CI-rollup hard gate: ${CI_ROLLUP_REASON} — still not clear after ${CI_ROLLUP_WAIT_COUNT} wait(s) on HEAD ${PR_HEAD_SHA:0:7} — giving up, routing to pending-dev (substantive)."

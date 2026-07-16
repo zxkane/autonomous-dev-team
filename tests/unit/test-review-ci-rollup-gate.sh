@@ -181,6 +181,10 @@ row="$(_drive_gh_rollup '[{"name":"a","state":"SUCCESS"},{"name":"b","state":"PE
 rc="${row%%|*}"; out="${row#*|}"
 assert_eq "TC-CIR-LEAF-GH-07 SUCCESS+PENDING → pending" \
   "pending" "$(jq -r '.token' <<<"$out" 2>/dev/null)"
+# D3: the wait-cap give-up finding must name the still-pending checks — the
+# leaf's failed_checks lists them for `pending` too, not only for `failed`.
+assert_eq "TC-CIR-LEAF-GH-07 failed_checks names only the still-pending check" \
+  '["b"]' "$(jq -c '.failed_checks' <<<"$out" 2>/dev/null)"
 
 row="$(_drive_gh_rollup '[{"name":"a","state":"QUANTUM_FUTURE"}]' 1)"
 rc="${row%%|*}"; out="${row#*|}"
@@ -196,6 +200,38 @@ row="$(_drive_gh_rollup '' 1)"
 rc="${row%%|*}"; out="${row#*|}"
 assert_eq "TC-CIR-LEAF-GH-10 transport failure (empty stdout, gh rc≠0) → leaf rc≠0" "1" "$rc"
 assert_eq "TC-CIR-LEAF-GH-10 no partial stdout" "" "$out"
+
+# TC-CIR-LEAF-GH-11 — the gh "no checks reported" quirk: a PR with ZERO
+# checks configured makes `gh pr checks` print that message to STDERR with
+# EMPTY stdout and rc≠0 — indistinguishable from a transport failure by
+# stdout alone. The leaf must map THIS specific case to none/proceed (D3:
+# "a repo with zero checks must not block approval"), not to the generic
+# fail-closed path. _drive_gh_rollup only stubs stdout, so drive this one
+# directly with a gh() stub that also writes stderr.
+_drive_gh_rollup_stderr() {
+  local gh_stderr="$1" gh_rc="$2"
+  local out_file; out_file="$(mktemp)"
+  env -u PROJECT_DIR -u AUTONOMOUS_CONF -u AUTONOMOUS_CONF_DIR \
+      REPO=o/r _CIR_GH_STDERR="$gh_stderr" _CIR_GH_RC="$gh_rc" \
+      _CIR_OUT="$out_file" _CIR_CHP_LIB="$CHP_LIB" \
+  bash -c '
+    gh() { printf "%s" "$_CIR_GH_STDERR" >&2; return "$_CIR_GH_RC"; }
+    source "$_CIR_CHP_LIB" 2>/dev/null
+    out=$(chp_ci_rollup 42 2>/dev/null); rc=$?
+    printf "%s|%s\n" "$rc" "$out" > "$_CIR_OUT"
+  '
+  cat "$out_file"
+  rm -f "$out_file"
+}
+row="$(_drive_gh_rollup_stderr "no checks reported on the 'main' branch" 1)"
+rc="${row%%|*}"; out="${row#*|}"
+assert_eq "TC-CIR-LEAF-GH-11 gh no-checks quirk → leaf rc=0" "0" "$rc"
+assert_eq "TC-CIR-LEAF-GH-11 gh no-checks quirk → token=none" \
+  "none" "$(jq -r '.token' <<<"$out" 2>/dev/null)"
+row="$(_drive_gh_rollup_stderr "some other transport error" 1)"
+rc="${row%%|*}"; out="${row#*|}"
+assert_eq "TC-CIR-LEAF-GH-11 unrelated stderr text stays fail-closed (rc≠0)" "1" "$rc"
+assert_eq "TC-CIR-LEAF-GH-11 unrelated stderr text: no partial stdout" "" "$out"
 
 # chp_ci_status itself stays byte-unchanged for the same inputs (issue #489
 # "assert the old function's output is untouched for the same inputs").
@@ -255,6 +291,8 @@ assert_grep "TC-CIR-SRC-13 SHA-bound wait marker helper used" \
   '_ci_rollup_wait_marker "\$ISSUE_NUMBER"' "$WRAPPER"
 assert_grep "TC-CIR-SRC-14 [INV-129] round=0 marker posted on the non-substantive routes" \
   '_review_round_marker "\$ISSUE_NUMBER" "\$PR_HEAD_SHA" 0' "$WRAPPER"
+assert_grep "TC-CIR-SRC-16 pending-cause reason names the still-pending checks (D3 give-up finding)" \
+  'CI_ROLLUP_PENDING_NAMES' "$WRAPPER"
 
 # ---------------------------------------------------------------------------
 echo ""
@@ -357,6 +395,68 @@ if [[ "$_res" == "0|1" ]]; then
   PASS=$((PASS + 1))
 else
   echo -e "  ${RED}FAIL${NC}: TC-CIR-HEAD-03b HEAD changes between the 1st and 2nd call -> expected 0|1 (drift caught post-call), got $_res"
+  FAIL=$((FAIL + 1))
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-CIR-WAITCOUNT: a read failure on the wait-marker count fails CLOSED (already-at-cap), not to 0 ==="
+# ---------------------------------------------------------------------------
+# A sustained chp_pr_view/jq outage must escalate toward the give-up branch,
+# never silently reset the wait clock every tick (which would loop
+# pending-review forever). Extract the REAL wait-count block verbatim from
+# the wrapper (same sed/awk extraction idiom as TC-CIR-HEAD-03 above and
+# run-provider-conformance.sh's _render_close_keyword extraction) and drive
+# it in a subshell against a stubbed chp_pr_view/jq, proving the LIVE
+# behavior — not just a source-grep of the fix.
+CIR_WAITCOUNT_SLICE=$(mktemp)
+trap 'rm -f "$CIR_WAITCOUNT_SLICE"' EXIT
+awk '/^    CI_ROLLUP_WAIT_MARKER=\$\(_ci_rollup_wait_marker /,/^    fi$/' "$WRAPPER" > "$CIR_WAITCOUNT_SLICE"
+[ -s "$CIR_WAITCOUNT_SLICE" ] || { echo "FATAL: could not extract the CI-rollup wait-count block from the wrapper — has it moved/been renamed?"; exit 2; }
+
+# _cir_drive_waitcount <chp_pr_view_rc> <chp_pr_view_stdout> — source the
+# extracted slice under stubbed _ci_rollup_wait_marker/_ci_rollup_wait_max/
+# chp_pr_view/log, echo "<CI_ROLLUP_WAIT_COUNT>|<CI_ROLLUP_WAIT_MAX_VAL>".
+_cir_drive_waitcount() {
+  local pv_rc="$1" pv_stdout="$2"
+  local out_file; out_file="$(mktemp)"
+  env -u PROJECT_DIR ISSUE_NUMBER=489 PR_HEAD_SHA=deadbeef \
+      _CIR_PV_RC="$pv_rc" _CIR_PV_STDOUT="$pv_stdout" \
+      _CIR_OUT="$out_file" _CIR_SLICE="$CIR_WAITCOUNT_SLICE" \
+  bash -c '
+    _ci_rollup_wait_marker() { printf "<!-- marker -->"; }
+    _ci_rollup_wait_max() { printf "3"; }
+    chp_pr_view() { printf "%s" "$_CIR_PV_STDOUT"; return "$_CIR_PV_RC"; }
+    log() { :; }
+    source "$_CIR_SLICE"
+    printf "%s|%s" "$CI_ROLLUP_WAIT_COUNT" "$CI_ROLLUP_WAIT_MAX_VAL"
+  ' > "$out_file" 2>/dev/null
+  cat "$out_file"
+  rm -f "$out_file"
+}
+
+_res=$(_cir_drive_waitcount 0 '{"comments":[]}')
+assert_eq "TC-CIR-WAITCOUNT-01 a genuinely healthy read with zero prior markers -> count=0 (not at cap)" \
+  "0|3" "$_res"
+
+_res=$(_cir_drive_waitcount 0 '{"comments":[{"body":"<!-- ci-rollup-wait: issue=489 head=deadbeef -->"},{"body":"<!-- ci-rollup-wait: issue=489 head=deadbeef -->"}]}')
+assert_eq "TC-CIR-WAITCOUNT-02 a genuinely healthy read with 2 prior markers -> count=2 (below cap)" \
+  "2|3" "$_res"
+
+_res=$(_cir_drive_waitcount 1 '')
+assert_eq "TC-CIR-WAITCOUNT-03 chp_pr_view transport failure (rc≠0, empty stdout) -> count=WAIT_MAX (fail-closed to already-at-cap, NOT 0)" \
+  "3|3" "$_res"
+
+_res=$(_cir_drive_waitcount 0 'not json')
+assert_eq "TC-CIR-WAITCOUNT-04 chp_pr_view rc=0 but unparseable stdout (jq failure) -> count=WAIT_MAX (fail-closed, NOT 0)" \
+  "3|3" "$_res"
+
+_res=$(_cir_drive_waitcount 0 '{"comments":[]}')
+if [[ "$_res" == "0|3" ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-CIR-WAITCOUNT-05 regression guard: the fail-closed branch does not fire on a genuinely healthy zero-marker read"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-CIR-WAITCOUNT-05 expected 0|3 (healthy zero-marker read must not be misclassified as a read failure), got $_res"
   FAIL=$((FAIL + 1))
 fi
 

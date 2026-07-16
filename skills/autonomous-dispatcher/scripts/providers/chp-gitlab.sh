@@ -304,7 +304,8 @@ chp_gitlab_ci_status() {
 #       those jobs' names)
 #   (2) else any job status NOT ∈ {success, skipped} (created, pending,
 #       running, waiting_for_resource, manual, scheduled, or any
-#       unrecognized future status) → `pending`
+#       unrecognized future status) → `pending` (failed_checks lists those
+#       still-unresolved jobs' names — D3's wait-cap give-up finding needs them)
 #   (3) else zero jobs (pipeline exists but reports none) → `none`
 #   (4) else → `green` (success/skipped are both non-blocking)
 # A null head_pipeline (no CI configured on this MR) → `none` directly, no
@@ -341,7 +342,7 @@ chp_gitlab_ci_rollup() {
     if any(.[]; .status | is_failed) then
       {token: "failed", failed_checks: [.[] | select(.status | is_failed) | .name]}
     elif any(.[]; .status | is_nonblocking | not) then
-      {token: "pending", failed_checks: []}
+      {token: "pending", failed_checks: [.[] | select(.status | is_nonblocking | not) | .name]}
     elif length == 0 then
       {token: "none", failed_checks: []}
     else

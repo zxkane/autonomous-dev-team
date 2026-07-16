@@ -279,7 +279,7 @@ PCONF_HOOK_DIR="$PROJECT_ROOT/tests/provider-conformance/fixtures/gitlab-hook"
 _rollup_case "TC-P33-301" "pipeline-jobs-success.json" "green" "[]"
 _rollup_case "TC-P33-302" "pipeline-jobs-failed.json" "failed" '["check-b"]'
 _rollup_case "TC-P33-303" "pipeline-jobs-skipped.json" "green" "[]"
-_rollup_case "TC-P33-304" "pipeline-jobs-pending.json" "pending" "[]"
+_rollup_case "TC-P33-304" "pipeline-jobs-pending.json" "pending" '["check-b"]'
 
 # TC-P33-305 — empty jobs array (pipeline exists, zero jobs reported) → none.
 _reset_stub

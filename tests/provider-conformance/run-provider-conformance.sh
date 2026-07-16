@@ -2195,8 +2195,11 @@ _assert_verb() {
         "$PAYLOADS/ci-status-empty.json" "none" "[]"
       _run_json_token_assert "$verb" 'chp_ci_rollup 42' \
         "$PAYLOADS/ci-rollup-all-skipped.json" "green" "[]"
+      # D3 (#489): failed_checks names the still-unresolved check for
+      # `pending` too, not only for `failed` — the wait-cap give-up finding
+      # needs those names.
       _run_json_token_assert "$verb" 'chp_ci_rollup 42' \
-        "$PAYLOADS/ci-rollup-pending.json" "pending" "[]"
+        "$PAYLOADS/ci-rollup-pending.json" "pending" '["check-b"]'
       # Payload-type gate (mirrors chp_ci_status): a rc-0 JSON OBJECT payload
       # `{}` must be REJECTED, not misread as "no checks configured".
       _argv_file="$work_root/.argv-ci-rollup-obj.json"

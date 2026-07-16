@@ -791,16 +791,16 @@ if PASSED_VERDICT == true:                 # mergeable gate already proceeded (g
           emit_verdict_trailer failed-non-substantive cause=awaiting-ci|ci-status-unavailable
           −reviewing +pending-review ; exit 0   # next tick re-evaluates once CI resolves
         else:                                    # stuck/misconfigured check
-          issue comment "Review findings: ... [BLOCKING] CI checks still not clear after N wait(s) ..."
+          issue comment "Review findings: ... [BLOCKING] CI checks still not clear after N wait(s): <failed_checks> ..."
           emit_verdict_trailer failed-substantive dev-actionable=true
           submit_request_changes <PR>            # INV-52 (substantive)
           −reviewing +pending-dev ; exit 0
 ```
 
 - **`chp_ci_rollup` is a SIBLING of `chp_ci_status`, not a replacement.** `chp_ci_status`'s SKIPPED→`pending` mapping (used elsewhere for green-corroboration, e.g. `_e2e_ci_green_precheck`) stays byte-unchanged; `chp_ci_rollup` treats SKIPPED/NEUTRAL as non-blocking `green` instead — a repo with a permanently-SKIPPED label-gated check must not be permanently blocked from approval.
-- **`none` (zero checks) proceeds, `failed`/`pending` do not.** A repo legitimately running no CI must not be punished; but once ANY check exists, its state is honored. This matters on free-plan private repos with no branch protection — the wrapper's approval is the ONLY gate standing between a PR and merge.
+- **`none` (zero checks) proceeds, `failed`/`pending` do not.** A repo legitimately running no CI must not be punished; but once ANY check exists, its state is honored. This matters on free-plan private repos with no branch protection — the wrapper's approval is the ONLY gate standing between a PR and merge. On GitHub, a zero-checks PR makes `gh pr checks` emit empty stdout + a non-zero exit (the same shape as a genuine transport failure) — `chp_github_ci_rollup` recognizes gh's specific "no checks reported" stderr message and maps it to `none` directly, rather than falling into the bounded-wait path (invariants.md D6).
 - **Head-pinning is checked twice** — once before dispatching `chp_ci_rollup` (which reads the PR's CURRENT head, not necessarily the reviewed one) and once after (in case the head advanced mid-call). Either mismatch requeues without ever approving.
-- **Bounded wait mirrors the INV-79 bot-review-wait mechanics exactly** — a SHA-bound marker, a configurable cap (`CI_ROLLUP_WAIT_MAX`, default 3), below-cap routes to `pending-review` (not `pending-dev` — no new commits exist, so `pending-dev`'s stale-verdict guard would stall), at-cap gives up as a substantive dev-actionable FAIL.
+- **Bounded wait mirrors the INV-79 bot-review-wait mechanics exactly** — a SHA-bound marker, a configurable cap (`CI_ROLLUP_WAIT_MAX`, default 3), below-cap routes to `pending-review` (not `pending-dev` — no new commits exist, so `pending-dev`'s stale-verdict guard would stall), at-cap gives up as a substantive dev-actionable FAIL naming every still-unresolved check (the `pending` token's `failed_checks` lists them too, not only the `failed` token's). The wait-count read itself (`chp_pr_view` + `jq` over prior markers) fails CLOSED: an unreadable count is treated as already-at-cap, not as zero prior waits, so a sustained read outage escalates to the give-up branch rather than resetting the clock every tick.
 - **Additive only.** INV-46 (E2E hard gate) and INV-64 (agent-smoke) are unmodified by this gate — this gate double-covering the E2E job's own check is intentional defense-in-depth (an incident where the E2E job was green while a different check was red).
 - **Provider-neutral.** The wrapper calls only `chp_ci_rollup` / `chp_pr_view` — no raw `gh` call was added. Both `chp_github_ci_rollup` and `chp_gitlab_ci_rollup` implement the contract.
 
