@@ -166,12 +166,27 @@ is genuinely PR-scoped:
    vocabulary member) and mentions that human — **unless** the author is a
    bot: an autonomous PR's author is normally the dev-agent bot itself
    (`app/…` on GitHub, a `project_N_bot_…`/`group_N_bot_…` service account on
-   GitLab, or the wrapper's own resolved `BOT_LOGIN`), so mentioning it would
-   notify nobody. On any bot author, null/empty author, non-numeric PR arg,
-   or `chp_pr_view` failure, the resolver falls back to
-   `@${HUMAN_ESCALATION_LOGIN:-$REPO_OWNER}`. The resolver ALWAYS exits 0 and
-   emits exactly one `@<token>` — it never aborts a `set -euo pipefail`
-   caller.
+   GitLab, the wrapper's own resolved `BOT_LOGIN`, or the operator-configured
+   `DEV_BOT_LOGIN`), so mentioning it would notify nobody. On any bot author,
+   null/empty author, non-numeric PR arg, or `chp_pr_view` failure, the
+   resolver falls back to `@${HUMAN_ESCALATION_LOGIN:-$REPO_OWNER}`. The
+   resolver ALWAYS exits 0 and emits exactly one `@<token>` — it never aborts
+   a `set -euo pipefail` caller.
+
+   **`DEV_BOT_LOGIN`** (`autonomous.conf.example`, optional, defaults empty —
+   #495 review finding #1): the dispatcher-side counterpart to `BOT_LOGIN`.
+   `BOT_LOGIN` is resolved only inside `autonomous-review.sh`'s own process
+   (its `gh api user` call at wrapper startup) and is **never** set in
+   `lib-dispatch.sh`'s process — several verdict-authentication invariants
+   depend on that being permanently true, so the resolver cannot simply
+   thread `BOT_LOGIN` into the dispatcher call path. The two structural bot
+   rules (`^app/`, `[bot]$`, the GitLab service-account pattern) miss a dev
+   agent whose login is a plain string with none of those shapes — e.g.
+   `GH_AUTH_MODE=token` where the dev agent's PRs are authored under the same
+   shared PAT identity the dispatcher runs as, under a login like
+   `my-org-ci-bot`. Setting `DEV_BOT_LOGIN` to that login closes the gap on
+   the dispatcher (`lib-dispatch.sh`) call sites; unset, this arm is a no-op
+   (byte-identical to pre-#495-finding-#1 behavior).
 2. **Maintainer-only sites** — the review wrapper's approval-failed fallback
    and the `no-auto-close` "please review and merge" notice (`autonomous-
    review.sh`, Step 4c equivalent on the review side) never call the
@@ -191,6 +206,19 @@ resolution isn't possible or doesn't apply; it defaults to empty, in which
 case the fallback is `REPO_OWNER` (today's byte-identical behavior on an
 unset conf). Operators on GitLab should set it to an individual maintainer
 login to avoid group-wide notification fan-out.
+
+**Multi-project / remote-project propagation (#495 review finding #2)**: for
+a `remote-aws-ssm` project declared **inline** in `dispatcher.conf` (as
+opposed to a local path-entry `autonomous.conf`), `dispatcher-multi-tick.sh`'s
+`tick_inline_project` explicitly re-exports both `HUMAN_ESCALATION_LOGIN` and
+`DEV_BOT_LOGIN` into the per-project subshell when the inline block declares
+them (mirroring the existing `ISSUE_FILTER`/`ISSUE_SCAN_LIMIT` export
+pattern) — see `dispatcher.conf.example`. Without this, an inline project's
+`dispatcher-tick.sh` process never observes an operator-set value for either
+key (both variables are simply absent from that subshell's environment), so
+every dispatcher-side escalation fallback for that project silently reverts
+to `REPO_OWNER` regardless of conf intent. A LOCAL path-entry project sources
+its `autonomous.conf` directly and was never affected.
 
 **Byte-identical-default guarantee**: this is a pure targeting change — no
 label transition, gate, or comment WORDING changes. The `resolve_pr_author_

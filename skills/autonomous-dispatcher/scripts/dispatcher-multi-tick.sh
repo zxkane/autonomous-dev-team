@@ -210,6 +210,17 @@ tick_inline_project() {
     # export (documented in dispatcher.conf.example).
     [[ -n "${ISSUE_FILTER:-}" ]]           && export ISSUE_FILTER
     [[ -n "${ISSUE_SCAN_LIMIT:-}" ]]       && export ISSUE_SCAN_LIMIT
+    # [#495 review finding #2] resolve_pr_author_mention's mention-target
+    # fallback + dispatcher-side bot-login override. Without exporting these,
+    # an inline (remote-aws-ssm) project's dispatcher-tick.sh process never
+    # sees an operator-set HUMAN_ESCALATION_LOGIN/DEV_BOT_LOGIN — every
+    # dispatcher-side escalation fallback silently reverts to REPO_OWNER, and
+    # DEV_BOT_LOGIN classification never fires — even though the SAME conf
+    # keys work correctly for a local (path-entry) project, whose
+    # autonomous.conf is sourced directly. Charset-restricted by
+    # validate_inline_block above like every other inline RHS.
+    [[ -n "${HUMAN_ESCALATION_LOGIN:-}" ]] && export HUMAN_ESCALATION_LOGIN
+    [[ -n "${DEV_BOT_LOGIN:-}" ]]          && export DEV_BOT_LOGIN
     # Inline projects don't have a dispatcher-side PROJECT_DIR (the source
     # lives on the remote box). dispatcher-tick.sh validates PROJECT_DIR is
     # non-empty; for the local backend it's the project root, for remote

@@ -120,6 +120,26 @@ PROJECT_DIR="/path/to/project"
 #   HUMAN_ESCALATION_LOGIN="maintainer-username"
 HUMAN_ESCALATION_LOGIN=""
 
+# DEV_BOT_LOGIN — the dev-agent's login/username, for the dispatcher-side
+# half of resolve_pr_author_mention's bot-detection rule (issue #495 review
+# finding #1). Optional; defaults to empty (no-op).
+#
+# The resolver's structural bot rules (`^app/`, `[bot]$`, the GitLab
+# project/group service-account pattern) catch the common GitHub-App /
+# GitLab-access-token shapes. They do NOT catch a plain service-account login
+# with none of those shapes — e.g. `GH_AUTH_MODE=token` where the dev agent
+# commits/PRs under the same shared PAT identity the dispatcher runs as, and
+# that identity is a login like "my-org-ci-bot". `BOT_LOGIN` (the review
+# wrapper's OWN resolved identity, from `gh api user`) can't help here either:
+# it is a review-wrapper-process-local variable, never set inside the
+# dispatcher's own process (`lib-dispatch.sh` call sites always see it empty —
+# several verdict-authentication invariants depend on that). Set this when
+# your dev agent's PR-author login would otherwise be misclassified as human
+# and mentioned in an escalation comment, notifying nobody.
+#
+#   DEV_BOT_LOGIN="my-org-ci-bot"
+DEV_BOT_LOGIN=""
+
 # BASE_BRANCH — the branch PRs/MRs merge into (issue #478, [INV-131]). Every
 # dev/review wrapper prompt, the mergeable-gate messages, and the PR-create
 # provider leaves target this branch instead of a hardcoded `main`. One

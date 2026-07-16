@@ -37,6 +37,7 @@ stdout; diagnostics only on stderr.
 | TC-PAEM-012 | Author matches `\[bot\]$` (e.g. `my-claw[bot]`) | fallback token, rc 0 |
 | TC-PAEM-013 | Author matches the GitLab service-account pattern `^(project\|group)_[0-9]+_bot(_[a-z0-9]+)?$` | fallback token, rc 0 |
 | TC-PAEM-014 | Author exactly equals `$BOT_LOGIN` (non-empty, arbitrary display name) | fallback token, rc 0 |
+| TC-PAEM-014b–d | Author exactly equals `$DEV_BOT_LOGIN` (the dispatcher-side counterpart to `BOT_LOGIN`, review finding #1); `DEV_BOT_LOGIN` set but author differs (human still wins); `DEV_BOT_LOGIN` unset — a plain-login bot author is NOT caught (documented gap) | `.014b` fallback token; `.014c` `@<human-login>`; `.014d` `@<plain-bot-login>` (unmitigated without the conf var) |
 | TC-PAEM-015 | A human login containing the substring "bot" (e.g. `abbot`, `robert`) is NOT misclassified | `@abbot` / `@robert` (real author, NOT the fallback) |
 | TC-PAEM-016 | Author is `null` | fallback token, rc 0 |
 | TC-PAEM-017 | Author is empty string | fallback token, rc 0 |
@@ -68,6 +69,7 @@ Source-shape assertions (grep the migrated line, fixed-string) against
 | TC-PAEM-036 | `autonomous-review.sh` [#453] same-HEAD E2E-gate breaker report | calls `resolve_pr_author_mention "$PR_NUMBER"` |
 | TC-PAEM-037 | End-to-end: INV-85 no-progress path, bot-authored PR | comment body contains the fallback token, NOT the bot's login |
 | TC-PAEM-038 | End-to-end: INV-85 no-progress path, human-authored PR | comment body contains `@<human-login>` |
+| TC-PAEM-RT-001–003 | Integration (review finding #3, `test-handle-completed-session-routing.sh`): `handle_completed_session_routing` driven end-to-end through the REAL (unmocked) `resolve_pr_author_mention` on the INV-85 Branch B (no-progress) path — human author; bot author with `HUMAN_ESCALATION_LOGIN` unset; bot author with `HUMAN_ESCALATION_LOGIN` set | `.001` comment mentions `@alice`, never `@$REPO_OWNER`; `.002` comment mentions `@$REPO_OWNER`, never the bot login; `.003` comment mentions `@$HUMAN_ESCALATION_LOGIN`, never `@$REPO_OWNER` |
 
 ### Maintainer-target sites (unchanged target — never the PR author)
 
@@ -98,6 +100,19 @@ Source-shape assertions (grep the migrated line, fixed-string) against
 | ID | Scenario | Expected |
 |----|----------|----------|
 | TC-PAEM-070 | `grep -c '@\${REPO_OWNER}' dispatcher-tick.sh` | 0 (confirmed zero sites in this file per the issue's enumeration) |
+
+## Multi-project inline-block propagation (review finding #2)
+
+`tests/unit/test-multi-tick-inline-projects.sh`. An inline (`remote-aws-ssm`)
+`dispatcher.conf` project runs `dispatcher-tick.sh` in a subshell that only
+sees vars `dispatcher-multi-tick.sh::tick_inline_project` explicitly exports —
+unlike a local path-entry project, which sources its `autonomous.conf`
+directly and sees everything.
+
+| ID | Scenario | Expected |
+|----|----------|----------|
+| TC-PAEM-130 | Inline block declares `HUMAN_ESCALATION_LOGIN`/`DEV_BOT_LOGIN` | both exported into the `dispatcher-tick.sh` subshell env |
+| TC-PAEM-131 | Inline block omits both keys | both stay unset in the subshell (byte-identical default — falls back to `REPO_OWNER`, no `DEV_BOT_LOGIN` classification) |
 
 ## Conformance (parity pin)
 

@@ -45,7 +45,28 @@ fi
 #   - exactly equals the wrapper's own `BOT_LOGIN` (when non-empty) — catches
 #     any identity this SAME wrapper authenticates as, regardless of naming
 #     convention (e.g. a custom GitHub App display name that doesn't end in
-#     `[bot]`, or a personal-PAT bot account).
+#     `[bot]`, or a personal-PAT bot account). `BOT_LOGIN` is resolved only
+#     inside `autonomous-review.sh`'s own process ([INV-…], see that
+#     wrapper's `gh api user` call) — it is NEVER set in the dispatcher's own
+#     process, so this arm is a no-op on the `lib-dispatch.sh` call path.
+#   - exactly equals the operator-configured `DEV_BOT_LOGIN` (when non-empty)
+#     — the dispatcher-side counterpart to the `BOT_LOGIN` arm above (#495
+#     review finding #1). In `GH_AUTH_MODE=token`, the dev agent's commits/PRs
+#     are authored under the SAME shared PAT identity the dispatcher runs
+#     under; when that identity is a plain service-account login (no `app/`
+#     prefix, no `[bot]` suffix — e.g. `my-org-ci-bot`), neither of the two
+#     structural rules above can see it, and `BOT_LOGIN` is unavailable in
+#     this process (see above) to catch it either. Rather than resolving an
+#     identity dynamically here (which would require a raw `gh api user` /
+#     GitLab `/user` call, violating this lib's [INV-87] provider-neutral
+#     "chp_pr_view is the only PR-read primitive" contract, and would also
+#     collide with the load-bearing "BOT_LOGIN never set in the dispatcher's
+#     own process" invariant several `lib-dispatch.sh` verdict-authentication
+#     paths depend on — see `_frozen_convergence_rounds_json`), the operator
+#     sets `DEV_BOT_LOGIN` once in `autonomous.conf` (documented next to
+#     `HUMAN_ESCALATION_LOGIN`). Unset by default — a byte-identical no-op
+#     for every deployment that doesn't need it (GitHub App mode's `[bot]`
+#     suffix already covers the common case).
 #
 # Deliberately NOT a broad `*bot*` substring match — a human login containing
 # "bot" (e.g. `robert`, `abbot`) must never be misclassified.
@@ -57,6 +78,7 @@ _rpam_is_bot_login() {
   esac
   [[ "$login" =~ ^(project|group)_[0-9]+_bot(_[a-z0-9]+)?$ ]] && return 0
   [ -n "${BOT_LOGIN:-}" ] && [ "$login" = "$BOT_LOGIN" ] && return 0
+  [ -n "${DEV_BOT_LOGIN:-}" ] && [ "$login" = "$DEV_BOT_LOGIN" ] && return 0
   return 1
 }
 

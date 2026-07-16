@@ -203,6 +203,21 @@ assert_eq "TC-PAEM-013b gitlab service-account pattern (no suffix) falls back" "
 out=$(BOT_LOGIN="custom-app-name" _RPAM_MODE=ok _RPAM_AUTHOR='"custom-app-name"' _run_resolver resolve_pr_author_mention 42 2>/dev/null)
 assert_eq "TC-PAEM-014 author==BOT_LOGIN falls back" "@the-owner" "$out"
 
+# TC-PAEM-014b/c (#495 review finding #1): DEV_BOT_LOGIN is the dispatcher-
+# side counterpart to BOT_LOGIN — BOT_LOGIN is only ever resolved inside
+# autonomous-review.sh's own process (never in lib-dispatch.sh's), so a
+# plain-login dev-agent identity (no app/ prefix, no [bot] suffix) needs its
+# own operator-configured override to be recognized as a bot on the
+# dispatcher call path.
+out=$(DEV_BOT_LOGIN="my-org-ci-bot" _RPAM_MODE=ok _RPAM_AUTHOR='"my-org-ci-bot"' _run_resolver resolve_pr_author_mention 42 2>/dev/null)
+assert_eq "TC-PAEM-014b author==DEV_BOT_LOGIN falls back" "@the-owner" "$out"
+
+out=$(DEV_BOT_LOGIN="my-org-ci-bot" _RPAM_MODE=ok _RPAM_AUTHOR='"alice"' _run_resolver resolve_pr_author_mention 42 2>/dev/null)
+assert_eq "TC-PAEM-014c DEV_BOT_LOGIN set but author differs → human still wins" "@alice" "$out"
+
+out=$(_RPAM_MODE=ok _RPAM_AUTHOR='"my-org-ci-bot"' _run_resolver resolve_pr_author_mention 42 2>/dev/null)
+assert_eq "TC-PAEM-014d DEV_BOT_LOGIN unset → a plain-login bot author is NOT caught (documented gap; operator must set DEV_BOT_LOGIN)" "@my-org-ci-bot" "$out"
+
 out=$(_RPAM_MODE=ok _RPAM_AUTHOR='"abbot"' _run_resolver resolve_pr_author_mention 42 2>/dev/null)
 assert_eq "TC-PAEM-015a human login containing 'bot' substring is NOT misclassified (abbot)" "@abbot" "$out"
 out=$(_RPAM_MODE=ok _RPAM_AUTHOR='"robert"' _run_resolver resolve_pr_author_mention 42 2>/dev/null)
