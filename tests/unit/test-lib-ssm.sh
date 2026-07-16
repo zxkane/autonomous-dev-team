@@ -211,20 +211,23 @@ echo ""
 echo "=== TC-LSSM-006: poll-loop wall-clock cap ==="
 # ---------------------------------------------------------------------------
 # Stuck InProgress + 1s wall-clock cap → must return 2 within the main poll
-# cap PLUS the post-timeout recovery window (round-2 review finding #1:
-# _ssm_poll_timeout_recover no longer does a single immediate recheck after
-# cancel-command, it polls for up to REMOTE_POLL_TIMEOUT_RECOVER_SECONDS —
-# 1s here, kept short so this test still runs fast). The stub's
-# AWS_GET_STATUS stays "InProgress" for every get-command-invocation call
-# including the recovery poll's, so the recovery window also elapses in
-# full before returning rc=2 — total bound is poll_timeout + recover_timeout
-# + a small scheduling margin.
+# cap PLUS the post-timeout recovery window. Round-3 review finding #1:
+# the recovery deadline is now anchored to cmd_sent_at + exec_timeout (the
+# AWS-RunShellScript document's own executionTimeout, explicitly set from
+# SSM_COMMAND_TIMEOUT_SECONDS) + REMOTE_POLL_TIMEOUT_RECOVER_SECONDS — NOT
+# an independent short window — so SSM_COMMAND_TIMEOUT_SECONDS must also
+# be lowered here or this test would wait out the real 30s default. The
+# stub's AWS_GET_STATUS stays "InProgress" for every get-command-invocation
+# call including the recovery poll's, so the recovery window also elapses
+# in full before returning rc=2 — total bound is poll_timeout +
+# exec_timeout + recover_margin + a small scheduling margin.
 reset_recorder
 t0=$(date +%s)
 PATH="$STUB_BIN:$PATH" \
 AWS_RECORD_FILE="$TMPROOT/aws-record" \
 AWS_GET_STATUS="InProgress" \
 REMOTE_LIVENESS_CHECK_TIMEOUT_SECONDS=1 \
+SSM_COMMAND_TIMEOUT_SECONDS=1 \
 REMOTE_POLL_TIMEOUT_RECOVER_SECONDS=1 \
 bash -c "source '$LIB'; _ssm_run_remote_command i-test ap-southeast-1 'sleep forever' 2>/dev/null"
 rc=$?
@@ -410,6 +413,101 @@ else
   echo -e "  ${RED}FAIL${NC}: TC-LSSM-013 inner command executed despite missing remote base64: '$remote_out_013'"
   FAIL=$((FAIL + 1))
 fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-LSSM-014: executionTimeout is passed in --parameters, matching cmd_timeout (round-3 review finding #1) ==="
+# ---------------------------------------------------------------------------
+# AWS's send-command --timeout-seconds only bounds DELIVERY, not execution
+# time once started — the AWS-RunShellScript document's OWN
+# executionTimeout parameter (default 3600 if unset) is what actually
+# bounds execution. Without this, _ssm_poll_timeout_recover's deadline math
+# (anchored to cmd_sent_at + exec_timeout) would be unsound: the document
+# could keep running for up to an hour regardless of SSM_COMMAND_TIMEOUT_SECONDS.
+reset_recorder
+PATH="$STUB_BIN:$PATH" \
+AWS_RECORD_FILE="$TMPROOT/aws-record" \
+AWS_GET_STATUS="Success" \
+SSM_COMMAND_TIMEOUT_SECONDS=42 \
+bash -c "source '$LIB'; _ssm_run_remote_command i-test ap-southeast-1 'echo hi'" >/dev/null
+params_json_014=$(awk '
+  found && /^--output$/ { exit }
+  found { print }
+  /^--parameters$/ { found=1; next }
+' "$TMPROOT/aws-record")
+exec_timeout_014=$(printf '%s' "$params_json_014" | jq -r '.executionTimeout[0] // empty')
+if [[ "$exec_timeout_014" == "42" ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-LSSM-014 executionTimeout mirrors SSM_COMMAND_TIMEOUT_SECONDS"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-LSSM-014 executionTimeout mirrors SSM_COMMAND_TIMEOUT_SECONDS"
+  echo "      expected='42' actual='$exec_timeout_014'"
+  FAIL=$((FAIL + 1))
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-LSSM-015: delayed post-cancel completion within the anchored window is reported truthfully, not downgraded (round-3 review finding #1) ==="
+# ---------------------------------------------------------------------------
+# Pre-fix, _ssm_poll_timeout_recover's deadline was an INDEPENDENT short
+# window (REMOTE_POLL_TIMEOUT_RECOVER_SECONDS after the cancel, regardless
+# of how much of exec_timeout remained) — a command that completed AFTER
+# that short window but still well within its own executionTimeout would
+# be falsely reported as indeterminate (rc=2), even though it may have
+# just sent SIGTERM. Post-fix, the recovery deadline is anchored to
+# cmd_sent_at + exec_timeout + margin, so a completion any time before
+# THAT deadline must be reported as Success. Simulate this with a stub
+# that returns InProgress for the first N get-command-invocation calls
+# (spanning the main poll loop) then Success — N is chosen so completion
+# lands AFTER the OLD short window would have given up, but still well
+# before the NEW anchored deadline.
+reset_recorder
+CALL_COUNT_FILE="$TMPROOT/call-count-015"
+echo 0 > "$CALL_COUNT_FILE"
+DELAYED_STUB_BIN="$TMPROOT/delayed-stub-bin"
+mkdir -p "$DELAYED_STUB_BIN"
+cat > "$DELAYED_STUB_BIN/aws" <<'EOF'
+#!/bin/bash
+printf '%s\n' "$@" >> "$AWS_RECORD_FILE"
+case "$*" in
+  *send-command*)
+    echo '{"Command":{"CommandId":"stub-delayed","Status":"Pending"}}'
+    ;;
+  *get-command-invocation*)
+    n=$(cat "$CALL_COUNT_FILE")
+    n=$((n + 1))
+    echo "$n" > "$CALL_COUNT_FILE"
+    if [[ "$n" -le "${DELAY_UNTIL_CALL:-3}" ]]; then
+      echo '{"Status":"InProgress","StandardOutputContent":"","StandardErrorContent":""}'
+    else
+      echo '{"Status":"Success","StandardOutputContent":"delayed-but-completed\n","StandardErrorContent":""}'
+    fi
+    ;;
+  *cancel-command*)
+    echo '{}'
+    ;;
+esac
+EOF
+chmod +x "$DELAYED_STUB_BIN/aws"
+out_015=$(
+  PATH="$DELAYED_STUB_BIN:$PATH" \
+  AWS_RECORD_FILE="$TMPROOT/aws-record" \
+  CALL_COUNT_FILE="$CALL_COUNT_FILE" \
+  DELAY_UNTIL_CALL=6 \
+  REMOTE_LIVENESS_CHECK_TIMEOUT_SECONDS=1 \
+  SSM_COMMAND_TIMEOUT_SECONDS=30 \
+  REMOTE_POLL_TIMEOUT_RECOVER_SECONDS=1 \
+  bash -c "source '$LIB'; _ssm_run_remote_command i-test ap-southeast-1 'echo hi' 2>/dev/null"
+)
+rc_015=$?
+# With the OLD independent-short-window design, the recovery poll would
+# have given up after ~1s (REMOTE_POLL_TIMEOUT_RECOVER_SECONDS=1) —
+# call 6's Success (arriving ~3s into the recovery poll at 0.5s/call)
+# would have been missed, and this would have wrongly returned rc=2 with
+# empty stdout. The NEW anchored deadline (cmd_sent_at + 30 + 1) gives
+# far more room, so it must observe and report the eventual Success.
+assert_rc "TC-LSSM-015 rc=0 — delayed completion within exec_timeout is NOT downgraded to indeterminate" 0 "$rc_015"
+assert_contains "TC-LSSM-015 stdout reports the delayed command's real output" "delayed-but-completed" "$out_015"
 
 echo ""
 echo "==============================================="

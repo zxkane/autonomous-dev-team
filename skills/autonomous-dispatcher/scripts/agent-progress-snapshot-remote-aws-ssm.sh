@@ -53,9 +53,13 @@
 #                                  AWS's --timeout-seconds hard minimum)
 #   REMOTE_LIVENESS_CHECK_TIMEOUT_SECONDS — dispatcher-side poll cap
 #                                            (default 8, lib-ssm.sh)
-#   DEV_PROGRESS_STALE_SECONDS — fixed shared threshold (default 1800,
-#                                 [INV-137] — NOT a conf knob; only
-#                                 overridable here for test fixtures)
+#
+# DEV_PROGRESS_STALE_SECONDS is NOT an env knob here: it is a fixed literal
+# constant (1800, [INV-137]), matching dev_progress_snapshot's own plain
+# (non-`${VAR:-...}`) assignment in lib-dispatch.sh. Reading it from the
+# inherited environment would let a deployment classify the same lease
+# differently by backend (round-3 review finding #2) — the whole point of
+# "fixed shared threshold" is that neither backend's caller can move it.
 #
 # See docs/pipeline/remote-backend.md for the full backend contract.
 
@@ -141,8 +145,13 @@ SSM_REGION="${SSM_REGION:-ap-southeast-1}"
 SSM_REMOTE_USER="${SSM_REMOTE_USER:-ubuntu}"
 SSM_REMOTE_SHELL="${SSM_REMOTE_SHELL:-bash}"
 SSM_REMOTE_PROFILE="${SSM_REMOTE_PROFILE:-}"
-DEV_PROGRESS_STALE_SECONDS="${DEV_PROGRESS_STALE_SECONDS:-1800}"
-[[ "$DEV_PROGRESS_STALE_SECONDS" =~ ^[0-9]+$ ]] || DEV_PROGRESS_STALE_SECONDS=1800
+# Plain assignment, NOT `${VAR:-1800}` — same rationale as
+# lib-dispatch.sh's dev_progress_snapshot: an inherited/exported
+# DEV_PROGRESS_STALE_SECONDS from the caller's environment must never win
+# over this fixed shared threshold ([INV-137]), or the remote backend could
+# classify the same lease differently than the local one (round-3 review
+# finding #2).
+DEV_PROGRESS_STALE_SECONDS=1800
 
 if ! [[ "$SSM_REMOTE_USER" =~ ^[a-zA-Z0-9_-]+$ ]]; then
   echo "ERROR: SSM_REMOTE_USER contains unsafe characters: '$SSM_REMOTE_USER'" >&2

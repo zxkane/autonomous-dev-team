@@ -223,18 +223,22 @@ echo ""
 echo "=== TC-SLP-006: --probe, poll-loop wall-clock timeout → rc=2 ==="
 # ---------------------------------------------------------------------------
 # Bound now covers the main poll cap PLUS lib-ssm.sh's post-timeout recovery
-# window (issue #485 round-2 review finding #1: _ssm_poll_timeout_recover no
-# longer does a single immediate recheck after cancel-command, it polls for
-# up to REMOTE_POLL_TIMEOUT_RECOVER_SECONDS — 1s here, kept short so this
-# test still runs fast). The stub's AWS_GET_STATUS stays "InProgress" for
-# every get-command-invocation call including the recovery poll's, so the
-# recovery window also elapses in full before returning rc=2.
+# window. Round-3 review finding #1: the recovery deadline is now anchored
+# to cmd_sent_at + exec_timeout (the AWS-RunShellScript document's own
+# executionTimeout, explicitly set from SSM_COMMAND_TIMEOUT_SECONDS) +
+# REMOTE_POLL_TIMEOUT_RECOVER_SECONDS — NOT an independent short window —
+# so SSM_COMMAND_TIMEOUT_SECONDS must also be lowered here or this test
+# would wait out the real 30s default. The stub's AWS_GET_STATUS stays
+# "InProgress" for every get-command-invocation call including the
+# recovery poll's, so the recovery window also elapses in full before
+# returning rc=2.
 reset_recorder
 t0=$(date +%s)
 PATH="$STUB_BIN:$PATH" \
 AWS_RECORD_FILE="$TMPROOT/aws-record" \
 AWS_GET_STATUS="InProgress" \
 REMOTE_LIVENESS_CHECK_TIMEOUT_SECONDS=1 \
+SSM_COMMAND_TIMEOUT_SECONDS=1 \
 REMOTE_POLL_TIMEOUT_RECOVER_SECONDS=1 \
 bash "$DRIVER" --probe 99 >/dev/null 2>&1
 rc=$?
