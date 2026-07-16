@@ -195,6 +195,12 @@ _MOCK_NOPROG_NOTICE_PRESENT="0"
 _MOCK_NONACT_NOTICE_PRESENT="0"  # INV-92 (#298) Branch B′ notice already posted?
 _MOCK_ATTEMPT_WRITE_FAILS="0"    # 1 = reject attempt-marker writes (finding 2)
 _MOCK_ATTEMPT_WRITE_TRIES=0
+_MOCK_MATCHED_PATTERNS_MARKER=""  # INV-136 (#488) D4: when non-empty, itp_list_comments
+                                   # emits a comment carrying `<!-- inv92-matched-patterns: … -->`
+_MOCK_MATCHED_PATTERNS_HEAD=""    # (codex review round-2, PR #498) head= field the synthesized
+                                   # marker carries; defaults to _MOCK_PR_HEAD (the SAME head as
+                                   # the reviewed PR) — set to a DIFFERENT sha to simulate a STALE
+                                   # marker left over from an earlier, unrelated round.
 
 fetch_pr_for_issue() {
   # [INV-123] (#461): a nonzero return simulates a resolve_pr_for_issue
@@ -232,6 +238,17 @@ itp_list_comments() {
   # `non-actionable-finding:<head>` (head defaults to `none` when no PR resolved).
   if [[ "${_MOCK_NONACT_NOTICE_PRESENT:-0}" != "0" ]]; then
     _bodies+=("non-actionable-finding:${_MOCK_PR_HEAD:-none} prior notice")
+  fi
+  # INV-136 (#488) D4: when the test declares a matched-patterns marker, emit a
+  # review-wrapper-style comment carrying it so `_inv92_matched_patterns` (the
+  # dispatcher-side reader) has something to find. (codex review round-2, PR
+  # #498): the marker is head-bound — defaults to `_MOCK_PR_HEAD` (the same
+  # head under review) unless the test overrides `_MOCK_MATCHED_PATTERNS_HEAD`
+  # to simulate a stale marker from a different round.
+  if [[ -n "${_MOCK_MATCHED_PATTERNS_MARKER:-}" ]]; then
+    local _mp_head="${_MOCK_MATCHED_PATTERNS_HEAD:-${_MOCK_PR_HEAD:-unknown}}"
+    _bodies+=("Non-actionable findings comment.
+<!-- inv92-matched-patterns: head=${_mp_head} ${_MOCK_MATCHED_PATTERNS_MARKER} -->")
   fi
   if [[ "${_MOCK_NOTICE_PRESENT:-0}" != "0" ]]; then
     # The fresh-dev/INV-12 notices are session-scoped — the branch searches for
@@ -274,6 +291,8 @@ reset_mocks() {
   _MOCK_NONACT_NOTICE_PRESENT="0"
   _MOCK_ATTEMPT_WRITE_FAILS="0"
   _MOCK_ATTEMPT_WRITE_TRIES=0
+  _MOCK_MATCHED_PATTERNS_MARKER=""
+  _MOCK_MATCHED_PATTERNS_HEAD=""
   _MOCK_NOTICE_SESSION=""   # #281: session id the synthesized INV-12/INV-35 marker carries
   _MOCK_PR_LOOKUP_FAILS="0" # [INV-123] (#461): simulate fetch_pr_for_issue transport failure
   unset REVIEW_RETRY_LIMIT
@@ -892,6 +911,186 @@ assert_returns "INV92-RT-006 returns 0" 0 \
 assert_eq "INV92-RT-006 mark_stalled fired (no PR)" "100 " "$_MOCK_MARK_STALLED_CALLS"
 assert_eq "INV92-RT-006 NO dispatch dev-new" "" "$_MOCK_DISPATCH_CALLS"
 assert_contains "INV92-RT-006 notice keys non-actionable-finding:none" "non-actionable-finding:none" "$_MOCK_LAST_COMMENT_BODY"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== INV-136 (#488) D4: stall notice surfaces the matched-patterns marker ==="
+# ---------------------------------------------------------------------------
+
+# TC-INV134-D4-08: Branch B′ fires with an `inv92-matched-patterns:` marker
+# already on the issue (posted by the review wrapper) — the escalation notice
+# names the matched pattern(s) + the REVIEW_PROTECTED_PATHS conf lever.
+reset_mocks
+_MOCK_VERDICT="failed-substantive"
+_MOCK_DEV_ACTIONABLE="false"
+_MOCK_PR_HEAD="cafef00d"
+_MOCK_LAST_REVIEWED_HEAD="cafef00d"
+_MOCK_MATCHED_PATTERNS_MARKER=".github/workflows/** CODEOWNERS"
+prepare_log 100
+assert_returns "TC-INV134-D4-08 returns 0" 0 \
+  handle_completed_session_routing 100 "sid-d408" "2026-05-21T03:18:00Z"
+assert_eq "TC-INV134-D4-08 mark_stalled fired" "100 " "$_MOCK_MARK_STALLED_CALLS"
+assert_contains "TC-INV134-D4-08 notice names matched patterns" \
+  "Matched \`REVIEW_PROTECTED_PATHS\` pattern(s): .github/workflows/** CODEOWNERS" "$_MOCK_LAST_COMMENT_BODY"
+
+# TC-INV134-D4-09: Branch B′ fires with NO marker present — the notice is
+# byte-identical to the pre-#488 generic wording (no pattern sentence at all).
+reset_mocks
+_MOCK_VERDICT="failed-substantive"
+_MOCK_DEV_ACTIONABLE="false"
+_MOCK_PR_HEAD="cafef00d"
+_MOCK_LAST_REVIEWED_HEAD="cafef00d"
+prepare_log 100
+assert_returns "TC-INV134-D4-09 returns 0" 0 \
+  handle_completed_session_routing 100 "sid-d409" "2026-05-21T03:18:00Z"
+assert_eq "TC-INV134-D4-09 mark_stalled fired" "100 " "$_MOCK_MARK_STALLED_CALLS"
+case "$_MOCK_LAST_COMMENT_BODY" in
+  *"Matched \`REVIEW_PROTECTED_PATHS\` pattern(s)"*)
+    echo -e "  ${RED}FAIL${NC}: TC-INV134-D4-09 notice should NOT mention matched patterns when no marker exists"
+    FAIL=$((FAIL + 1))
+    ;;
+  *)
+    echo -e "  ${GREEN}PASS${NC}: TC-INV134-D4-09 no marker ⇒ generic fallback wording, no pattern sentence"
+    PASS=$((PASS + 1))
+    ;;
+esac
+
+# TC-INV134-D4-16 (codex review round-2, PR #498): a marker EXISTS on the
+# issue, but it was posted for a DIFFERENT (earlier, stale) head than the one
+# this verdict was reviewed against — the notice must NOT surface it and must
+# fall back to the generic wording, exactly as if no marker existed at all.
+reset_mocks
+_MOCK_VERDICT="failed-substantive"
+_MOCK_DEV_ACTIONABLE="false"
+_MOCK_PR_HEAD="cafef00d"
+_MOCK_LAST_REVIEWED_HEAD="cafef00d"
+_MOCK_MATCHED_PATTERNS_MARKER=".github/workflows/**"
+_MOCK_MATCHED_PATTERNS_HEAD="stale0ld"
+prepare_log 100
+assert_returns "TC-INV134-D4-16 returns 0" 0 \
+  handle_completed_session_routing 100 "sid-d416" "2026-05-21T03:18:00Z"
+assert_eq "TC-INV134-D4-16 mark_stalled fired" "100 " "$_MOCK_MARK_STALLED_CALLS"
+case "$_MOCK_LAST_COMMENT_BODY" in
+  *"Matched \`REVIEW_PROTECTED_PATHS\` pattern(s)"*)
+    echo -e "  ${RED}FAIL${NC}: TC-INV134-D4-16 notice must NOT surface a stale marker from a different head"
+    FAIL=$((FAIL + 1))
+    ;;
+  *)
+    echo -e "  ${GREEN}PASS${NC}: TC-INV134-D4-16 stale (different-head) marker ignored, generic fallback wording used"
+    PASS=$((PASS + 1))
+    ;;
+esac
+
+# TC-INV134-D4-11: _inv92_matched_patterns directly — fail-empty on an
+# itp_list_comments transport failure (never propagates the error text or a
+# stale value, rc is irrelevant since every caller only checks `-n`), and
+# correct extraction when the marker IS present AND its `head=` field matches
+# the caller-supplied head (codex review round-2, PR #498: the reader now
+# requires an exact head match). Run under this file's own `set +e` posture
+# (the set -e ABORT class itself is TC-INV134-D4-12's job).
+reset_mocks
+_MOCK_MATCHED_PATTERNS_MARKER=".github/workflows/** CODEOWNERS"
+_MOCK_MATCHED_PATTERNS_HEAD="cafef00d"
+assert_eq "TC-INV134-D4-11a extracts the marker pattern list when the head matches" \
+  ".github/workflows/** CODEOWNERS" "$(_inv92_matched_patterns 100 "cafef00d")"
+assert_eq "TC-INV134-D4-11a2 empty when the caller's head does NOT match the marker's head" \
+  "" "$(_inv92_matched_patterns 100 "some-other-head")"
+_MOCK_MATCHED_PATTERNS_MARKER=""
+_MOCK_COMMENT_FETCH_RC_UNUSED=1  # documents intent; real transport-failure mock below
+itp_list_comments() { return 1; }
+assert_eq "TC-INV134-D4-11b fail-empty on itp_list_comments transport failure" \
+  "" "$(_inv92_matched_patterns 100 "cafef00d")"
+# Restore the real mock this file's other tests depend on.
+itp_list_comments() {
+  local _bodies=()
+  if [[ "${_MOCK_NOPROG_ATTEMPT_PRESENT:-0}" != "0" ]]; then
+    _bodies+=("<!-- no-progress-substantive-attempt:${_MOCK_PR_HEAD} -->")
+  fi
+  if [[ "${_MOCK_NOPROG_NOTICE_PRESENT:-0}" != "0" ]]; then
+    _bodies+=("no-progress-substantive:${_MOCK_PR_HEAD} notice")
+  fi
+  if [[ "${_MOCK_NONACT_NOTICE_PRESENT:-0}" != "0" ]]; then
+    _bodies+=("non-actionable-finding:${_MOCK_PR_HEAD:-none} prior notice")
+  fi
+  if [[ -n "${_MOCK_MATCHED_PATTERNS_MARKER:-}" ]]; then
+    _bodies+=("Non-actionable findings comment.
+<!-- inv92-matched-patterns: ${_MOCK_MATCHED_PATTERNS_MARKER} -->")
+  fi
+  if [[ "${_MOCK_NOTICE_PRESENT:-0}" != "0" ]]; then
+    local _sid="${_MOCK_NOTICE_SESSION:-__no_session__}"
+    _bodies+=("INV-12-completed:${_sid} INV-35-fresh-dev:${_sid} INV-12-no-pr-fresh-dev:${_sid} prior notice")
+  fi
+  local _json="[]" _ts=0 b
+  for b in "${_bodies[@]}"; do
+    _json=$(jq -c --arg b "$b" --argjson t "$_ts" \
+      '. + [{id:(100+$t), author:"my-claw", authorKind:"self", body:$b, createdAt:"2026-06-12T00:00:0\($t)Z"}]' <<<"$_json")
+    _ts=$((_ts + 1))
+  done
+  printf '%s' "$_json"
+}
+reset_mocks
+
+# TC-INV134-D4-12 [set -e regression, mirrors TC-LIVENESS-075..078]: this file
+# and lib-dispatch.sh both run under `set -euo pipefail` in production, but
+# this harness runs under `set +e` (below) so it can keep counting PASS/FAIL
+# after an assertion failure — that harness posture CANNOT catch a bare
+# `_inv92_matched_patterns` call that would abort the caller under REAL
+# `set -e` if `itp_list_comments` (inside it) transiently fails. Spawn a
+# FRESH bash subshell with real `set -euo pipefail` (mirroring production) and
+# prove Branch B′ still reaches `mark_stalled` when the comment-fetch fails.
+_d4_sete_probe() {
+  bash -euo pipefail -c '
+    export REPO=zxkane/autonomous-dev-team REPO_OWNER=zxkane PROJECT_ID=d4-sete-probe-$$ MAX_RETRIES=3 MAX_CONCURRENT=5
+    source "'"$LIB"'"
+    log() { :; }
+    fetch_pr_for_issue() { printf "%s" "{\"number\":777,\"headRefOid\":\"cafef00d\"}"; }
+    last_reviewed_head() { printf "%s" "cafef00d"; }
+    dev_report_bot_unfixable() { return 1; }
+    classify_recent_review_verdict() {
+      local _v="$3" _c="$4" _da="${5:-}"
+      printf -v "$_v" "%s" "failed-substantive"; printf -v "$_c" "%s" ""
+      [ -n "$_da" ] && printf -v "$_da" "%s" "false"
+    }
+    # This branch makes TWO prior itp_list_comments calls before ever
+    # reaching _inv92_matched_patterns: (1) the no-progress-attempt marker
+    # check just above Branch B-prime, (2) Branch B-primes own idempotency
+    # check. Both MUST succeed (empty [], no marker) or the surrounding ifs
+    # short-circuit and never reach _inv92_matched_patterns at all - which
+    # would make this probe pass vacuously without exercising the bug (a
+    # miscounted threshold here is exactly the mistake that hid this bug
+    # during initial development). The THIRD call (inside
+    # _inv92_matched_patterns) must FAIL (the transient transport blip). A
+    # FILE-based counter, not a shell var: every call site pipes
+    # itp_list_comments into jq, which forks it into a SUBSHELL - a plain
+    # variable increment there would never persist back to this scope.
+    _d4_count_file="$(mktemp)"; echo 0 > "$_d4_count_file"
+    itp_list_comments() {
+      local _n; _n=$(<"$_d4_count_file"); _n=$((_n + 1)); echo "$_n" > "$_d4_count_file"
+      if [ "$_n" -le 2 ]; then
+        printf "%s" "[]"
+        return 0
+      fi
+      echo "gh: rate limit exceeded" >&2
+      return 1
+    }
+    itp_post_comment() { :; }
+    mark_stalled() { echo "MARK_STALLED_CALLED"; }
+    handle_completed_session_routing 100 "sid-d412" "2026-05-21T03:18:00Z"
+    echo "REACHED_END"
+    echo "TOTAL_ITP_CALLS=$(<"$_d4_count_file")"
+  ' 2>/dev/null
+}
+_D4_SETE_OUT="$(_d4_sete_probe)"
+assert_contains "TC-INV134-D4-12 mark_stalled reached despite itp_list_comments failure under real set -e" \
+  "MARK_STALLED_CALLED" "$_D4_SETE_OUT"
+assert_contains "TC-INV134-D4-12 function returns normally (does not abort the caller)" \
+  "REACHED_END" "$_D4_SETE_OUT"
+# Evidence the probe genuinely reached _inv92_matched_patterns's OWN failing
+# call (not just the two calls before it) — >=3 total calls is only possible
+# if both prior checks succeeded and control fell through into
+# _inv92_matched_patterns, which made the 3rd (failing) call.
+assert_contains "TC-INV134-D4-12 reached the 3rd itp_list_comments call inside _inv92_matched_patterns (not a vacuous pass)" \
+  "TOTAL_ITP_CALLS=3" "$_D4_SETE_OUT"
 
 # Cleanup
 reset_mocks

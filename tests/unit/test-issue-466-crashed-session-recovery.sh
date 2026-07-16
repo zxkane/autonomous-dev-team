@@ -65,6 +65,10 @@ _MOCK_ACQUIRE_RC=0
 _MOCK_LABEL_SWAP_RC=0
 _MOCK_DISPATCH_RC=0
 _MOCK_COMMENT_FETCH_RC=0        # 1 = itp_list_comments fails (rate-limit/auth/transport blip)
+_MOCK_MATCHED_PATTERNS_MARKER='' # INV-136 (#488) D4: inv92-matched-patterns marker text, if any
+_MOCK_MATCHED_PATTERNS_HEAD=''   # (codex review round-2, PR #498) head= field the marker carries;
+                                  # defaults to _MOCK_CURRENT_HEAD (same head) — set to a different
+                                  # sha to simulate a STALE marker from an earlier, unrelated round.
 
 _TRACE_FILE=""
 _rec() {
@@ -93,6 +97,11 @@ itp_list_comments() {
   [ "$_MOCK_SELF_HEAL_PRESENT" = "1" ] && body+=" self-heal-lost-session:${_MOCK_CURRENT_HEAD}"
   [ "$_MOCK_CRASHED_RETRY_PRESENT" = "1" ] && body+=" crashed-session-retry:${_MOCK_CURRENT_HEAD}"
   [ "$_MOCK_NONSUB_PRESENT" = "1" ] && body+=" self-heal-non-substantive:${_MOCK_CURRENT_HEAD}"
+  if [ -n "$_MOCK_MATCHED_PATTERNS_MARKER" ]; then
+    local _mp_head="${_MOCK_MATCHED_PATTERNS_HEAD:-$_MOCK_CURRENT_HEAD}"
+    printf '%s\n' "[{\"body\":\"${body}\"},{\"body\":\"<!-- inv92-matched-patterns: head=${_mp_head} ${_MOCK_MATCHED_PATTERNS_MARKER} -->\"}]"
+    return 0
+  fi
   printf '%s\n' "[{\"body\":\"${body}\"}]"
 }
 itp_post_comment()     { _rec itp_post_comment "$@"; }
@@ -148,6 +157,7 @@ _reset() {
   _MOCK_CRASHED_RETRY_PRESENT=0; _MOCK_NONSUB_PRESENT=0
   _MOCK_ACQUIRE_RC=0; _MOCK_LABEL_SWAP_RC=0; _MOCK_DISPATCH_RC=0
   _MOCK_COMMENT_FETCH_RC=0
+  _MOCK_MATCHED_PATTERNS_MARKER=''; _MOCK_MATCHED_PATTERNS_HEAD=''
 }
 
 # ===========================================================================
@@ -206,6 +216,33 @@ assert_match "TC-466-VERDICT-002 mark_stalled fired" "^mark_stalled" "$(_trace_a
 assert_eq   "TC-466-VERDICT-002 ZERO dev-new" "0" "$(_trace_verbs | grep -c '^dispatch$')"
 assert_match "TC-466-VERDICT-002 posts crashed-session-non-actionable marker" "crashed-session-non-actionable:sha-A" "$(_trace_all)"
 assert_no_match "TC-466-VERDICT-002 NO stale-verdict park" "stale-verdict:" "$(_trace_all)"
+
+# ===========================================================================
+echo
+echo "=== TC-INV134-D4-10: same-HEAD dev-actionable=false surfaces the inv92-matched-patterns marker when present ==="
+# ===========================================================================
+_reset
+_MOCK_VERDICT='failed-substantive'; _MOCK_DEV_ACTIONABLE='false'
+_MOCK_MATCHED_PATTERNS_MARKER='.github/workflows/**'
+handle_pending_dev_pr_exists 99
+rc=$?
+assert_eq   "TC-INV134-D4-10 returns 0" "0" "$rc"
+assert_match "TC-INV134-D4-10 mark_stalled fired" "^mark_stalled" "$(_trace_all)"
+assert_match "TC-INV134-D4-10 notice names the matched pattern" "Matched .REVIEW_PROTECTED_PATHS. pattern\(s\): \.github/workflows/\*\*" "$(_trace_all)"
+
+# ===========================================================================
+echo
+echo "=== TC-INV134-D4-17 (codex review round-2, PR #498): a marker from a DIFFERENT (stale) head must NOT be surfaced ==="
+# ===========================================================================
+_reset
+_MOCK_VERDICT='failed-substantive'; _MOCK_DEV_ACTIONABLE='false'
+_MOCK_MATCHED_PATTERNS_MARKER='.github/workflows/**'
+_MOCK_MATCHED_PATTERNS_HEAD='stale0ld'
+handle_pending_dev_pr_exists 99
+rc=$?
+assert_eq   "TC-INV134-D4-17 returns 0" "0" "$rc"
+assert_match "TC-INV134-D4-17 mark_stalled fired" "^mark_stalled" "$(_trace_all)"
+assert_no_match "TC-INV134-D4-17 notice does NOT surface the stale-head marker" "Matched .REVIEW_PROTECTED_PATHS. pattern\(s\)" "$(_trace_all)"
 
 # ===========================================================================
 echo
@@ -410,6 +447,88 @@ rc=$?
 assert_eq   "TC-466-FETCH-002 returns 0 (handled via park)" "0" "$rc"
 assert_eq   "TC-466-FETCH-002 ZERO dev-new dispatched" "0" "$(_trace_verbs | grep -c '^dispatch$')"
 assert_no_match "TC-466-FETCH-002 mark_stalled NOT fired" "^mark_stalled" "$(_trace_all)"
+
+# ===========================================================================
+echo
+echo "=== TC-INV134-D4-13 [set -e regression, mirrors TC-INV134-D4-12 / TC-LIVENESS-075..078]: ==="
+echo "=== _same_head_verdict_aware_recovery's dev-actionable=false branch must not abort under real set -e ==="
+# ===========================================================================
+# This harness runs under `set +e` (line 85 above) so it can keep counting
+# PASS/FAIL after an assertion failure — that posture CANNOT catch a bare
+# `_inv92_matched_patterns` call that would abort the caller under REAL
+# `set -e` if `itp_list_comments` (inside it) transiently fails. Spawn a
+# FRESH bash subshell with real `set -euo pipefail` (mirroring
+# dispatcher-tick.sh:583's `if handle_pending_dev_pr_exists ...; then`) and
+# prove mark_stalled is still reached AFTER _inv92_matched_patterns actually
+# ran (the call-count threshold below must be high enough to let the
+# comment-read preflight and the idempotency check both succeed first, or
+# this probe passes vacuously without ever entering _inv92_matched_patterns
+# at all — the exact defect an independent review caught in an earlier
+# draft of this test, which used too low a threshold). This call site is
+# CURRENTLY only ever reached via the `if handle_pending_dev_pr_exists`
+# context — under which bash already suppresses errexit for the whole call
+# chain (the codebase's own INV-108 precedent, lib-dispatch.sh:2160) — so
+# the `|| true` fix in _inv92_matched_patterns is defense-in-depth here, not
+# load-bearing at THIS specific call site (unlike the direct
+# dispatcher-tick.sh:693 call TC-INV134-D4-12 pins). Kept as a regression
+# pin anyway: a future refactor that calls _same_head_verdict_aware_recovery
+# as a plain (non-`if`) statement would make this call site load-bearing
+# too.
+_d4_13_sete_probe() {
+  bash -euo pipefail -c '
+    export REPO=zxkane/autonomous-dev-team REPO_OWNER=zxkane PROJECT_ID=d4-13-sete-probe-$$ MAX_RETRIES=3 MAX_CONCURRENT=5
+    source "'"$LIB"'"
+    log() { :; }
+    extract_dev_session_id() { printf "%s" ""; }
+    fetch_pr_for_issue() { printf "%s" "{\"number\":42,\"headRefOid\":\"sha-A\"}"; }
+    last_reviewed_head() { printf "%s" "sha-A"; }
+    may_stall_now() { return 0; }
+    classify_recent_review_verdict() {
+      local _v="$3" _c="$4" _da="${5:-}"
+      printf -v "$_v" "%s" "failed-substantive"; printf -v "$_c" "%s" ""
+      [ -n "$_da" ] && printf -v "$_da" "%s" "false"
+    }
+    # THREE prior itp_list_comments calls happen before ever reaching
+    # _inv92_matched_patterns inside _same_head_verdict_aware_recovery: (1)
+    # the comment-read preflight (lib-dispatch.sh ~3605), (2) the
+    # dev-actionable=false idempotency check. Both MUST succeed or an
+    # earlier `if`/`return 1` short-circuits before _inv92_matched_patterns
+    # is ever called — a threshold too low here would make this probe pass
+    # vacuously without exercising the bug (exactly the mistake caught by
+    # independent review on an earlier draft: `-le 1` let the failure land
+    # on the preflight, never reaching this branch at all). The THIRD call
+    # (inside _inv92_matched_patterns) must FAIL.
+    _d4_13_count_file="$(mktemp)"; echo 0 > "$_d4_13_count_file"
+    itp_list_comments() {
+      local _n; _n=$(<"$_d4_13_count_file"); _n=$((_n + 1)); echo "$_n" > "$_d4_13_count_file"
+      if [ "$_n" -le 2 ]; then
+        printf "%s" "[]"
+        return 0
+      fi
+      echo "gh: rate limit exceeded" >&2
+      return 1
+    }
+    itp_post_comment() { :; }
+    itp_transition_state() { :; }
+    mark_stalled() { echo "MARK_STALLED_CALLED"; }
+    if handle_pending_dev_pr_exists 99; then
+      echo "HANDLE_PENDING_RETURNED_TRUE"
+    fi
+    echo "REACHED_END"
+    echo "TOTAL_ITP_CALLS=$(<"$_d4_13_count_file")"
+  ' 2>/dev/null
+}
+_D4_13_SETE_OUT="$(_d4_13_sete_probe)"
+assert_match "TC-INV134-D4-13 mark_stalled reached despite itp_list_comments failure under real set -e" \
+  "MARK_STALLED_CALLED" "$_D4_13_SETE_OUT"
+assert_match "TC-INV134-D4-13 function returns normally (does not abort the caller)" \
+  "REACHED_END" "$_D4_13_SETE_OUT"
+# Evidence the probe genuinely reached _inv92_matched_patterns's OWN failing
+# call (not just the two calls before it) — >=3 total calls is only possible
+# if the preflight AND the idempotency check both succeeded and control fell
+# through into _inv92_matched_patterns, which made the 3rd (failing) call.
+assert_match "TC-INV134-D4-13 reached the 3rd itp_list_comments call inside _inv92_matched_patterns (not a vacuous pass)" \
+  "TOTAL_ITP_CALLS=3" "$_D4_13_SETE_OUT"
 
 echo
 echo "=== Summary ==="
