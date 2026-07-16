@@ -1364,7 +1364,7 @@ _agent_progress_write_retry_now_seconds() {
 _agent_progress_write_retry() {
   local LC_ALL=C
   local data="$1" total wrote=0 off=0 chunk=4096 take piece err
-  local write_fd deadline now attempts=0
+  local write_fd deadline now now0 attempts=0 awk_rc
   total=${#data}
   [[ "$total" -eq 0 ]] && return 0
   # Duplicate the CURRENT fd 1 once so `printf`'s stderr can be captured via
@@ -1372,13 +1372,21 @@ _agent_progress_write_retry() {
   # substitution's own subshell — the write target is fd 1 at call time,
   # matching every other write site in this recorder.
   exec {write_fd}>&1
-  deadline=$(_agent_progress_write_retry_now_seconds)
+  now0=$(_agent_progress_write_retry_now_seconds)
   # LC_ALL=C prefixed directly on the awk invocation (not relying on the
   # function-local `local LC_ALL=C` above, which only reaches a child
   # process if LC_ALL was already exported) — an exported LC_NUMERIC/LANG
   # with a comma decimal separator would otherwise make awk's `%.6f` emit
   # (and then mis-reparse) a comma, corrupting the deadline math.
-  deadline=$(LC_ALL=C awk -v n="$deadline" -v b="${AGENT_PROGRESS_WRITE_RETRY_BUDGET_SECONDS:-2}" 'BEGIN{printf "%.6f", n + b}')
+  # A missing/corrupt `awk` on PATH must fail SAFE — collapsing the deadline
+  # to "now" makes the very first exhaustion check below read as already-
+  # exhausted, instead of leaving `deadline` empty and relying on awk's
+  # implicit string/numeric coercion of an empty `-v d=""` to (accidentally)
+  # produce the same outcome in the loop below. The `$?` check must sit
+  # immediately after its assignment (comments preserve `$?`, but any command
+  # in between would not) so a failed awk exec is caught alongside empty output.
+  deadline=$(LC_ALL=C awk -v n="$now0" -v b="${AGENT_PROGRESS_WRITE_RETRY_BUDGET_SECONDS:-2}" 'BEGIN{printf "%.6f", n + b}')
+  [[ $? -eq 0 && -n "$deadline" ]] || deadline="$now0"
   while (( off < total )); do
     take=$(( total - off < chunk ? total - off : chunk ))
     piece="${data:off:take}"
@@ -1403,7 +1411,16 @@ _agent_progress_write_retry() {
       # RETRY_BUDGET_SECONDS), matching the issue's "bounded total (e.g.
       # ~2s worth)" guidance regardless of how many slices the record took.
       now=$(_agent_progress_write_retry_now_seconds)
-      if LC_ALL=C awk -v n="$now" -v d="$deadline" 'BEGIN{exit !(n >= d)}'; then
+      LC_ALL=C awk -v n="$now" -v d="$deadline" 'BEGIN{exit !(n >= d)}'
+      awk_rc=$?
+      # The awk program only ever exits 0 ("n >= d", deadline reached) or 1
+      # ("n < d", keep retrying) by construction — any OTHER exit code means
+      # awk itself failed to execute (missing/corrupt PATH), not that the
+      # deadline check evaluated false. Fail SAFE and treat that the same as
+      # "deadline reached": `if awk ...; then` would instead read a non-0/1
+      # rc as the `if`'s false branch and spin on `sleep 0.05` forever,
+      # defeating this whole function's bounded-retry contract.
+      if [[ $awk_rc -ne 1 ]]; then
         printf 'lib-agent.sh: _agent_progress_recorder: dropping output record (%d of %d bytes written) after %d retries — write error: Resource temporarily unavailable\n' \
           "$wrote" "$total" "$attempts" >&2 || true  # best-effort diagnostic; a failed write to a full pipe must not itself abort the record-drop path
         exec {write_fd}>&-

@@ -49,6 +49,20 @@ sites in the recorder's read loop with a bounded-retry write:
 - **Bound exhaustion.** If the deadline is exceeded, the record is dropped with ONE
   best-effort stderr diagnostic (itself `|| true` — the diagnostic write shares the same
   pipe and may fail too).
+- **A missing/broken `awk` fails safe (round-3 review finding), not open-ended.** Both the
+  deadline computation and the per-attempt exhaustion check shell out to `awk` for
+  floating-point time arithmetic bash itself cannot do. The exhaustion check's `awk`
+  program only ever exits 0 (`n >= d`, deadline reached) or 1 (`n < d`, not yet) by
+  construction — but if `awk` itself cannot execute at all (missing/corrupt `PATH`), the
+  shell instead observes some OTHER exit code (127, "command not found"). A bare
+  `if awk ...; then` cannot tell that apart from the program's own "not yet" — both take
+  the `if`'s false branch — so a check that fails to even run read as "keep retrying",
+  spinning on `sleep 0.05` forever against a never-draining reader: exactly the unbounded
+  hang this issue exists to eliminate, just triggered by an absent tool instead of a stuck
+  pipe. Fixed by capturing the `awk` invocation's own exit code and treating anything other
+  than the program's documented "not yet" (rc 1) as exhaustion — including the deadline
+  computation's `awk` call, guarded by falling back to `deadline=now` (immediately
+  exhausted) if that invocation's rc is non-zero or it produced empty output.
 - **No new pipeline stage.** The retry lives entirely inside `_agent_progress_recorder`'s
   existing read loop — an additional stage would itself be a new EAGAIN-vulnerable writer.
   `O_NONBLOCK` is never cleared from bash (no fcntl access). Both call sites' `|| true`
@@ -79,6 +93,7 @@ sites in the recorder's read loop with a bounded-retry write:
 | 2 | No design canvas covered the slice/retry/error-classification design | This document |
 | 2 | `local LC_ALL=C` does not reach the child `awk` process unless `LC_ALL` was already exported — a comma-decimal locale could corrupt the deadline float comparison | Prefixed `LC_ALL=C` directly on both `awk` invocations |
 | 2 (CI, not local) | TC-LEASE-027 failed against GNU coreutils `cat` (the CI runner's `cat`) even though it passed locally against this dev box's non-GNU `cat` — the "zero-`AGENT_PROGRESS_FILE` fast path" bare `cat` had the SAME un-retried-`EAGAIN` data-drop bug as the pre-fix `printf`, just on the review side | Removed the bare-`cat` special case; the review-side path now runs through the same `_agent_progress_write_retry`-protected loop as the dev side |
+| 3 | A missing/broken `awk` on `PATH` made the exhaustion check's `if awk ...; then` misread "awk itself couldn't execute" as "deadline not yet reached", spinning the retry loop forever instead of failing safe | Capture the `awk` invocation's exit code explicitly and treat anything other than its documented rc 1 ("not yet") as exhaustion; the deadline computation's own `awk` call falls back to `deadline=now` on failure (see Decision above); TC-LEASE-030 |
 
 ## Out of scope
 
@@ -89,10 +104,12 @@ log probe (reads the same file post-hoc; fixed by the same producer fix).
 
 ## Test plan
 
-See `docs/test-cases/agent-progress-lease.md` TC-LEASE-024..029 —
+See `docs/test-cases/agent-progress-lease.md` TC-LEASE-024..030 —
 `tests/unit/test-agent-progress-lease.sh`, driving the real recorder through a real
 `O_NONBLOCK` pipe via a python3 `fcntl` helper: byte-identical passthrough under transient
 EAGAIN pressure, the no-trailing-newline contract under retry, bounded-exhaustion
 completing instead of hanging, the zero-`AGENT_PROGRESS_FILE` review-side path now
-protected the same way as the dev side, dead-reader (EPIPE) fast-fail, and the whole-record
-(not per-slice) retry budget.
+protected the same way as the dev side, dead-reader (EPIPE) fast-fail, the whole-record
+(not per-slice) retry budget, and (TC-LEASE-030) a missing `awk` on `PATH` failing safe
+instead of retrying forever against the SAME never-draining-reader harness TC-LEASE-026
+uses.

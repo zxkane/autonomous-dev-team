@@ -870,6 +870,42 @@ PYEOF
   assert_eq "TC-LEASE-026 exactly one best-effort stderr diagnostic for the exhausted record" "1" "$diag_count"
 
   # ---------------------------------------------------------------------
+  # TC-LEASE-030 (round-3 review finding): a missing/broken `awk` on PATH
+  # must fail SAFE, not retry forever. The deadline-exhaustion check reads
+  # `if awk ... 'BEGIN{exit !(n >= d)}'; then` — the awk PROGRAM only ever
+  # exits 0 ("reached") or 1 ("not yet") by construction, but if `awk`
+  # itself cannot execute (missing/corrupt PATH), the shell instead sees
+  # some other exit (127, "command not found"), which a naive `if` cannot
+  # distinguish from the PROGRAM's own "not yet" — both take the false
+  # branch, so a check that fails to even RUN reads as "keep retrying".
+  # Reuses TC-LEASE-026's exact never-draining-reader harness (same
+  # STUCK_DRIVER/STUCK_FIXTURE) so this isolates ONE variable — `awk`
+  # missing from PATH — against an otherwise identical repro; only the
+  # child recorder's PATH is restricted (a symlink farm omitting `awk`
+  # specifically, same technique as TC-LEASE-023's missing-`flock` farm;
+  # never a real bin dir, which would still resolve the system awk).
+  NOAWK_BIN=$(mktemp -d)
+  for _b in bash cat date mkdir mktemp stat sh dirname readlink pwd printf tr grep sed ps sleep kill cp basename wc chmod mv rm head timeout setsid env; do
+    _bp="$(command -v "$_b" 2>/dev/null)" || continue
+    ln -sf "$_bp" "$NOAWK_BIN/$_b"
+  done
+
+  NOAWK_ERR="$TMPROOT/noawk-err.log"
+  NOAWK_PROGRESS_DIR="$TMPROOT/noawk-pd"
+  rm -rf "$NOAWK_PROGRESS_DIR"
+
+  noawk_out=$(timeout 20 python3 "$STUCK_DRIVER" 10 -- \
+    env PATH="$NOAWK_BIN" AGENT_PROGRESS_WRITE_RETRY_BUDGET_SECONDS=1 \
+    bash "$RECORDER_DRIVER" "$LIB" "$STUCK_FIXTURE" "$NOAWK_PROGRESS_DIR/progress.json" json "$NOAWK_ERR" 2>&1)
+  noawk_driver_rc=$?
+  rm -rf "$NOAWK_BIN"
+
+  assert_eq "TC-LEASE-030 recorder completes within the wall-clock bound with awk missing from PATH (proves no hang)" \
+    "0" "$noawk_driver_rc"
+  assert_contains "TC-LEASE-030 recorder process actually exited (not killed by the test's own timeout)" \
+    "EXITED" "$noawk_out"
+
+  # ---------------------------------------------------------------------
   # TC-LEASE-028 (round-1 review finding): a dead reader (closed read end,
   # real EPIPE — not EAGAIN) must fail FAST, not burn the ~2s-per-slice
   # retry budget. Distinguishes this from TC-LEASE-026's never-draining-but-

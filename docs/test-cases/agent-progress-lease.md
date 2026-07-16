@@ -196,9 +196,15 @@ fixture-driven; no real sleeps.
 **When** the recorder writes the record
 **Then** total wall-clock time stays within one whole-record retry budget (`AGENT_PROGRESS_WRITE_RETRY_BUDGET_SECONDS`, default ~2s) regardless of how many slices the record took — proving the deadline is computed ONCE before the slice loop starts and shared across every slice's retry loop, not reset to a fresh allowance every time a new slice begins (the round-1 shipped shape's `attempts=0` reset inside the slice loop, which would let an N-slice record retry for up to N times the intended per-record bound). A characterization run of the retired per-slice-reset shape (isolated from `lib-agent.sh`, exercised standalone) against the identical drain pattern confirms it DOES exceed the bound for the same input, so this test is proven to discriminate the fix from the bug rather than passing either way.
 
+## TC-LEASE-030: a missing/broken `awk` fails safe instead of retrying forever (round-3 review finding)
+
+**Given** the SAME never-draining-reader harness as TC-LEASE-026 (a single-record fixture large enough to force the retry-exhaustion path, against a reader that fills the pipe once and never reads again), but with the recorder's own `PATH` restricted to a symlink farm that omits `awk` specifically (never a real bin dir, which would still resolve the system `awk` and defeat the fixture)
+**When** the recorder attempts to write the record and its per-attempt deadline-exhaustion check shells out to `awk`
+**Then** the recorder process still exits within the same bounded wall-clock window as TC-LEASE-026 (not a hang) — proving that when `awk` itself cannot execute (as opposed to executing and evaluating "not yet"), the exhaustion check is read as "deadline reached" rather than silently falling through to "keep retrying" and spinning `sleep 0.05` forever. Verified to discriminate fixed from broken: reverting the fix (a bare `if awk ...; then` that cannot distinguish awk's own exit 1 from a shell-level "command not found") makes this exact scenario hang past the test's wall-clock bound.
+
 ## Acceptance mapping
 
 - R1 → TC-LEASE-001, 004-010, 018, 022, 023
 - R2 → TC-LEASE-001, 003, 018
-- R3 → TC-LEASE-011, 016, 017, 019, 020, 020b, 021, 024, 025, 026, 027, 028, 029
+- R3 → TC-LEASE-011, 016, 017, 019, 020, 020b, 021, 024, 025, 026, 027, 028, 029, 030
 - R4 → TC-LEASE-011, 012, 013, 014, 015

@@ -504,7 +504,13 @@ without this check `EPIPE` would otherwise be misclassified as retryable
 `EAGAIN` (round-1 review finding). The ONLY carve-outs are bound exhaustion
 (a reader that stalls, not dies, for the full ~2s) and the dead-reader case:
 either way, that record is dropped with exactly one best-effort stderr
-diagnostic, never a silent drop and never an unbounded hang. See
+diagnostic, never a silent drop and never an unbounded hang. This bound holds
+even if `awk` itself — used for the retry deadline's floating-point time
+arithmetic — is missing or broken on `PATH` (round-3 review finding): the
+exhaustion check's exit code is captured explicitly, and anything other than
+the `awk` program's own documented "not yet" (rc 1) is treated as exhaustion,
+so a shell-level "command not found" can no longer be misread as "keep
+retrying" and spin the loop unbounded. See
 [INV-135](invariants.md#inv-135-the-agent-progress-lease-is-a-producer-only-signal-refreshed-on-launch-and-per-complete-output-record-never-by-the-heartbeat)
 for the full rationale, the atomic-`PIPE_BUF`-slicing mechanics (why a naive
 whole-string retry would risk resending already-delivered bytes), and the
