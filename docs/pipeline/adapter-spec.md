@@ -464,11 +464,16 @@ one framing argument, `json` or `line`:
 | `kiro` | `line` | No JSON event stream. |
 | unknown-CLI fallback (`run_agent`'s generic branch) | `line` | An unrecognized CLI is never assumed to emit a JSON stream. |
 
-**Clause R2 (a record).** Under `json` framing, a record is a line whose first
-character is `{` — every JSON/JSONL adapter in this table emits exactly one
-complete object per line, so this is a safe, cheap discriminator (no JSON
-parse needed in the hot path). Under `line` framing, every non-empty line is a
-record.
+**Clause R2 (a record).** Under `json` framing, a record is a line that is a
+COMPLETE, valid JSON object — the recorder pre-filters on the first character
+being `{` (cheap discriminator, avoids invoking `jq` on plain-text/non-JSON
+lines) and then validates the candidate with `jq -e .` before treating it as a
+record. A truncated or malformed line (e.g. a crashed or malformed JSONL
+agent mid-write) does NOT refresh the lease — falling through to the next
+line, which either completes the record or is itself dropped. `jq`
+unavailability at call time degrades to the cheap prefix check alone (same
+posture as every other `command -v jq` guard in `lib-agent.sh`). Under `line`
+framing, every non-empty line is a record — no JSON validation applies.
 
 **Clause R3 (byte-identical pass-through).** The recorder **MUST NOT** buffer,
 reorder, drop, or otherwise alter a single byte of the CLI's stdout — including

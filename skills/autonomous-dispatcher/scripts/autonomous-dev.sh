@@ -908,8 +908,10 @@ cleanup() {
 
   # [#493 R1] Remove THIS run's progress-lease sidecars — own-run-only
   # (compare-then-unlink on run_id inside _agent_progress_cleanup), so a
-  # newer run's files that raced this teardown are never deleted.
-  _agent_progress_cleanup
+  # newer run's files that raced this teardown are never deleted. Guarded
+  # (like every other optional-helper call in this function) because some
+  # test harnesses extract cleanup() without sourcing lib-agent.sh.
+  declare -F _agent_progress_cleanup >/dev/null 2>&1 && _agent_progress_cleanup
 
   # [Lane-GC PR-5 / INV-118] Guardian clean-exit handshake — replaces the
   # feature-guarded no-op INV-115 (PR-3) reserved this slot for ("there is

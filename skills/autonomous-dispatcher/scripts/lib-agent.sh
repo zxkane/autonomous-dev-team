@@ -1231,10 +1231,19 @@ _agent_progress_cleanup() {
 # stdout with NO buffering/modification (byte-identical, including a final
 # line with no trailing newline) and, as a side effect, calls
 # _agent_progress_refresh once per COMPLETE non-empty output record:
-#   framing="json" — a line counts as a record only when it starts with '{'
-#     (every JSON/JSONL adapter this pipeline drives emits one complete
-#     object per line — Claude/Codex/OpenCode always, Gemini when its
-#     effective args select stream-json).
+#   framing="json" — a line counts as a record only when it is a COMPLETE
+#     JSON object (`jq -e .` parses it), not merely a line starting with
+#     '{' — a truncated/mid-write record (e.g. a crashed or malformed
+#     JSONL agent) must NOT refresh the lease (review finding #493-round1
+#     [P2]). Every JSON/JSONL adapter this pipeline drives emits one
+#     complete object per line (Claude/Codex/OpenCode always, Gemini when
+#     its effective args select stream-json), so this is a pure
+#     malformed-input guard, not a framing change for the well-formed case.
+#     Falls back to the cheap prefix check if `jq` is unavailable at call
+#     time — same degrade posture as every other `command -v jq` guard in
+#     this file (e.g. _agent_progress_cleanup above); losing the stricter
+#     validation only on a box with no jq is preferable to refusing to
+#     progress-track at all.
 #   anything else ("line" framing) — every non-empty line counts.
 # No-op passthrough (bare `cat`) when AGENT_PROGRESS_FILE is unset — the
 # review side never sets it, so composing this into every adapter is always
@@ -1280,10 +1289,21 @@ _agent_progress_recorder() {
       printf '%s' "$line"
     fi
     # A complete non-empty output record: under "line" framing every non-empty
-    # line counts; under "json" framing only a line that starts with '{' (the
-    # one-object-per-line contract the JSON adapters emit).
-    if [[ -n "$line" && ( "$framing" != "json" || "$line" == \{* ) ]]; then
-      _agent_progress_refresh
+    # line counts; under "json" framing only a line that is a COMPLETE JSON
+    # object — validated with `jq -e .` so a truncated/mid-write record never
+    # falsely refreshes the lease. Cheap prefix pre-check avoids invoking jq
+    # on every plain-text/empty line (stderr passthrough never reaches this
+    # function, but a JSON CLI can still interleave non-JSON stdout noise).
+    if [[ -n "$line" ]]; then
+      if [[ "$framing" != "json" ]]; then
+        _agent_progress_refresh
+      elif [[ "$line" == \{* ]]; then
+        if command -v jq >/dev/null 2>&1; then
+          jq -e . >/dev/null 2>&1 <<<"$line" && _agent_progress_refresh
+        else
+          _agent_progress_refresh
+        fi
+      fi
     fi
     [[ $rc -ne 0 ]] && break
   done

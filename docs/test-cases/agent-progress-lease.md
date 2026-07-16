@@ -37,11 +37,17 @@ fixture-driven; no real sleeps.
 **When** a concurrent reader stats the target path throughout the write
 **Then** the reader only ever sees the previous complete lease or the new complete lease, never a truncated file.
 
+## TC-LEASE-005b: a CONCURRENT reader observes no torn/partial read
+
+**Given** a writer looping hundreds of refreshes and a reader running concurrently in a background subshell, re-reading and `jq`-parsing the lease as fast as possible for the writer's entire run
+**When** the two race
+**Then** every read of an existing, non-empty lease file parses as valid JSON — proving the tmp-file+rename write path, not just a post-hoc parse of the FINAL file (which a non-atomic direct overwrite would also pass).
+
 ## TC-LEASE-006: symlinked target refused
 
 **Given** `issue-N.progress.json` is a pre-planted symlink
 **When** the writer attempts a refresh
-**Then** the writer refuses (no write through the symlink) and logs a warning; same for `issue-N.run-id`.
+**Then** the writer refuses (silent no-op — no write through the symlink, the symlink is left untouched); same for `issue-N.run-id`.
 
 ## TC-LEASE-007: 0600 mode asserted
 
@@ -82,8 +88,8 @@ fixture-driven; no real sleeps.
 ## TC-LEASE-013: remote session-log probe parses the same fixture
 
 **Given** the TC-LEASE-011 fixture on the (simulated) execution host
-**When** `session-log-probe-remote-aws-ssm.sh --probe` runs against it
-**Then** line 1 is the final `{"type":"result",...}` record verbatim and line 2 is a valid mtime epoch.
+**When** the REAL `session-log-probe-remote-aws-ssm.sh --probe` driver runs end-to-end, with only the `aws` SSM transport stubbed (the stub decodes and executes the driver's own base64-encoded inner shell snippet locally, rather than returning a canned answer)
+**Then** line 1 is the final `{"type":"result",...}` record verbatim and line 2 is a valid mtime epoch; a reframed/indented final line (same TC-LEASE-015 mutation) makes the real driver report empty, proving the pin holds through the actual driver code, not a hand-copied grep/stat snippet that could silently diverge from it.
 
 ## TC-LEASE-014: `metrics_parse_tokens` final usage totals unchanged
 
@@ -130,9 +136,15 @@ fixture-driven; no real sleeps.
 **When** gemini's adapter composes the recorder
 **Then** it uses line framing.
 
+## TC-LEASE-021: refresh COUNT (not just presence) through all seven launch paths
+
+**Given** each of the seven dev launch paths (claude, codex, opencode, agy, kiro, gemini, and the unknown-CLI fallback) driven through the real `run_agent` dispatch with a stub CLI binary emitting a known number N of complete records, and a counting wrapper around `_agent_progress_refresh`
+**When** the run completes
+**Then** the counted refresh total is exactly N+1 (one launch event plus one per record) for every path — proving the recorder is actually wired into claude/codex/opencode/agy/kiro (not just the fallback and gemini, the only two paths a bare "lease file exists" check had exercised) and that it refreshes once per record, not once per command.
+
 ## Acceptance mapping
 
 - R1 → TC-LEASE-001, 004-010, 018
 - R2 → TC-LEASE-001, 003, 018
-- R3 → TC-LEASE-011, 016, 017, 019, 020
+- R3 → TC-LEASE-011, 016, 017, 019, 020, 021
 - R4 → TC-LEASE-011, 012, 013, 014, 015

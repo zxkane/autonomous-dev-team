@@ -87,18 +87,25 @@ for fn in _agent_progress_refresh _agent_progress_init _agent_progress_cleanup _
   fi
 done
 
-# _source_env <extra-vars...> — helper to source lib-agent.sh in a clean
-# subshell with the sandbox PID dir + a fixed PROJECT_ID/PROJECT_DIR, and run
-# a snippet of code passed as the LAST positional (as a bash -c script).
+# run_in_sandbox <script> — source lib-agent.sh in a clean subshell with the
+# sandbox PID dir + a fixed PROJECT_ID/PROJECT_DIR, then run the passed <script>
+# snippet (as a bash -c script) after the source.
 run_in_sandbox() {
   local script="$1"
   ( set -uo pipefail
+    # -u AUTONOMOUS_CONF_DIR / unset AGENT_PID_FILE: this suite can run
+    # dispatched by the live autonomous dispatcher on this self-hosting box,
+    # which exports both — without stripping them, load_autonomous_conf
+    # would source the OPERATOR's real autonomous.conf (overriding the
+    # per-test AGENT_CMD) and a stray AGENT_PID_FILE would leak in. Matches
+    # the same isolation test-cli-adapters.sh already applies.
+    env -u AUTONOMOUS_CONF_DIR \
     AUTONOMOUS_PID_DIR="$PID_DIR" \
     PROJECT_ID="testproj" \
     PROJECT_DIR="$TMPROOT" \
     AGENT_CMD=claude \
     bash -c '
-      unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV
+      unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE
       source "'"$LIB"'"
       '"$script"'
     '
@@ -186,16 +193,31 @@ run_in_sandbox '
 '
 epoch1=$(jq -r '.updated_at_epoch' "$PROGRESS_FILE" 2>/dev/null)
 
-# Force a later timestamp deterministically: rewrite the lease's own
-# updated_at_epoch manually to simulate "time passed", then call refresh
-# again and confirm it overwrites with a >= value (never regresses).
-sleep 1
-run_in_sandbox '
-  export AGENT_PID_FILE="'"$PIDFILE"'"
-  export AGENT_PROGRESS_FILE="'"$PROGRESS_FILE"'"
-  export RUN_ID="run-B"
-  _agent_progress_refresh
-'
+# Force a later timestamp deterministically via a frozen-clock `date` stub on
+# PATH (no real sleep) — the ONLY `date` call in the refresh path is
+# `lib-agent.sh`'s own `date +%s` (verified: no other timestamp source feeds
+# updated_at_epoch), so shadowing it on PATH for this one sandboxed subshell
+# is a safe, deterministic stand-in for "time passed".
+FAKE_DATE_BIN="$TMPROOT/fake-date-bin"
+mkdir -p "$FAKE_DATE_BIN"
+cat > "$FAKE_DATE_BIN/date" <<EOF
+#!/bin/bash
+if [[ "\$1" == "+%s" ]]; then
+  echo "\$(( $epoch1 + 1000 ))"
+else
+  exec /usr/bin/date "\$@"
+fi
+EOF
+chmod +x "$FAKE_DATE_BIN/date"
+(
+  PATH="$FAKE_DATE_BIN:$PATH" \
+  run_in_sandbox '
+    export AGENT_PID_FILE="'"$PIDFILE"'"
+    export AGENT_PROGRESS_FILE="'"$PROGRESS_FILE"'"
+    export RUN_ID="run-B"
+    _agent_progress_refresh
+  '
+)
 epoch2=$(jq -r '.updated_at_epoch' "$PROGRESS_FILE" 2>/dev/null)
 if [[ "$epoch2" -ge "$epoch1" ]]; then
   ok "TC-LEASE-002 second refresh's epoch is >= the first"
@@ -213,9 +235,13 @@ else
   bad "TC-LEASE-003 install_agent_heartbeat unexpectedly calls _agent_progress_refresh"
 fi
 
-# Behavioral heartbeat regression: run the loop for a couple of ticks with a
-# tiny interval and confirm the lease epoch is unchanged (no real sleep needed
-# beyond the loop's own short interval, well under CI budgets).
+# Behavioral heartbeat regression: no real sleep — the heartbeat loop's OWN
+# `sleep "$interval"` call is shadowed with a fake counting no-op (subshells
+# spawned via `( ... ) &` inherit the parent shell's function table, so this
+# override reaches the backgrounded loop). The driver then busy-waits — a
+# bounded, no-sleep spin on the tick counter, capped as a safety valve rather
+# than a timing assumption — for >= 2 ticks before asserting, instead of
+# waiting a fixed wall-clock duration hoping the real interval fired twice.
 rm -f "$PROGRESS_FILE"
 run_in_sandbox '
   export AGENT_PID_FILE="'"$PIDFILE"'"
@@ -223,8 +249,14 @@ run_in_sandbox '
   export RUN_ID="run-B"
   _agent_progress_refresh
   epoch_before=$(jq -r ".updated_at_epoch" "'"$PROGRESS_FILE"'")
+  TICK_FILE="'"$TMPROOT"'/hb-ticks"
+  : > "$TICK_FILE"
+  sleep() { echo x >> "$TICK_FILE"; }
   HEARTBEAT_INTERVAL_SECONDS=1 install_agent_heartbeat
-  sleep 2.5
+  _i=0
+  while [[ "$(wc -l < "$TICK_FILE")" -lt 2 && "$_i" -lt 5000000 ]]; do
+    _i=$((_i + 1))
+  done
   kill "$_AGENT_HEARTBEAT_PID" 2>/dev/null || true
   epoch_after=$(jq -r ".updated_at_epoch" "'"$PROGRESS_FILE"'")
   if [[ "$epoch_before" == "$epoch_after" ]]; then
@@ -281,6 +313,52 @@ if command -v jq >/dev/null 2>&1 && jq -e . "$PROGRESS_FILE" >/dev/null 2>&1; th
 else
   bad "TC-LEASE-005 final lease file failed to parse as JSON"
 fi
+
+# TC-LEASE-005b: a CONCURRENT reader — not just a post-hoc parse of the final
+# file — proves the no-partial-read contract. A non-atomic direct overwrite
+# (e.g. writing straight into AGENT_PROGRESS_FILE instead of tmp+rename) would
+# still pass the two assertions above (they only inspect the file AFTER all
+# writes finish) but would show a torn/partial read to a reader racing the
+# writes. The reader spins for the writer's ENTIRE run (gated on a
+# writer-done marker, not a fixed iteration count, so it can't finish early
+# and miss most of the race) while re-reading+parsing the lease as fast as
+# possible; ANY parse failure on an EXISTING, non-empty file is a torn read.
+rm -f "$PROGRESS_FILE"
+RACE_READS_LOG="$TMPROOT/race-reads.log"
+RACE_DONE_FILE="$TMPROOT/race-writer-done"
+: > "$RACE_READS_LOG"
+rm -f "$RACE_DONE_FILE"
+run_in_sandbox '
+  export AGENT_PID_FILE="'"$PIDFILE"'"
+  export AGENT_PROGRESS_FILE="'"$PROGRESS_FILE"'"
+  export RUN_ID="run-race"
+  (
+    while [[ ! -f "'"$RACE_DONE_FILE"'" ]]; do
+      if [[ -s "'"$PROGRESS_FILE"'" ]]; then
+        if content=$(cat "'"$PROGRESS_FILE"'" 2>/dev/null) && [[ -n "$content" ]]; then
+          if printf "%s" "$content" | jq -e . >/dev/null 2>&1; then
+            echo "OK" >> "'"$RACE_READS_LOG"'"
+          else
+            echo "TORN:$content" >> "'"$RACE_READS_LOG"'"
+          fi
+        fi
+      fi
+    done
+  ) &
+  reader_pid=$!
+  for i in $(seq 1 500); do _agent_progress_refresh; done
+  touch "'"$RACE_DONE_FILE"'"
+  wait "$reader_pid"
+'
+race_reads=$(wc -l < "$RACE_READS_LOG" 2>/dev/null || echo 0)
+race_torn=$(grep -c '^TORN:' "$RACE_READS_LOG" 2>/dev/null)
+[[ -z "$race_torn" ]] && race_torn=0
+if [[ "$race_reads" -gt 0 ]]; then
+  ok "TC-LEASE-005b concurrent reader observed $race_reads reads during the write race"
+else
+  bad "TC-LEASE-005b concurrent reader never observed the lease file — race not exercised"
+fi
+assert_eq "TC-LEASE-005b no torn/partial read observed by the concurrent reader" "0" "$race_torn"
 
 # ---------------------------------------------------------------------------
 echo ""
@@ -351,13 +429,18 @@ shift 3
 exec "$@"
 EOF
 chmod +x "$BIN/timeout"
-# A CLI stub that sleeps briefly before producing ANY output, so the launch
-# event (fired right after PID/PGID publication, before `wait`) is the ONLY
-# thing that could have created the lease at the moment we check it.
-cat > "$BIN/claude" <<'EOF'
+# A CLI stub that BLOCKS on a control FIFO before producing ANY output — a
+# deterministic gate, not a timing guess (a fixed `sleep N` before the CLI's
+# first output can flake on a slow CI host if N is too short, or waste time
+# if too long). The stub only unblocks once the harness explicitly opens the
+# FIFO for writing, so "no output yet" is guaranteed, not merely likely.
+GATE_FIFO="$TMPROOT/launch-gate.fifo"
+rm -f "$GATE_FIFO"
+mkfifo "$GATE_FIFO"
+cat > "$BIN/claude" <<EOF
 #!/bin/bash
 cat >/dev/null
-sleep 0.3
+read -r _ < "$GATE_FIFO"
 echo '{"type":"result","stop_reason":"end_turn","terminal_reason":"completed"}'
 EOF
 chmod +x "$BIN/claude"
@@ -366,6 +449,7 @@ LAUNCH_PROGRESS="$TMPROOT/launch.progress.json"
 LAUNCH_PID="$TMPROOT/launch.pid"
 rm -f "$LAUNCH_PROGRESS"
 (
+  env -u AUTONOMOUS_CONF_DIR \
   PATH="$BIN:$PATH" \
   AUTONOMOUS_PID_DIR="$PID_DIR" \
   PROJECT_ID="testproj" \
@@ -380,13 +464,19 @@ rm -f "$LAUNCH_PROGRESS"
     source "'"$LIB"'"
     run_agent "launch-session" "hello" "" "" >/dev/null 2>&1 &
     bgpid=$!
-    # Poll briefly for the lease to appear WHILE the CLI stub is still
-    # sleeping (before its first output line) — proves the launch event,
-    # not an output-record event, produced it.
-    for i in $(seq 1 20); do
-      [[ -f "'"$LAUNCH_PROGRESS"'" ]] && break
-      sleep 0.05
+    # Busy-spin (no sleep) for the lease to appear WHILE the CLI stub is
+    # still blocked on the gate FIFO (before its first output line) — proves
+    # the launch event, not an output-record event, produced it. Bounded
+    # iteration count is a safety valve, not a timing assumption.
+    _i=0
+    while [[ ! -f "'"$LAUNCH_PROGRESS"'" && "$_i" -lt 5000000 ]]; do
+      _i=$((_i + 1))
     done
+    # Open the gate: let the blocked CLI stub proceed to its output line now
+    # that the lease-before-output assertion below has its evidence.
+    exec 9>"'"$GATE_FIFO"'"
+    printf "go\n" >&9
+    exec 9>&-
     wait "$bgpid"
   '
 ) 2>&1 | tail -5 >/dev/null
@@ -529,6 +619,7 @@ chmod +x "$BIN/frobnik"
 FALLBACK_PROGRESS="$TMPROOT/fallback.progress.json"
 rm -f "$FALLBACK_PROGRESS"
 (
+  env -u AUTONOMOUS_CONF_DIR \
   PATH="$BIN:$PATH" \
   AUTONOMOUS_PID_DIR="$PID_DIR" \
   PROJECT_ID="testproj" \
@@ -564,6 +655,7 @@ chmod +x "$BIN/gemini"
 GEM_JSON_PROGRESS="$TMPROOT/gem-json.progress.json"
 rm -f "$GEM_JSON_PROGRESS"
 (
+  env -u AUTONOMOUS_CONF_DIR \
   PATH="$BIN:$PATH" \
   AUTONOMOUS_PID_DIR="$PID_DIR" \
   PROJECT_ID="testproj" \
@@ -588,6 +680,7 @@ fi
 GEM_LINE_PROGRESS="$TMPROOT/gem-line.progress.json"
 rm -f "$GEM_LINE_PROGRESS"
 (
+  env -u AUTONOMOUS_CONF_DIR \
   PATH="$BIN:$PATH" \
   AUTONOMOUS_PID_DIR="$PID_DIR" \
   PROJECT_ID="testproj" \
@@ -608,6 +701,138 @@ if [[ -f "$GEM_LINE_PROGRESS" ]]; then
 else
   bad "TC-LEASE-020 gemini line-framing path never refreshed the lease"
 fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-LEASE-021: refresh COUNT (not just presence) asserted through all seven launch paths ==="
+# ---------------------------------------------------------------------------
+# TC-LEASE-011/017/019/020 above only assert "a lease file exists" after
+# streaming — that would still pass if the recorder refreshed once per
+# COMMAND instead of once per RECORD, or if it were silently omitted from
+# claude/codex/opencode/agy/kiro (only the fallback and gemini get a
+# real-path exercise above). Drive all seven paths through the REAL
+# run_agent dispatch with a stub CLI binary that emits a KNOWN number of
+# records, count actual _agent_progress_refresh calls via a counting
+# wrapper (renames the real function aside, keeps its own tally, then
+# delegates), and assert the count equals the number of records the stub
+# emitted for that framing.
+#
+# agy is deliberately given `agy models` support in its stub (a real
+# invocation path — the adapter calls it for [INV-50] validation) even
+# though the driver passes no --model, so the stub matches production shape.
+
+# _lease_count_driver <cli_id> <binary_name> <n_records> <stub_body>
+#   stub_body: shell snippet (heredoc body) — the stub binary's script,
+#   consuming stdin and emitting exactly n_records progress-countable
+#   records to stdout.
+_lease_count_driver() {
+  local cli_id="$1" binary_name="$2" n_records="$3" stub_body="$4"
+  local cnt_bin="$TMPROOT/lease-count-bin-$cli_id"
+  mkdir -p "$cnt_bin"
+  cat > "$cnt_bin/timeout" <<'TOEOF'
+#!/bin/bash
+shift 3
+exec "$@"
+TOEOF
+  chmod +x "$cnt_bin/timeout"
+  printf '%s\n' "$stub_body" > "$cnt_bin/$binary_name"
+  chmod +x "$cnt_bin/$binary_name"
+  if [[ "$cli_id" == agy ]]; then
+    cat > "$cnt_bin/agy" <<AGYMODELSEOF
+#!/bin/bash
+if [[ "\$1" == "models" ]]; then echo "some-model"; exit 0; fi
+$stub_body
+AGYMODELSEOF
+    chmod +x "$cnt_bin/agy"
+  fi
+
+  local cnt_progress="$TMPROOT/lease-count-$cli_id.progress.json"
+  local cnt_file="$TMPROOT/lease-count-$cli_id.refreshes"
+  rm -f "$cnt_progress" "$cnt_file"
+  : > "$cnt_file"
+
+  (
+    env -u AUTONOMOUS_CONF_DIR \
+    PATH="$cnt_bin:$PATH" \
+    AUTONOMOUS_PID_DIR="$PID_DIR" \
+    PROJECT_ID="testproj" \
+    PROJECT_DIR="$TMPROOT" \
+    AGENT_CMD="$cli_id" \
+    AGENT_PERMISSION_MODE=auto \
+    AGENT_PID_FILE="$TMPROOT/lease-count-$cli_id.pid" \
+    AGENT_PROGRESS_FILE="$cnt_progress" \
+    RUN_ID="run-count-$cli_id" \
+    AGENT_DEV_EXTRA_ARGS="--approval-mode yolo --output-format stream-json" \
+    KIRO_AGENT_NAME="autonomous-dev" \
+    REFRESH_COUNT_FILE="$cnt_file" \
+    bash -c '
+      unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV
+      source "'"$LIB"'"
+      eval "$(declare -f _agent_progress_refresh | sed "1s/_agent_progress_refresh/_agent_progress_refresh_real/")"
+      _agent_progress_refresh() {
+        echo x >> "$REFRESH_COUNT_FILE"
+        _agent_progress_refresh_real
+      }
+      run_agent "count-session-'"$cli_id"'" "hello" "" "" >/dev/null 2>&1
+    '
+  )
+  local got
+  got=$(wc -l < "$cnt_file" 2>/dev/null || echo 0)
+  # +1: the launch event (R2 case 1) refreshes once BEFORE any output record
+  # is processed — every path's total is n_records + 1, not n_records alone.
+  assert_eq "TC-LEASE-021 $cli_id refreshes exactly once per record + 1 launch event ($n_records records)" \
+    "$((n_records + 1))" "$got"
+}
+
+# claude: json framing, 3 complete records.
+_lease_count_driver claude claude 3 '#!/bin/bash
+cat >/dev/null
+echo "{\"type\":\"system\",\"subtype\":\"init\"}"
+echo "{\"type\":\"assistant\",\"message\":{}}"
+echo "{\"type\":\"result\",\"stop_reason\":\"end_turn\",\"terminal_reason\":\"completed\"}"'
+
+# codex: json framing, 3 records (thread.started counts too — the capture
+# filter composes BEFORE the recorder but does not consume the line).
+_lease_count_driver codex codex 3 '#!/bin/bash
+cat >/dev/null
+echo "{\"type\":\"thread.started\",\"thread_id\":\"019e1234-aaaa-bbbb-cccc-deadbeefcafe\"}"
+echo "{\"type\":\"item.completed\",\"item\":{}}"
+echo "{\"type\":\"turn.completed\"}"'
+
+# opencode: json framing, 2 records.
+_lease_count_driver opencode opencode 2 '#!/bin/bash
+cat >/dev/null
+echo "{\"type\":\"step_start\",\"sessionID\":\"ses_01deadbeefcafe\"}"
+echo "{\"type\":\"step_finish\",\"sessionID\":\"ses_01deadbeefcafe\"}"'
+
+# agy: line framing, 4 non-empty lines.
+_lease_count_driver agy agy 4 '#!/bin/bash
+cat >/dev/null
+echo "line one"
+echo "line two"
+echo "line three"
+echo "line four"'
+
+# kiro: line framing, 2 non-empty lines. Binary alias: adapter execs
+# `kiro-cli`, not the adapter id `kiro` — install the stub under that name.
+_lease_count_driver kiro kiro-cli 2 '#!/bin/bash
+cat >/dev/null
+echo "kiro line one"
+echo "kiro line two"'
+
+# gemini: json framing (AGENT_DEV_EXTRA_ARGS above selects stream-json), 2
+# records.
+_lease_count_driver gemini gemini 2 '#!/bin/bash
+cat >/dev/null
+echo "{\"type\":\"init\",\"sessionId\":\"g1\"}"
+echo "{\"type\":\"result\"}"'
+
+# unknown-CLI fallback: line framing, 3 non-empty lines.
+_lease_count_driver frobnik frobnik 3 '#!/bin/bash
+cat >/dev/null
+echo "fallback line one"
+echo "fallback line two"
+echo "fallback line three"'
 
 # ---------------------------------------------------------------------------
 echo ""
@@ -667,17 +892,87 @@ else
   bad "TC-LEASE-014 lib-metrics.sh not found at expected path"
 fi
 
-# TC-LEASE-013: remote session-log probe parses the same fixture. Exercised
-# via the driver's OWN --probe grep/stat snippet (not a real SSM round trip):
-# the driver's inner shell logic is `grep '^{"type":"result"' | tail -1` +
-# `stat -c %Y`, identical to the local branch's own extraction — replicate
-# that exact snippet against the fixture directly since the driver requires
-# live AWS SSM env/creds this hermetic suite does not have.
+# TC-LEASE-013: the REAL session-log-probe-remote-aws-ssm.sh driver, run
+# end-to-end against the stream-json fixture, with ONLY the SSM transport
+# (the `aws` binary) stubbed. The stub does not hand back a canned answer —
+# it extracts the driver's OWN base64-encoded INNER_CMD from the real
+# `--parameters` payload the driver built, decodes it, and executes it
+# locally against the fixture placed at the exact path the driver's own
+# inner shell snippet computes. So a regression in the driver's real
+# grep/stat logic (e.g. a changed anchor, a broken quoting escape) would
+# make THIS test fail — unlike a bare re-implementation of the same
+# grep/stat snippet, which would stay green even if the driver's actual
+# code diverged from it.
 if [[ -f "$PROBE_SCRIPT" ]]; then
-  probe_line=$(grep '^{"type":"result"' "$FIXTURE" 2>/dev/null | tail -1)
-  assert_contains "TC-LEASE-013 remote-probe-style grep finds the final result line in the stream-json fixture" '"type":"result"' "$probe_line"
-  probe_epoch=$(stat -c %Y "$FIXTURE" 2>/dev/null || stat -f %m "$FIXTURE" 2>/dev/null)
-  [[ "$probe_epoch" =~ ^[0-9]+$ ]] && ok "TC-LEASE-013 remote-probe-style mtime epoch is numeric" || bad "TC-LEASE-013 mtime epoch not numeric: $probe_epoch"
+  REMOTE_PROJECT_ID="leaseprobe$$"
+  REMOTE_ISSUE_NUM="9002"
+  REMOTE_LOG="/tmp/agent-${REMOTE_PROJECT_ID}-issue-${REMOTE_ISSUE_NUM}.log"
+  cp "$FIXTURE" "$REMOTE_LOG"
+
+  PROBE_STUB_BIN="$TMPROOT/probe-stub-bin"
+  mkdir -p "$PROBE_STUB_BIN"
+  PROBE_REAL_OUTPUT="$TMPROOT/probe-real-output.txt"
+  cat > "$PROBE_STUB_BIN/aws" <<'STUBEOF'
+#!/bin/bash
+case "$*" in
+  *send-command*)
+    prev=""
+    params_json=""
+    for arg in "$@"; do
+      [[ "$prev" == "--parameters" ]] && params_json="$arg"
+      prev="$arg"
+    done
+    full_cmd=$(printf '%s' "$params_json" | jq -r '.commands[0]')
+    b64=$(printf '%s' "$full_cmd" | grep -oE 'printf %s [A-Za-z0-9+/=]+ \| base64 -d' | sed -E 's/^printf %s //; s/ \| base64 -d$//')
+    inner_cmd=$(printf '%s' "$b64" | base64 -d)
+    # Execute the driver's REAL inner shell snippet locally (no sudo/remote
+    # host in this hermetic suite) — its own grep/stat against the fixture
+    # placed at the path it computes is what populates PROBE_REAL_OUTPUT.
+    bash -c "$inner_cmd" > "$PROBE_REAL_OUTPUT" 2>/dev/null || true
+    echo '{"Command":{"CommandId":"stub-probe-1","Status":"Pending"}}'
+    ;;
+  *get-command-invocation*)
+    out=$(cat "$PROBE_REAL_OUTPUT" 2>/dev/null || true)
+    jq -n --arg out "$out" '{"Status":"Success","StandardOutputContent":$out,"StandardErrorContent":""}'
+    ;;
+esac
+STUBEOF
+  chmod +x "$PROBE_STUB_BIN/aws"
+
+  probe_out=$(
+    PATH="$PROBE_STUB_BIN:$PATH" \
+    SSM_INSTANCE_ID="i-lease-test" \
+    SSM_REMOTE_PROJECT_ID="$REMOTE_PROJECT_ID" \
+    SSM_REMOTE_PROJECT_DIR="/tmp" \
+    PROBE_REAL_OUTPUT="$PROBE_REAL_OUTPUT" \
+    bash "$PROBE_SCRIPT" --probe "$REMOTE_ISSUE_NUM"
+  )
+  probe_rc=$?
+  rm -f "$REMOTE_LOG"
+
+  assert_eq "TC-LEASE-013 real probe driver rc=0 against the stream-json fixture" "0" "$probe_rc"
+  probe_line=$(echo "$probe_out" | sed -n '1p')
+  probe_epoch=$(echo "$probe_out" | sed -n '2p')
+  assert_contains "TC-LEASE-013 real probe driver's line 1 is the final result line from the fixture" '"type":"result"' "$probe_line"
+  [[ "$probe_epoch" =~ ^[0-9]+$ ]] && ok "TC-LEASE-013 real probe driver's line 2 (mtime epoch) is numeric" || bad "TC-LEASE-013 mtime epoch not numeric: $probe_epoch"
+
+  # Negative pin (mirrors TC-LEASE-015's is_session_completed pin): a
+  # reframed/indented final line must make the REAL driver's own grep anchor
+  # miss too — proving this end-to-end exercise, not just is_session_completed,
+  # depends on the exact `^{"type":"result"` column-zero contract.
+  REFRAMED_LOG="/tmp/agent-${REMOTE_PROJECT_ID}-issue-9003.log"
+  { head -n 4 "$FIXTURE"; echo '  {"type":"result","subtype":"success","stop_reason":"end_turn","terminal_reason":"completed"}'; } > "$REFRAMED_LOG"
+  PROBE_REAL_OUTPUT_9003="$TMPROOT/probe-real-output-9003.txt"
+  reframed_out=$(
+    PATH="$PROBE_STUB_BIN:$PATH" \
+    SSM_INSTANCE_ID="i-lease-test" \
+    SSM_REMOTE_PROJECT_ID="$REMOTE_PROJECT_ID" \
+    SSM_REMOTE_PROJECT_DIR="/tmp" \
+    PROBE_REAL_OUTPUT="$PROBE_REAL_OUTPUT_9003" \
+    bash "$PROBE_SCRIPT" --probe 9003
+  )
+  rm -f "$REFRAMED_LOG"
+  assert_eq "TC-LEASE-013 reframed (indented) final line makes the real probe driver report empty (proves the pin is load-bearing end-to-end)" "" "$reframed_out"
 else
   bad "TC-LEASE-013 session-log-probe-remote-aws-ssm.sh not found at expected path"
 fi
