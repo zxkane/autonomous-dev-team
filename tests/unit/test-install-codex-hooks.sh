@@ -159,24 +159,29 @@ jq '. + {"extra_top_level_key": true}' "$scripts_copy/claude-settings.template.j
   > "$scripts_copy/claude-settings.template.json.next"
 mv "$scripts_copy/claude-settings.template.json.next" \
   "$scripts_copy/claude-settings.template.json"
-repo=$(new_repo illegal_key)
+illegal_repo=$(new_repo illegal_key)
 if (
-  cd "$repo" &&
+  cd "$illegal_repo" &&
     bash "$scripts_copy/install-codex-hooks.sh" --no-git-hook \
-      >/dev/null 2>"$repo/install.err"
+      >/dev/null 2>"$illegal_repo/install.err"
 ); then
   bad "render-time validation must refuse an illegal top-level key"
 else
   ok "render-time validation refuses an illegal top-level key"
 fi
-[[ ! -f "$repo/.codex/hooks.json" ]] \
+[[ ! -f "$illegal_repo/.codex/hooks.json" ]] \
   && ok "illegal-key refusal happens before hooks.json is written" \
   || bad "illegal-key refusal happens before hooks.json is written"
-assert_file_contains "illegal-key diagnostic is surfaced" "$repo/install.err" \
+assert_file_contains "illegal-key diagnostic is surfaced" "$illegal_repo/install.err" \
   'failed validation'
 
 echo "=== TC-CDCR-003: re-run remains idempotent ==="
+hooks_before=$(cat "$hooks_file")
+config_before=$(cat "$config_file")
 install "$repo" || bad "second install succeeds"
+[[ "$(cat "$hooks_file")" == "$hooks_before" && "$(cat "$config_file")" == "$config_before" ]] \
+  && ok "second install is byte-idempotent on the fresh fixture" \
+  || bad "second install is byte-idempotent on the fresh fixture"
 canonical_count=$(grep -cE '^[[:space:]]*hooks[[:space:]]*=[[:space:]]*true' "$config_file")
 apply_patch_count=$(jq '[.hooks.PreToolUse[] | select(.matcher == "^apply_patch$")] | length' "$hooks_file")
 [[ "$canonical_count" -eq 1 && "$apply_patch_count" -eq 1 ]] \
