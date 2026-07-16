@@ -20,6 +20,7 @@ provider vocabulary parity is additionally pinned by
 | TC-PAEM-003 | `chp_pr_list open author` (GitHub) | rc 2, loud stderr naming `author` |
 | TC-PAEM-004 | `chp_find_pr_for_issue <n> author` (GitHub) | rc 2, loud stderr naming `author` |
 | TC-PAEM-005 | `chp_pr_view <pr> author` (GitLab, stub MR view returns `{"iid":42,"author":{"username":"bob"},"state":"opened"}`) | `{"author":"bob"}`, rc 0 |
+| TC-PAEM-005b | `chp_pr_view <pr> author` (GitLab, stub MR view returns `{"iid":42,"author":null,"state":"opened"}` — a degraded/unexpected payload shape) | `{"author":null}`, rc 0 (key present, null value — mirrors TC-PAEM-002 on the GitHub leaf) |
 | TC-PAEM-006 | `chp_pr_list open author` (GitLab) | rc 2, loud stderr naming `author` |
 | TC-PAEM-007 | `chp_gitlab_find_pr_for_issue <n> author` (GitLab) | rc 2, loud stderr naming `author` |
 | TC-PAEM-008 | `chp_pr_view <pr> bogusField` (both providers) — unknown field still rejected, no gate regression | rc 2, loud stderr, no HTTP/gh call |

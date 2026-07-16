@@ -141,10 +141,19 @@ TMPDIR_GL=$(mktemp -d)
 trap 'rm -rf "$TMPDIR_GH" "$TMPDIR_GL"' EXIT
 
 printf '%s' '{"iid":42,"state":"opened","author":{"username":"bob"}}' > "$TMPDIR_GL/author-bob.json"
+printf '%s' '{"iid":42,"state":"opened","author":null}' > "$TMPDIR_GL/author-null.json"
 
 out=$(_STUB_PAYLOAD="$TMPDIR_GL/author-bob.json" _run_gl chp_gitlab_pr_view 42 "author"); rc=$?
 assert_rc_eq "TC-PAEM-005 chp_gitlab_pr_view author rc" "0" "$rc"
 assert_eq "TC-PAEM-005 chp_gitlab_pr_view author flattens username" '{"author":"bob"}' "$(jq -c . <<<"$out")"
+
+# TC-PAEM-005b (#495 review round 6): a degraded/unexpected MR payload with
+# `"author": null` (the GitLab leaf's own comment documents this as the
+# non-ordinary case, since a real MR view always has an author object) must
+# still normalize to a key-present null, mirroring GitHub's TC-PAEM-002.
+out=$(_STUB_PAYLOAD="$TMPDIR_GL/author-null.json" _run_gl chp_gitlab_pr_view 42 "author"); rc=$?
+assert_rc_eq "TC-PAEM-005b chp_gitlab_pr_view null author rc" "0" "$rc"
+assert_eq "TC-PAEM-005b chp_gitlab_pr_view null author normalizes to key-present null" '{"author":null}' "$(jq -c . <<<"$out")"
 
 out=$(_STUB_PAYLOAD="$TMPDIR_GL/author-bob.json" _run_gl chp_gitlab_pr_list open "author" 2>&1); rc=$?
 assert_rc_eq "TC-PAEM-006 chp_gitlab_pr_list rejects author" "2" "$rc"
