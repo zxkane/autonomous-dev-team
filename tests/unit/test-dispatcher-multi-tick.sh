@@ -279,9 +279,19 @@ echo "=== TC-MP-008: Source-of-truth check on outer loop subshell ==="
 # The loop body must run dispatcher-tick.sh in a subshell (parentheses),
 # pass AUTONOMOUS_CONF as a per-iteration env, and not exit on per-project
 # failure. Detect drift via grep.
-if grep -q '^\s*if ( AUTONOMOUS_CONF=' "$WRAPPER_SRC" \
-   && grep -q 'bash "\$SCRIPT_DIR/dispatcher-tick.sh"' "$WRAPPER_SRC"; then
-  echo -e "  ${GREEN}PASS${NC}: loop runs dispatcher-tick.sh in subshell with AUTONOMOUS_CONF env"
+#
+# [#495 review round 3] The subshell body grew a second statement — an
+# `unset HUMAN_ESCALATION_LOGIN DEV_BOT_LOGIN` ambient-leak guard ahead of
+# the `AUTONOMOUS_CONF=... bash ...` line (mirrors `tick_inline_project`'s
+# own pre-existing multi-statement subshell body) — so the pin no longer
+# requires `AUTONOMOUS_CONF=` to be the FIRST token after `if (` on the
+# same line; it separately asserts the subshell opener, the ambient-leak
+# unset, and the AUTONOMOUS_CONF-env dispatcher-tick.sh invocation are all
+# still present, in a subshell, in this file.
+if grep -q '^\s*if ($' "$WRAPPER_SRC" \
+   && grep -q 'unset HUMAN_ESCALATION_LOGIN DEV_BOT_LOGIN' "$WRAPPER_SRC" \
+   && grep -q 'AUTONOMOUS_CONF="\$entry" bash "\$SCRIPT_DIR/dispatcher-tick.sh"' "$WRAPPER_SRC"; then
+  echo -e "  ${GREEN}PASS${NC}: loop runs dispatcher-tick.sh in a subshell with AUTONOMOUS_CONF env, guarded by the ambient-leak unset"
   PASS=$((PASS + 1))
 else
   echo -e "  ${RED}FAIL${NC}: outer loop subshell pattern missing or changed shape"

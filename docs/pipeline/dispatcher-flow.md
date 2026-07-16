@@ -176,7 +176,14 @@ is genuinely PR-scoped:
    author; a non-string shape (e.g. a stray `{"login":"…"}` object surviving
    a provider-leaf regression) or a whitespace/newline-containing string
    falls back rather than being echoed verbatim into the mention — otherwise
-   the posted comment body itself could become multiline/multi-token.
+   the posted comment body itself could become multiline/multi-token. The
+   same shape-validation applies to the CONFIGURED `HUMAN_ESCALATION_LOGIN`
+   fallback token itself (#495 review round 3, finding #2): a value
+   containing whitespace or an embedded `@` (e.g. an operator pasting
+   `@maintainer` verbatim, or a typo like `alice@evil`) is treated as absent
+   and falls through to `REPO_OWNER` instead of being echoed verbatim —
+   otherwise a misconfigured conf value could itself break the
+   exactly-one-token contract.
 
    **`DEV_BOT_LOGIN`** (`autonomous.conf.example`, optional, defaults empty —
    #495 review finding #1): the dispatcher-side counterpart to `BOT_LOGIN`.
@@ -223,20 +230,35 @@ pattern) — see `dispatcher.conf.example`. Without this, an inline project's
 key (both variables are simply absent from that subshell's environment), so
 every dispatcher-side escalation fallback for that project silently reverts
 to `REPO_OWNER` regardless of conf intent. A LOCAL path-entry project sources
-its `autonomous.conf` directly and was never affected.
+its `autonomous.conf` directly, so this specific propagation gap (a
+declared-but-not-exported value) never applied to it — but see the
+ambient-leak guard below, which DOES apply to both branches.
 
-**Ambient-leak guard (review round 2)**: `tick_inline_project` also `unset`s
-`HUMAN_ESCALATION_LOGIN`/`DEV_BOT_LOGIN` (alongside the pre-existing
-`ISSUE_FILTER`/`ISSUE_SCAN_LIMIT` unset) in the per-project subshell BEFORE
-`eval`-ing the inline block. Without this, a value exported into the process
-that launches `dispatcher-multi-tick.sh` (an operator's cron environment, or
-a `dispatcher.conf` top-level assignment — that file is `source`d directly
-into `dispatcher-multi-tick.sh`'s own process) would leak into an inline
-project whose OWN block omits both keys, silently mentioning the wrong
-maintainer / misclassifying a login as the dev bot on a DIFFERENT project's
-PR — the exact ambient-pollution class `ISSUE_FILTER`'s own `TC-IFILT-124`
-regression test (issue #436) exists to prevent, now mirrored for these two
-vars by `TC-PAEM-132`.
+**Ambient-leak guard (review round 2, widened round 3)**:
+`tick_inline_project` also `unset`s `HUMAN_ESCALATION_LOGIN`/`DEV_BOT_LOGIN`
+(alongside the pre-existing `ISSUE_FILTER`/`ISSUE_SCAN_LIMIT` unset) in the
+per-project subshell BEFORE `eval`-ing the inline block. Without this, a
+value exported into the process that launches `dispatcher-multi-tick.sh` (an
+operator's cron environment, or a `dispatcher.conf` top-level assignment —
+that file is `source`d directly into `dispatcher-multi-tick.sh`'s own
+process) would leak into an inline project whose OWN block omits both keys,
+silently mentioning the wrong maintainer / misclassifying a login as the dev
+bot on a DIFFERENT project's PR — the exact ambient-pollution class
+`ISSUE_FILTER`'s own `TC-IFILT-124` regression test (issue #436) exists to
+prevent, now mirrored for these two vars by `TC-PAEM-132`.
+
+The round-2 fix only covered the inline branch. Round 3 found the SAME
+ambient-leak class on the OTHER branch of the per-project loop: a LOCAL
+path-entry project's subshell (`( AUTONOMOUS_CONF="$entry" bash
+dispatcher-tick.sh )`) had no `unset` at all, so a local project's
+`autonomous.conf` that omits both keys would still inherit whatever
+`dispatcher-multi-tick.sh`'s own process had ambient — the identical hazard,
+just on the local-path branch. Fixed by adding the same `unset
+HUMAN_ESCALATION_LOGIN DEV_BOT_LOGIN` immediately before that branch's
+`AUTONOMOUS_CONF=... bash dispatcher-tick.sh` invocation; the project's own
+`autonomous.conf`, sourced fresh inside the child, still opts back in
+normally. Regression-pinned by `TC-PAEM-133` (mirrors `TC-PAEM-132` on the
+local-path branch instead of the inline branch).
 
 **Byte-identical-default guarantee**: this is a pure targeting change — no
 label transition, gate, or comment WORDING changes. The `resolve_pr_author_

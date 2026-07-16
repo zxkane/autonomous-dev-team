@@ -568,6 +568,44 @@ assert_not_contains "TC-PAEM-132 stale ambient bot login absent from record" "st
 
 # ---------------------------------------------------------------------------
 echo ""
+echo "=== TC-PAEM-133: ambient HUMAN_ESCALATION_LOGIN/DEV_BOT_LOGIN does NOT leak into a LOCAL path-entry project that omits both (review round 3) ==="
+# ---------------------------------------------------------------------------
+# TC-PAEM-132's inline-project mirror, but for the OTHER branch of the
+# per-project tick loop (is_path_entry — PR-8 local projects). Round-3 codex
+# finding: the round-2 fix only unset both vars inside tick_inline_project,
+# so a local project's autonomous.conf that omits both keys still inherited
+# whatever dispatcher-multi-tick.sh's own process (cron env / dispatcher.conf
+# top-level assignment) had exported — the identical ambient-pollution class
+# TC-PAEM-132 exists to prevent, just on the local-path branch instead of the
+# inline branch.
+LOCAL_CONF_NOESC="$TMPROOT/local-autoconf-noesc.conf"
+cat > "$LOCAL_CONF_NOESC" <<'EOF'
+REPO=myorg/local-proj-noesc
+REPO_OWNER=myorg
+REPO_NAME=local-proj-noesc
+PROJECT_ID=local-proj-noesc
+PROJECT_DIR=/tmp/local-proj-noesc
+EOF
+CONF="$TMPROOT/disp-paem-133.conf"
+RECORD="$TMPROOT/record-paem-133"
+: > "$RECORD"
+{
+  echo 'PROJECTS=()'
+  printf 'PROJECTS+=( %q )\n' "$LOCAL_CONF_NOESC"
+} > "$CONF"
+HUMAN_ESCALATION_LOGIN="stale-ambient-maintainer" DEV_BOT_LOGIN="stale-ambient-bot" \
+  DISPATCHER_CONF="$CONF" TICK_RECORD_FILE="$RECORD" \
+  bash "$SANDBOX/dispatcher-multi-tick.sh" >/dev/null 2>&1
+rc=$?
+assert_rc "TC-PAEM-133 rc=0 despite ambient HUMAN_ESCALATION_LOGIN/DEV_BOT_LOGIN" 0 "$rc"
+record=$(cat "$RECORD")
+assert_contains "TC-PAEM-133 ambient HUMAN_ESCALATION_LOGIN does NOT leak into omitting local project" "HUMAN_ESCALATION_LOGIN=<unset>" "$record"
+assert_contains "TC-PAEM-133 ambient DEV_BOT_LOGIN does NOT leak into omitting local project" "DEV_BOT_LOGIN=<unset>" "$record"
+assert_not_contains "TC-PAEM-133 stale ambient maintainer login absent from record" "stale-ambient-maintainer" "$record"
+assert_not_contains "TC-PAEM-133 stale ambient bot login absent from record" "stale-ambient-bot" "$record"
+
+# ---------------------------------------------------------------------------
+echo ""
 echo "=== Summary ==="
 echo "  PASS: $PASS"
 echo "  FAIL: $FAIL"

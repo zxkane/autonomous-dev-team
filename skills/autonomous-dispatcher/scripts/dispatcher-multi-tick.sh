@@ -275,7 +275,21 @@ for entry in "${PROJECTS[@]}"; do
       continue
     fi
     log "  ticking local project: $entry"
-    if ( AUTONOMOUS_CONF="$entry" bash "$SCRIPT_DIR/dispatcher-tick.sh" ); then
+    # [#495 review finding #1, round 3] Clear any HUMAN_ESCALATION_LOGIN/
+    # DEV_BOT_LOGIN inherited from THIS process (dispatcher-multi-tick.sh's
+    # own cron/operator environment, or a dispatcher.conf top-level
+    # assignment sourced directly into this process) before starting the
+    # child. Without this, a local path-entry project would inherit a
+    # DIFFERENT project's (or the operator's ambient) escalation target for
+    # any key its OWN `autonomous.conf` omits — exactly the ambient-leak
+    # class `tick_inline_project` already guards against for inline
+    # projects (dispatcher-flow.md's "Ambient-leak guard"). The project's
+    # own `autonomous.conf`, sourced fresh inside the child by
+    # `lib-config.sh::load_autonomous_conf`, still opts back in normally.
+    if (
+      unset HUMAN_ESCALATION_LOGIN DEV_BOT_LOGIN
+      AUTONOMOUS_CONF="$entry" bash "$SCRIPT_DIR/dispatcher-tick.sh"
+    ); then
       OK=$((OK + 1))
     else
       rc=$?

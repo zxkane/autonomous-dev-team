@@ -275,6 +275,30 @@ assert_eq "TC-PAEM-023 HUMAN_ESCALATION_LOGIN unset + bot author → REPO_OWNER"
 out=$(HUMAN_ESCALATION_LOGIN="maintainer1" _RPAM_MODE=ok _RPAM_AUTHOR='"alice"' _run_resolver resolve_pr_author_mention 42 2>/dev/null)
 assert_eq "TC-PAEM-024 HUMAN_ESCALATION_LOGIN set + human author → human still wins" "@alice" "$out"
 
+# TC-PAEM-024b-f (#495 review round 3 finding #2) — a malformed configured
+# HUMAN_ESCALATION_LOGIN must never be echoed verbatim into the mention: it
+# would break the "exactly one @<token>" contract (a second `@`, or a
+# whitespace/newline-split value producing a multi-token/multiline comment
+# body). Each row falls through to REPO_OWNER instead.
+out=$(HUMAN_ESCALATION_LOGIN="two words" _RPAM_MODE=ok _RPAM_AUTHOR='"app/dev-bot"' _run_resolver resolve_pr_author_mention 42 2>/dev/null); rc=$?
+assert_rc_eq "TC-PAEM-024b whitespace-containing HUMAN_ESCALATION_LOGIN rc" "0" "$rc"
+assert_eq "TC-PAEM-024b whitespace-containing HUMAN_ESCALATION_LOGIN falls back to REPO_OWNER" "@the-owner" "$out"
+
+out=$(HUMAN_ESCALATION_LOGIN="@maintainer1" _RPAM_MODE=ok _RPAM_AUTHOR='"app/dev-bot"' _run_resolver resolve_pr_author_mention 42 2>/dev/null); rc=$?
+assert_rc_eq "TC-PAEM-024c leading-@ HUMAN_ESCALATION_LOGIN rc" "0" "$rc"
+assert_eq "TC-PAEM-024c leading-@ HUMAN_ESCALATION_LOGIN falls back to REPO_OWNER (never @@maintainer1)" "@the-owner" "$out"
+
+out=$(HUMAN_ESCALATION_LOGIN="alice@evil" _RPAM_MODE=ok _RPAM_AUTHOR='"app/dev-bot"' _run_resolver resolve_pr_author_mention 42 2>/dev/null); rc=$?
+assert_rc_eq "TC-PAEM-024d embedded-@ HUMAN_ESCALATION_LOGIN rc" "0" "$rc"
+assert_eq "TC-PAEM-024d embedded-@ HUMAN_ESCALATION_LOGIN falls back to REPO_OWNER" "@the-owner" "$out"
+
+out=$(HUMAN_ESCALATION_LOGIN=$'first\nsecond' _RPAM_MODE=ok _RPAM_AUTHOR='"app/dev-bot"' _run_resolver resolve_pr_author_mention 42 2>/dev/null); rc=$?
+assert_rc_eq "TC-PAEM-024e newline-containing HUMAN_ESCALATION_LOGIN rc" "0" "$rc"
+assert_eq "TC-PAEM-024e newline-containing HUMAN_ESCALATION_LOGIN falls back to REPO_OWNER" "@the-owner" "$out"
+
+out=$(HUMAN_ESCALATION_LOGIN="maintainer1" _RPAM_MODE=ok _RPAM_AUTHOR='"app/dev-bot"' _run_resolver resolve_pr_author_mention 42 2>/dev/null); rc=$?
+assert_eq "TC-PAEM-024f well-formed HUMAN_ESCALATION_LOGIN is unaffected by the new validation" "@maintainer1" "$out"
+
 # TC-PAEM-025 — exactly one token, no stray whitespace/newlines, across the
 # fallback and success rows exercised above.
 for row in \

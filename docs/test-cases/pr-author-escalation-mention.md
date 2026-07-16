@@ -49,7 +49,9 @@ stdout; diagnostics only on stderr.
 | TC-PAEM-022 | `HUMAN_ESCALATION_LOGIN` set + bot author | `@$HUMAN_ESCALATION_LOGIN` (NOT `@$REPO_OWNER`) |
 | TC-PAEM-023 | `HUMAN_ESCALATION_LOGIN` unset + bot author | `@$REPO_OWNER` |
 | TC-PAEM-024 | `HUMAN_ESCALATION_LOGIN` set + human author | `@<human-login>` (human author still wins over the escalation login) |
-| TC-PAEM-025 | Every row above (010–023) emits EXACTLY ONE `@`-prefixed token, no extra whitespace/newlines | single-token stdout contract holds under every row |
+| TC-PAEM-024b–e | Configured `HUMAN_ESCALATION_LOGIN` itself is malformed as a mention token — whitespace-containing (`"two words"`), leading `@` (`"@maintainer1"`), embedded `@` (`"alice@evil"`), or newline-containing (review round 3 finding #2) | fallback token is `@$REPO_OWNER`, NEVER the malformed configured value echoed verbatim (would otherwise produce a 2nd `@`-token or a multi-line mention) |
+| TC-PAEM-024f | Well-formed `HUMAN_ESCALATION_LOGIN` (e.g. `"maintainer1"`) | unaffected by the new validation — `@maintainer1` as before |
+| TC-PAEM-025 | Every row above (010–024f) emits EXACTLY ONE `@`-prefixed token, no extra whitespace/newlines | single-token stdout contract holds under every row |
 | TC-PAEM-026 | The function is called under `set -euo pipefail` (a caller sourcing this lib with strict mode active) — every fallback path | function itself never aborts the caller; rc always 0 |
 
 ## Call-site conversion (R3)
@@ -115,6 +117,7 @@ directly and sees everything.
 | TC-PAEM-130 | Inline block declares `HUMAN_ESCALATION_LOGIN`/`DEV_BOT_LOGIN` | both exported into the `dispatcher-tick.sh` subshell env |
 | TC-PAEM-131 | Inline block omits both keys | both stay unset in the subshell (byte-identical default — falls back to `REPO_OWNER`, no `DEV_BOT_LOGIN` classification) |
 | TC-PAEM-132 | Ambient `HUMAN_ESCALATION_LOGIN`/`DEV_BOT_LOGIN` (exported into the process launching `dispatcher-multi-tick.sh`, or a `dispatcher.conf` top-level assignment) + an inline project whose OWN block omits both keys (review round 2) | both stay unset for that project — the ambient value does NOT leak in (mirrors `TC-IFILT-124`'s `ISSUE_FILTER` ambient-leak guard) |
+| TC-PAEM-133 | Same ambient-leak scenario as TC-PAEM-132, but for a LOCAL path-entry project (`is_path_entry` branch) whose `autonomous.conf` omits both keys (review round 3 finding #1) | both stay unset for that project — the local-path branch now `unset`s both vars in its own subshell before sourcing `autonomous.conf`, mirroring `tick_inline_project`'s existing guard |
 
 ## Conformance (parity pin)
 

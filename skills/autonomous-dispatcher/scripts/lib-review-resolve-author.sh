@@ -82,18 +82,43 @@ _rpam_is_bot_login() {
   return 1
 }
 
-# _rpam_fallback — the layered fallback chain's terminal token (R2): non-empty
-# `HUMAN_ESCALATION_LOGIN` wins; otherwise `REPO_OWNER`. Both are read as
-# `${VAR:-}` so a genuinely UNSET var can never abort a `set -u` caller;
-# REPO_OWNER's non-emptiness is already enforced by every caller's own
-# top-level `: "${REPO_OWNER:?...}"` / required-env loop, so this never emits
-# an empty token in production.
+# _rpam_malformed_mention_token <value> — true if `value` cannot safely be
+# the SOLE content of an `@<value>` mention token (#495 review round 3
+# finding #2): embedded whitespace (including newlines — same multi-token/
+# multiline risk the malformed-`.author`-shape guard below already covers)
+# or an embedded `@` (an operator pasting `@maintainer` verbatim into
+# `HUMAN_ESCALATION_LOGIN`, or a value like `alice@evil`, would otherwise
+# render `@@maintainer`/`@alice@evil` — a second/malformed mention token,
+# not a mangled first one, but still a violation of "exactly one token").
+_rpam_malformed_mention_token() {
+  case "$1" in
+    *[[:space:]]*|*'@'*) return 0 ;;
+  esac
+  return 1
+}
+
+# _rpam_fallback — the layered fallback chain's terminal token (R2): a
+# non-empty, well-formed-as-a-mention `HUMAN_ESCALATION_LOGIN` wins;
+# otherwise `REPO_OWNER`. Both are read as `${VAR:-}` so a genuinely UNSET
+# var can never abort a `set -u` caller; REPO_OWNER's non-emptiness is
+# already enforced by every caller's own top-level `: "${REPO_OWNER:?...}"` /
+# required-env loop, so this never emits an empty token in production.
+#
+# A configured `HUMAN_ESCALATION_LOGIN` that fails
+# `_rpam_malformed_mention_token` (round 3 finding: printed VERBATIM, it
+# could carry whitespace/`@` into the mention and break the exactly-one-
+# token contract R2 requires) is treated as absent — falls through to
+# `REPO_OWNER` — rather than aborting or emitting the bad value.
 _rpam_fallback() {
-  if [ -n "${HUMAN_ESCALATION_LOGIN:-}" ]; then
-    printf '@%s' "$HUMAN_ESCALATION_LOGIN"
-  else
-    printf '@%s' "${REPO_OWNER:-}"
+  local human="${HUMAN_ESCALATION_LOGIN:-}"
+  if [ -n "$human" ] && ! _rpam_malformed_mention_token "$human"; then
+    printf '@%s' "$human"
+    return 0
   fi
+  if [ -n "$human" ]; then
+    echo "WARN: resolve_pr_author_mention: configured HUMAN_ESCALATION_LOGIN '${human}' is not a valid single-token mention — falling back to REPO_OWNER" >&2
+  fi
+  printf '@%s' "${REPO_OWNER:-}"
 }
 
 # resolve_pr_author_mention <PR_NUMBER>
