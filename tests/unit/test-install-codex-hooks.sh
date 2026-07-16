@@ -9,6 +9,7 @@ FAIL=0
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 INSTALLER="$PROJECT_ROOT/skills/autonomous-common/scripts/install-codex-hooks.sh"
+TEMPLATE="$PROJECT_ROOT/skills/autonomous-common/scripts/claude-settings.template.json"
 TMPDIR=$(mktemp -d)
 trap 'rm -rf "$TMPDIR"' EXIT
 
@@ -69,6 +70,23 @@ install() {
   )
 }
 
+# Snapshot the canonical template and a reference (pre-Codex-install) Kiro
+# render up front, so TC-CDCR-002B's byte-for-byte comparisons cannot be
+# fooled by a change that preserves `_managed_by`/`_managed_note` presence
+# but alters their values or anything else in either file (#501 review).
+template_before="$TMPDIR/template-before.json"
+cp "$TEMPLATE" "$template_before"
+kiro_reference_repo="$TMPDIR/kiro_reference"
+mkdir -p "$kiro_reference_repo"
+git -C "$kiro_reference_repo" init --quiet --initial-branch=main
+(
+  cd "$kiro_reference_repo" &&
+    bash "$PROJECT_ROOT/skills/autonomous-common/scripts/install-kiro-hooks.sh" \
+      --no-git-hook >/dev/null 2>&1
+)
+kiro_reference_output="$TMPDIR/kiro-reference-output.json"
+cp "$kiro_reference_repo/.kiro/agents/default.json" "$kiro_reference_output"
+
 echo "=== TC-CDCR-001: fresh install uses canonical features.hooks ==="
 repo=$(new_repo fresh)
 if install "$repo"; then
@@ -125,11 +143,14 @@ else
 fi
 
 echo "=== TC-CDCR-002B: canonical template and a non-Codex installer output are unchanged (#501) ==="
-TEMPLATE="$PROJECT_ROOT/skills/autonomous-common/scripts/claude-settings.template.json"
-if jq -e 'has("_managed_by") and has("_managed_note")' "$TEMPLATE" >/dev/null; then
-  ok "canonical template still carries _managed_by/_managed_note"
+# Byte-for-byte against the pre-Codex-install snapshots taken above -- a
+# weaker `has()` check would still pass if the Codex install (run for
+# TC-CDCR-001/002/002A above) altered the markers' values or anything else
+# in either file while merely preserving their presence.
+if cmp -s "$TEMPLATE" "$template_before"; then
+  ok "canonical template is byte-for-byte unchanged by the Codex install"
 else
-  bad "canonical template still carries _managed_by/_managed_note"
+  bad "canonical template is byte-for-byte unchanged by the Codex install"
 fi
 kiro_repo=$(new_repo kiro_unaffected)
 if (
@@ -140,11 +161,10 @@ if (
 else
   bad "kiro installer still runs"
 fi
-if jq -e 'has("_managed_by") and has("_managed_note")' \
-    "$kiro_repo/.kiro/agents/default.json" >/dev/null; then
-  ok "kiro output still carries the _managed_by/_managed_note markers"
+if cmp -s "$kiro_repo/.kiro/agents/default.json" "$kiro_reference_output"; then
+  ok "kiro output is byte-for-byte identical to its pre-Codex-install reference"
 else
-  bad "kiro output still carries the _managed_by/_managed_note markers"
+  bad "kiro output is byte-for-byte identical to its pre-Codex-install reference"
 fi
 
 echo "=== TC-CDCR-002C: render-time validation fails loudly on an illegal top-level key (#501) ==="
