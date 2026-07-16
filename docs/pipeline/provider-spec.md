@@ -395,6 +395,7 @@ additionally emit the three [INV-86] selection keys unconditionally
 | `closingIssueNumbers` | array of ints              | normalized from GitHub's `closingIssuesReferences[].number` (GraphQL node objects flattened to ints). The single ints-array is the [INV-86] resolution key: `contains([N])` replaces the pre-W1c1 `any(.[]?; .number == N)` expression.
 | `comments`            | see §3.3 / per-verb        | normalized issue-comment array (`[{id,author,body,createdAt}]`, ascending by `createdAt`). **Per-verb support** (matrix below): the W1c1 pair REJECTS `comments` (rc≠0, loud) — never fabricated.
 | `reviews`             | normalized array           | `[{author, state, submittedAt}]` ascending by `submittedAt`; populated only when the caller requests `reviews`.
+| `author`              | string / `null`            | **pr_view-ONLY (15th member, issue #495)** — the PR/MR author's login/username, flattened from the raw `{login:"…"}` / `{username:"…"}` object (the pre-existing comment/review author-flattening idiom); `null` on a missing/degraded author. **Per-verb support**: `chp_pr_view` supports it; `chp_find_pr_for_issue` / `chp_pr_list` REJECT it (rc≠0, loud) — see the support matrix below. Added so `resolve_pr_author_mention` (dispatcher-flow.md / review-agent-flow.md) can read the PR author for escalation-comment targeting without widening the list-side verbs' contract.
 
 **Per-verb field support.** Not every verb can deliver every vocabulary member
 from its native data source; a verb MUST reject (rc≠0, no output) a requested
@@ -404,10 +405,29 @@ data source it actually reads). Support matrix:
 
 | Verb | Supports | Rejects (rc≠0, loud) |
 |------|----------|----------------------|
-| `chp_find_pr_for_issue` (W1c1) | every field except `comments` | `comments` — the GraphQL `pullRequests` list walk cannot fold the ISSUE-level `comments` sub-resource without crossing the ITP/CHP seam (issue-level comments live behind `itp_list_comments`; PR review-thread inline comments live behind `chp_review_threads` / `chp_list_inline_comments`). `reviews` IS supported — the GraphQL page walker delivers `pullRequests { reviews }` (capped at first 100 per PR, sufficient for the near-success signal-2 callers that read the newest APPROVED submittedAt). Rejection pinned by TC-PCONF-044 and the unsupported-field unit case. |
-| `chp_pr_list` (W1c1) | every field except `comments` | `comments` — same rationale; `reviews` supported. Pinned by TC-PCONF-045. |
-| `chp_pr_view` (W1c2, #398) | **every** vocabulary field (all 14: `number`, `state`, `title`, `body`, `createdAt`, `updatedAt`, `mergedAt`, `headRefName`, `headRefOid`, `reviewDecision`, `mergeable`, `closingIssueNumbers`, `comments`, `reviews`) — the single-PR `gh pr view --json` read delivers each vocabulary member natively (`comments`/`reviews` fit in one PR-scoped read, unlike the W1c1 pair's list-walk which cannot). | any name OUTSIDE the vocabulary — the leaf validates `FIELDS_CSV` against the vocabulary allowlist BEFORE building the gh argv and rejects unknown / GitHub-native-only names (e.g. `closingIssuesReferences`, the raw form of `closingIssueNumbers`) with **rc 2, loud stderr naming the offending field, never a gh call** — a caller can never smuggle a provider-specific field name through the seam. Pinned by the vocabulary-rejection unit cases + the conformance runner's pr_view rejection assert. |
+| `chp_find_pr_for_issue` (W1c1) | every field except `comments`/`author` | `comments` — the GraphQL `pullRequests` list walk cannot fold the ISSUE-level `comments` sub-resource without crossing the ITP/CHP seam (issue-level comments live behind `itp_list_comments`; PR review-thread inline comments live behind `chp_review_threads` / `chp_list_inline_comments`). `author` (issue #495) — pr_view-ONLY, see the row below. `reviews` IS supported — the GraphQL page walker delivers `pullRequests { reviews }` (capped at first 100 per PR, sufficient for the near-success signal-2 callers that read the newest APPROVED submittedAt). Rejection pinned by TC-PCONF-044 and the unsupported-field unit case. |
+| `chp_pr_list` (W1c1) | every field except `comments`/`author` | `comments` — same rationale; `author` (issue #495) — pr_view-ONLY, see the row below; `reviews` supported. Pinned by TC-PCONF-045. |
+| `chp_pr_view` (W1c2, #398; +`author` issue #495) | **every** vocabulary field (all 15: `number`, `state`, `title`, `body`, `createdAt`, `updatedAt`, `mergedAt`, `headRefName`, `headRefOid`, `reviewDecision`, `mergeable`, `closingIssueNumbers`, `comments`, `reviews`, `author`) — the single-PR `gh pr view --json` read delivers each vocabulary member natively (`comments`/`reviews`/`author` fit in one PR-scoped read, unlike the W1c1 pair's list-walk which cannot). | any name OUTSIDE the vocabulary — the leaf validates `FIELDS_CSV` against the vocabulary allowlist BEFORE building the gh argv and rejects unknown / GitHub-native-only names (e.g. `closingIssuesReferences`, the raw form of `closingIssueNumbers`) with **rc 2, loud stderr naming the offending field, never a gh call** — a caller can never smuggle a provider-specific field name through the seam. Pinned by the vocabulary-rejection unit cases + the conformance runner's pr_view rejection assert. |
 | `chp_list_inline_comments` (W1c2, #398) | **not vocabulary-projected** — returns the CHP-owned flat inline shape `[{id,path,line,author,body,createdAt}]` (§3.2 cell) directly; takes no `FIELDS-CSV`. | (N/A — no `FIELDS-CSV` argument to reject fields from.) |
+
+**`author` provider-parity note (issue #495, R1).** GitHub has TWO separate
+field-vocabulary constants (`_CHP_GITHUB_PR_FIELDS_SUPPORTED`, the 13-member
+W1c1 list-side set that never gained `author`, vs.
+`_CHP_GITHUB_PR_VIEW_FIELDS_SUPPORTED`, the pr_view-only 15-member superset).
+GitLab's pre-#495 vocabulary was a SINGLE shared constant gating
+`pr_view`/`pr_list`/`find_pr_for_issue` together (the `_chp_gitlab_parse_pr_
+fields` gate, `chp-gitlab.sh`). Adding `author` naively to that one constant
+would have made GitLab's `pr_list`/`find_pr_for_issue` accept a field GitHub's
+equivalents reject — a provider-parity break. The fix mirrors GitHub's
+two-constant shape on the GitLab side: `_CHP_GITLAB_PR_VIEW_FIELDS_SUPPORTED`
+(15 members, pr_view-only) is a strict superset of the unchanged 14-member
+`_CHP_GITLAB_PR_FIELDS_SUPPORTED` (still gates pr_list/find_pr_for_issue, which
+therefore keep rejecting `author` with the same generic "not in the §3.2.1
+vocabulary" rc 2 every other unknown name gets — no separate carve-out
+needed). Both hosts now reject `author` on `chp_pr_list`/`chp_find_pr_for_
+issue` and accept it only on `chp_pr_view`; the conformance runner's
+`_run_pr_view_assert` / `_run_findpr_assert` / `_run_prlist_assert` pin this
+on both the `github/github` and `gitlab/gitlab` axes.
 
 `chp_find_pr_for_issue` returns a JSON array of PRs each projected to
 `FIELDS-CSV ∪ {number, closingIssueNumbers, headRefName}`; empty candidate set

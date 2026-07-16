@@ -107,6 +107,19 @@ _chp_gitlab_require_project() {
 declare -p _CHP_GITLAB_PR_FIELDS_SUPPORTED >/dev/null 2>&1 || \
   readonly _CHP_GITLAB_PR_FIELDS_SUPPORTED="number,state,title,body,createdAt,updatedAt,mergedAt,headRefName,headRefOid,reviewDecision,mergeable,closingIssueNumbers,comments,reviews"
 
+# `author` (issue #495, pr_view-only 15th member): `_CHP_GITLAB_PR_FIELDS_
+# SUPPORTED` above is DELIBERATELY left at 14 members — it is the vocabulary
+# `_chp_gitlab_parse_pr_fields` gates pr_list/find_pr_for_issue against (flag
+# "list"), so a caller requesting `author` on either of THOSE verbs gets the
+# same "not in the §3.2.1 vocabulary" rc-2 rejection GitHub's list/find lanes
+# give — parity is preserved by never teaching the list-side vocabulary about
+# the field at all, rather than adding a separate unsupported-field carve-out.
+# `_CHP_GITLAB_PR_VIEW_FIELDS_SUPPORTED` is the pr_view-only 15-member
+# superset (mirrors GitHub's two-constant shape,
+# `_CHP_GITHUB_PR_FIELDS_SUPPORTED` vs `_CHP_GITHUB_PR_VIEW_FIELDS_SUPPORTED`).
+declare -p _CHP_GITLAB_PR_VIEW_FIELDS_SUPPORTED >/dev/null 2>&1 || \
+  readonly _CHP_GITLAB_PR_VIEW_FIELDS_SUPPORTED="${_CHP_GITLAB_PR_FIELDS_SUPPORTED},author"
+
 # `chp_pr_list` / `chp_find_pr_for_issue` reject `comments` (same W1c1 support
 # matrix as GitHub — the list-walk cannot fold ISSUE-level comments without
 # crossing the ITP/CHP seam; issue-level comments live behind
@@ -174,16 +187,26 @@ _chp_gitlab_review_threads_page_cap() {
 }
 
 # _chp_gitlab_parse_pr_fields <fields-csv> [forced-extra-fields...] — parse
-# CSV, dedupe, validate against the full §3.2.1 vocabulary. Rejects unknown
+# CSV, dedupe, validate against the §3.2.1 vocabulary. Rejects unknown
 # fields and any field named in _CHP_GITLAB_PR_LIST_FIELDS_UNSUPPORTED (when
 # `unsupported_flag` argument is "list"; empty flag means the caller supports
 # the full vocabulary, e.g. chp_gitlab_pr_view). Sets _CHP_GL_PARSED_FIELDS.
+#
+# Vocabulary gate (issue #495): "view" validates against
+# `_CHP_GITLAB_PR_VIEW_FIELDS_SUPPORTED` (15 members incl. `author`); "list"
+# validates against the base 14-member `_CHP_GITLAB_PR_FIELDS_SUPPORTED` —
+# `author` is simply ABSENT from that list, so pr_list/find_pr_for_issue
+# reject it with the same generic "not in the §3.2.1 vocabulary" rc 2 every
+# other unknown name gets (parity with GitHub's two-constant split, which
+# never adds `author` to `_CHP_GITHUB_PR_FIELDS_SUPPORTED` either).
 #
 # Usage: _chp_gitlab_parse_pr_fields "<csv>" "<flag: view|list>" [forced...]
 _chp_gitlab_parse_pr_fields() {
   local fields="$1" flag="$2"; shift 2
   _CHP_GL_PARSED_FIELDS=""
   local seen="," f
+  local _vocab="$_CHP_GITLAB_PR_FIELDS_SUPPORTED"
+  [ "$flag" = "view" ] && _vocab="$_CHP_GITLAB_PR_VIEW_FIELDS_SUPPORTED"
   local IFS_SAVE=$IFS; IFS=','
   # shellcheck disable=SC2206
   local -a _caller=(${fields})
@@ -193,11 +216,11 @@ _chp_gitlab_parse_pr_fields() {
     # trim surrounding whitespace (a caller CSV "a, b" must not smuggle " b")
     f="${f#"${f%%[![:space:]]*}"}"; f="${f%"${f##*[![:space:]]}"}"
     [ -n "$f" ] || continue
-    # Vocabulary gate: reject anything outside §3.2.1 (14 members). Loudly.
-    case ",${_CHP_GITLAB_PR_FIELDS_SUPPORTED}," in
+    # Vocabulary gate: reject anything outside the per-verb vocabulary. Loudly.
+    case ",${_vocab}," in
       *",$f,"*) : ;;
       *)
-        echo "ERROR: chp_gitlab pr_view/pr_list/find_pr_for_issue: field '$f' is not in the §3.2.1 vocabulary ($_CHP_GITLAB_PR_FIELDS_SUPPORTED). GitLab-native names (e.g. 'iid', 'description', 'notes', 'source_branch') MUST use the vocabulary name so a non-GitLab caller can consume the same shape." >&2
+        echo "ERROR: chp_gitlab pr_view/pr_list/find_pr_for_issue: field '$f' is not in the §3.2.1 vocabulary ($_vocab). GitLab-native names (e.g. 'iid', 'description', 'notes', 'source_branch') MUST use the vocabulary name so a non-GitLab caller can consume the same shape." >&2
         return 2 ;;
     esac
     # Per-verb support gate (list-side rejects `comments`; view-side accepts all).
@@ -564,6 +587,11 @@ chp_gitlab_pr_view() {
                          state: "APPROVED",
                          submittedAt: $submitted } ]
                    | sort_by(.submittedAt // ""))}
+        elif $f == "author"          then
+          # issue #495, pr_view-only: MR author username. `.author` is always
+          # an object on a real MR view (never absent) — `// null` covers a
+          # degraded/unexpected payload shape rather than the ordinary case.
+          . + {author: ($m.author.username // null)}
         else . end)
     ' 2>/dev/null || return 1
 }

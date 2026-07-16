@@ -36,7 +36,9 @@ chp_broken_pr_view() {
   local pr="$1" fields_csv="${2:-}"
   [ -n "$fields_csv" ] || { echo "ERROR: chp_broken_pr_view requires FIELDS_CSV (2nd arg) [W1c2]" >&2; return 2; }
   # W1c2 online-review r1 mirror: same vocabulary gate as chp_github_pr_view.
-  local _CHP_BRK_PRV_VOCAB="number,state,title,body,createdAt,updatedAt,mergedAt,headRefName,headRefOid,reviewDecision,mergeable,closingIssueNumbers,comments,reviews"
+  # `author` (issue #495, pr_view-only 15th member) mirrors the real leaf's
+  # vocabulary widening.
+  local _CHP_BRK_PRV_VOCAB="number,state,title,body,createdAt,updatedAt,mergedAt,headRefName,headRefOid,reviewDecision,mergeable,closingIssueNumbers,comments,reviews,author"
   local gh_fields="" _obj_body="" first=1 f out_field _seen_map=""
   local IFS_SAVED="$IFS"; IFS=','
   # shellcheck disable=SC2206
@@ -63,6 +65,7 @@ chp_broken_pr_view() {
       comments)            expr='comments: ([ .comments[]? | { id: (.id // null), author: ((.author | if type == "object" then .login else . end) // null), body: (.body // ""), createdAt: (.createdAt // null) } ] | sort_by(.createdAt // "", .id // 0))' ;;
       reviews)             expr='reviews: ([ .reviews[]? | { author: ((.author | if type == "object" then .login else . end) // null), state: (.state // null), submittedAt: (.submittedAt // null) } ] | sort_by(.submittedAt // ""))' ;;
       closingIssueNumbers) expr='closingIssueNumbers: ([ ((.closingIssuesReferences // []) | (if type == "object" then (.nodes // []) else . end))[]? | .number ])' ;;
+      author)              expr='author: ((.author | if type == "object" then .login else . end) // null)' ;;
       *)                   expr="${f}: .${f}" ;;
     esac
     if [[ $first -eq 1 ]]; then first=0; else _obj_body+=", "; fi
@@ -222,9 +225,32 @@ _chp_broken_build_projection() {
   done
   printf '[ .data.repository.pullRequests.nodes[]? | %s ]' "$out"
 }
+# _chp_broken_list_fields_ok <fields-csv> — reject `author` (pr_view-only,
+# issue #495) and any other name outside the 13-member W1c1 list-side
+# vocabulary `_chp_broken_build_projection` knows how to project. Mirrors
+# the real leaves' loud vocabulary gate — without it a caller-requested
+# `author` silently vanishes from the projection at rc 0 instead of being
+# REJECTED, masking the pr_view-only support-matrix contract.
+_chp_broken_list_fields_ok() {
+  local fields="$1" _CHP_BRK_LIST_VOCAB="number,state,title,body,createdAt,updatedAt,mergedAt,headRefName,headRefOid,reviewDecision,mergeable,closingIssueNumbers,reviews"
+  local IFS_SAVE=$IFS; IFS=','
+  # shellcheck disable=SC2206
+  local -a requested=($fields)
+  IFS="$IFS_SAVE"
+  local f
+  for f in "${requested[@]}"; do
+    [ -n "$f" ] || continue
+    case ",${_CHP_BRK_LIST_VOCAB}," in
+      *",$f,"*) : ;;
+      *) return 1 ;;
+    esac
+  done
+  return 0
+}
 chp_broken_find_pr_for_issue() {
   local fields="${2:-}"
   [ -n "$fields" ] || return 2
+  _chp_broken_list_fields_ok "$fields" || return 2
   local raw
   raw="$(gh api graphql -F owner="${REPO%%/*}" -F repo="${REPO##*/}" -f query='{pullRequests}' 2>/dev/null)" || return 1
   [[ -n "$raw" ]] || return 1
@@ -234,6 +260,7 @@ chp_broken_pr_list() {
   local state="${1:-}" fields="${2:-}"
   [ -n "$state" ] || return 2
   [ -n "$fields" ] || return 2
+  _chp_broken_list_fields_ok "$fields" || return 2
   local raw
   raw="$(gh api graphql -F owner="${REPO%%/*}" -F repo="${REPO##*/}" -f query='{pullRequests}' 2>/dev/null)" || return 1
   [[ -n "$raw" ]] || return 1

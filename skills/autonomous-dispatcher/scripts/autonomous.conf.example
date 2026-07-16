@@ -106,6 +106,20 @@ REPO_OWNER="owner"
 REPO_NAME="repo-name"
 PROJECT_DIR="/path/to/project"
 
+# HUMAN_ESCALATION_LOGIN — individual login to mention on escalations;
+# defaults to REPO_OWNER; set this on GitLab where REPO_OWNER is a group
+# (issue #495). PR-scoped stall/escalation comments first try to mention the
+# PR's actual human author (via `resolve_pr_author_mention`, which detects and
+# skips bot authors — an autonomous PR's author is normally the dev-agent bot
+# itself); when that resolution isn't possible the comment falls back to this
+# login, then to REPO_OWNER. On GitHub, REPO_OWNER is usually an individual
+# account so the default is fine; on GitLab, REPO_OWNER is the project's
+# *group* namespace, so mentioning it fans out to every group member on every
+# stall — set HUMAN_ESCALATION_LOGIN to a specific maintainer to avoid that.
+#
+#   HUMAN_ESCALATION_LOGIN="maintainer-username"
+HUMAN_ESCALATION_LOGIN=""
+
 # BASE_BRANCH — the branch PRs/MRs merge into (issue #478, [INV-131]). Every
 # dev/review wrapper prompt, the mergeable-gate messages, and the PR-create
 # provider leaves target this branch instead of a hardcoded `main`. One

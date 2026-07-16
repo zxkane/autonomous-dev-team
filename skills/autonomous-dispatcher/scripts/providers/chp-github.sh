@@ -1064,8 +1064,14 @@ chp_github_reply_review_comment() {
 # is the FULL 14-member vocabulary. Guarded `readonly` for the same reason
 # as `_CHP_GITHUB_PR_FIELDS_SUPPORTED` — a transitive re-source of
 # lib-code-host.sh must not abort on `readonly variable`.
+#
+# `author` (issue #495, pr_view-only 15th member): deliberately ABSENT from
+# `_CHP_GITHUB_PR_FIELDS_SUPPORTED` above (the W1c1 pair keeps rejecting it,
+# rc 2) — only THIS pr_view vocabulary gains it, so `resolve_pr_author_mention`
+# (lib-review-resolve-author.sh) can read the PR author without widening
+# `chp_pr_list`/`chp_find_pr_for_issue`'s contract.
 declare -p _CHP_GITHUB_PR_VIEW_FIELDS_SUPPORTED >/dev/null 2>&1 || \
-  readonly _CHP_GITHUB_PR_VIEW_FIELDS_SUPPORTED="number,state,title,body,createdAt,updatedAt,mergedAt,headRefName,headRefOid,reviewDecision,mergeable,closingIssueNumbers,comments,reviews"
+  readonly _CHP_GITHUB_PR_VIEW_FIELDS_SUPPORTED="number,state,title,body,createdAt,updatedAt,mergedAt,headRefName,headRefOid,reviewDecision,mergeable,closingIssueNumbers,comments,reviews,author"
 
 chp_github_pr_view() {
   local pr="$1" fields_csv="${2:-}"
@@ -1129,6 +1135,13 @@ chp_github_pr_view() {
         # dereferencing `.nodes` on an array (which raises jq's "Cannot index
         # array with string" — P1-1 codex fix). Null/absent → `[]`.
         expr='closingIssueNumbers: ([ ((.closingIssuesReferences // []) | (if type == "object" then (.nodes // []) else . end))[]? | .number ])'
+        ;;
+      author)
+        # issue #495: flatten gh's `{login:"..."}` object to a bare string
+        # (the pre-existing comment/review author-flattening idiom above).
+        # Null/absent author → null (data-source honesty; resolve_pr_author_
+        # mention treats null as "fall back to HUMAN_ESCALATION_LOGIN").
+        expr='author: ((.author | if type == "object" then .login else . end) // null)'
         ;;
       *)
         # 1:1 vocabulary field — emit `name: .name`.

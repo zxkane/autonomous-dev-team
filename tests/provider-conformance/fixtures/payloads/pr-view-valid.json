@@ -3,6 +3,7 @@
   "title": "Test PR",
   "body": null,
   "number": 42,
+  "author": {"login": "eve"},
   "createdAt": "2026-06-27T09:00:00Z",
   "updatedAt": "2026-06-28T09:00:00Z",
   "mergedAt": null,

@@ -21,3 +21,8 @@
 #     shape too.
 #   - `body: null` normalizes to `""` per the vocabulary.
 #   - Fail-CLOSED: gh-stub failure → verb rc≠0 with no partial stdout.
+#   - `author` (issue #495, pr_view-only 15th member): flattens the raw
+#     `{login:"eve"}` object to the bare string `"eve"` (the pre-existing
+#     comment/review author-flattening idiom). Rejected (rc 2) on
+#     `chp_pr_list` / `chp_find_pr_for_issue` — see `_run_findpr_assert` /
+#     `_run_prlist_assert` in the runner.

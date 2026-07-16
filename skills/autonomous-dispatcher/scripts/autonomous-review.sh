@@ -218,6 +218,12 @@ source "${LIB_DIR}/lib-review-request-changes.sh"
 # own lib so the dispatcher (lib-dispatch.sh::fetch_pr_for_issue) resolves PRs
 # identically. [INV-65] sourced from the real skill tree via LIB_DIR.
 source "${LIB_DIR}/lib-pr-linkage.sh"
+# shellcheck source=lib-review-resolve-author.sh
+# [#495] resolve_pr_author_mention — PR-scoped escalation-comment mention
+# target (bot-detection + HUMAN_ESCALATION_LOGIN/REPO_OWNER fallback). Lives
+# in its own lib so the dispatcher (lib-dispatch.sh) resolves the SAME target
+# identically. [INV-65] sourced from the real skill tree via LIB_DIR.
+source "${LIB_DIR}/lib-review-resolve-author.sh"
 # [INV-70] Observe-only metrics emitter. Sourced from LIB_DIR (skill tree);
 # provides metrics_emit/metrics_dir. Guarded so a load failure never aborts the
 # review wrapper.
@@ -1978,7 +1984,7 @@ ${_gf_envelope}
 **To resume: fix per the checklist above, then push a new commit and REMOVE
 the \`stalled\` label (the \`autonomous\` label is retained; removal re-arms
 the pipeline).**
-@${REPO_OWNER}
+$(resolve_pr_author_mention "$PR_NUMBER")
 GATEBREAKREPORT
 )" 2>/dev/null || true
       exit 0
@@ -4507,7 +4513,7 @@ if [[ "$PASSED_VERDICT" == "true" ]]; then
     log "ERROR: Failed to submit PR approval for PR #${PR_NUMBER}."
     log "Falling back to manual review notification."
     itp_post_comment "$ISSUE_NUMBER" \
-      "Review PASSED but formal PR approval failed (permission issue?). @${REPO_OWNER} please approve and merge PR #${PR_NUMBER} manually.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
+      "Review PASSED but formal PR approval failed (permission issue?). @${HUMAN_ESCALATION_LOGIN:-$REPO_OWNER} please approve and merge PR #${PR_NUMBER} manually.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
     itp_transition_state "$ISSUE_NUMBER" "reviewing" "approved" 2>/dev/null || true
     log "Issue #${ISSUE_NUMBER} marked as approved. Manual merge required due to approval failure."
     exit 0
@@ -4526,7 +4532,7 @@ if [[ "$PASSED_VERDICT" == "true" ]]; then
 
     # Notify project owner to merge manually
     itp_post_comment "$ISSUE_NUMBER" \
-      "Review PASSED — this issue has the 'no-auto-close' label. @${REPO_OWNER} please review and merge PR #${PR_NUMBER} when ready.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
+      "Review PASSED — this issue has the 'no-auto-close' label. @${HUMAN_ESCALATION_LOGIN:-$REPO_OWNER} please review and merge PR #${PR_NUMBER} when ready.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
 
     # Update labels: remove reviewing, add approved (keep no-auto-close and autonomous)
     itp_transition_state "$ISSUE_NUMBER" "reviewing" "approved" 2>/dev/null || true
@@ -4923,7 +4929,7 @@ for the next finding without the review converging.
 either fix the remaining P0/P1 issue(s) yourself or push a targeted commit,
 and REMOVE the \`stalled\` label (the \`autonomous\` label is retained;
 removal re-arms the pipeline).
-@${REPO_OWNER}
+$(resolve_pr_author_mention "$PR_NUMBER")
 ROUNDCAPREPORT
 )" 2>/dev/null || true
         log "Issue #${ISSUE_NUMBER} moved to stalled (INV-127 review-round-cap breaker)."
