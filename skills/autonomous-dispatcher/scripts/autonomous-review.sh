@@ -4507,24 +4507,29 @@ else
     [[ "$_any_fail_seen" == "true" ]] || _AGG_DEV_ACTIONABLE="true"
     log "INV-92: aggregate dev-actionable=${_AGG_DEV_ACTIONABLE} for the substantive FAIL trailer (any-fail-seen=${_any_fail_seen})."
 
-    # INV-134 (#488) D4: when the aggregate derivation above forced
-    # dev-actionable=false, collect the sorted/unique matched
+    # INV-134 (#488) D4: collect the sorted/unique matched
     # REVIEW_PROTECTED_PATHS pattern(s) across every FAILing agent's
     # AGENT_MATCHED_PATTERNS (a sibling of AGENT_DEV_ACTIONABLE) so the findings
-    # comment below can name WHICH pattern forced it — the dispatcher's own stall
-    # comment (lib-dispatch.sh) only ever sees the coarse trailer bit, never the
-    # per-finding path. Reached only when aggregate=false, which by construction
-    # means the OR-loop above never broke early — every FAILing agent's slot was
-    # visited — so a fresh pass here is safe and simple, not a re-derivation.
+    # comment below can name WHICH pattern forced a finding non-actionable —
+    # the dispatcher's own stall comment (lib-dispatch.sh) only ever sees the
+    # coarse trailer bit, never the per-finding path. Deliberately INDEPENDENT
+    # of the aggregate `_AGG_DEV_ACTIONABLE` derivation above (codex review
+    # round-1 finding #2, #488 PR #498): a MIXED failure — one blocking finding
+    # forced non-actionable by a protected-path match, plus a second, ordinary
+    # actionable finding — has `_AGG_DEV_ACTIONABLE=true` (the aggregate is an
+    # OR: "true" iff ANY blocking finding is actionable), but D4's own contract
+    # is "whenever the derivation forces ≥1 blocking finding non-actionable",
+    # not "whenever EVERY blocking finding was". Gating this on
+    # aggregate=false silently dropped the diagnostic for every mixed case.
     _AGG_MATCHED_PATTERNS=""
-    if [[ "$_AGG_DEV_ACTIONABLE" == "false" ]]; then
-      _agg_pat_tmp=""
-      for _i in "${!AGENT_NAMES[@]}"; do
-        [[ "${AGENT_VERDICTS[$_i]:-}" == "fail" ]] || continue
-        [[ -n "${AGENT_MATCHED_PATTERNS[$_i]:-}" ]] || continue
-        _agg_pat_tmp+="${AGENT_MATCHED_PATTERNS[$_i]}"$'\n'
-      done
-      [[ -n "$_agg_pat_tmp" ]] && _AGG_MATCHED_PATTERNS="$(printf '%s' "$_agg_pat_tmp" | sort -u)"
+    _agg_pat_tmp=""
+    for _i in "${!AGENT_NAMES[@]}"; do
+      [[ "${AGENT_VERDICTS[$_i]:-}" == "fail" ]] || continue
+      [[ -n "${AGENT_MATCHED_PATTERNS[$_i]:-}" ]] || continue
+      _agg_pat_tmp+="${AGENT_MATCHED_PATTERNS[$_i]}"$'\n'
+    done
+    if [[ -n "$_agg_pat_tmp" ]]; then
+      _AGG_MATCHED_PATTERNS="$(printf '%s' "$_agg_pat_tmp" | sort -u)"
     fi
 
     # INV-134 (#488) D4: post the machine-readable marker comment NOW (rather
@@ -4551,8 +4556,19 @@ else
         _agg_pat_list_md+="\`${_agg_pat_line}\`, "
       done
       _agg_pat_list_md="${_agg_pat_list_md%, }"
+      # The lead sentence depends on the AGGREGATE outcome (which the matched
+      # patterns above no longer gate on): when aggregate=false EVERY blocking
+      # finding is non-actionable (the escalation-to-stalled case, [INV-92]
+      # Branch B′); when aggregate=true this is the MIXED case — at least one
+      # OTHER blocking finding is still actionable, so a dev-new IS dispatched,
+      # and the wording must not claim the whole FAIL is unactionable.
+      if [[ "$_AGG_DEV_ACTIONABLE" == "false" ]]; then
+        _agg_pat_lead="This substantive FAIL was classified **not dev-agent-actionable** ([INV-92]/[INV-134]): every blocking finding either matched a \`REVIEW_PROTECTED_PATHS\` pattern or was self-reported non-actionable by the agent."
+      else
+        _agg_pat_lead="This substantive FAIL includes at least one blocking finding matched against a \`REVIEW_PROTECTED_PATHS\` pattern ([INV-92]/[INV-134]); the dev agent will still be re-dispatched for the remaining actionable finding(s), but cannot resolve this one."
+      fi
       itp_post_comment "$ISSUE_NUMBER" \
-        "This substantive FAIL was classified **not dev-agent-actionable** ([INV-92]/[INV-134]): every blocking finding either matched a \`REVIEW_PROTECTED_PATHS\` pattern or was self-reported non-actionable by the agent. Matched protected-path pattern(s): ${_agg_pat_list_md}. If the dev agent's token can actually edit these paths in this deployment, adjust the \`REVIEW_PROTECTED_PATHS\` conf lever (or, for \`.github/workflows/**\` specifically under \`GH_AUTH_MODE=app\`, add \`workflows\` to \`AGENT_TOKEN_PERMISSIONS\` so the capability-aware default applies).
+        "${_agg_pat_lead} Matched protected-path pattern(s): ${_agg_pat_list_md}. If the dev agent's token can actually edit these paths in this deployment, adjust the \`REVIEW_PROTECTED_PATHS\` conf lever (or, for \`.github/workflows/**\` specifically under \`GH_AUTH_MODE=app\`, add \`workflows\` to \`AGENT_TOKEN_PERMISSIONS\` so the capability-aware default applies).
 <!-- inv92-matched-patterns: ${_agg_pat_oneline} -->" 2>/dev/null || true
     fi
 

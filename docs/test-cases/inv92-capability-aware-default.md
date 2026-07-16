@@ -15,19 +15,26 @@ marker surfacing).
 `REVIEW_PROTECTED_PATHS` UNSET in every row below (an explicit value — including
 `""` — is covered separately in the "Explicit value never rewritten" table).
 
-| ID | `GH_AUTH_MODE` | `AGENT_TOKEN_PERMISSIONS` | Default list | `.github/workflows/ci.yml` | `CODEOWNERS` |
-|---|---|---|---|---|---|
-| TC-INV134-D1-01 | `app` | `{"workflows":"write"}` present | `CODEOWNERS .github/CODEOWNERS` | NOT protected | protected |
-| TC-INV134-D1-02 | `app` | default (no `workflows` key) | `.github/workflows/** CODEOWNERS .github/CODEOWNERS` | protected | protected |
-| TC-INV134-D1-03 | `token` | `{"workflows":"write"}` present | `.github/workflows/** CODEOWNERS .github/CODEOWNERS` | protected (mode gate) | protected |
-| TC-INV134-D1-04 | `app` | empty string | `.github/workflows/** CODEOWNERS .github/CODEOWNERS` | protected (fail-closed) | protected |
-| TC-INV134-D1-05 | `app` | malformed JSON | `.github/workflows/** CODEOWNERS .github/CODEOWNERS` | protected (fail-closed) | protected |
-| TC-INV134-D1-06 | `app` | unset | `.github/workflows/** CODEOWNERS .github/CODEOWNERS` | protected (fail-closed) | protected |
-| TC-INV134-D1-07 | unset (GitLab / no concept) | `{"workflows":"write"}` present | `.github/workflows/** CODEOWNERS .github/CODEOWNERS` | protected (mode gate) | protected |
-| TC-INV134-D1-08 | `app`, `jq` unavailable (`command -v jq` false) | `{"workflows":"write"}` present | `.github/workflows/** CODEOWNERS .github/CODEOWNERS` | protected (fail-closed) | protected |
+| ID | `CODE_HOST` | `GH_AUTH_MODE` | `AGENT_TOKEN_PERMISSIONS` | Default list | `.github/workflows/ci.yml` | `CODEOWNERS` |
+|---|---|---|---|---|---|---|
+| TC-INV134-D1-01 | unset | `app` | `{"workflows":"write"}` present | `CODEOWNERS .github/CODEOWNERS` | NOT protected | protected |
+| TC-INV134-D1-02 | unset | `app` | default (no `workflows` key) | `.github/workflows/** CODEOWNERS .github/CODEOWNERS` | protected | protected |
+| TC-INV134-D1-03 | unset | `token` | `{"workflows":"write"}` present | `.github/workflows/** CODEOWNERS .github/CODEOWNERS` | protected (mode gate) | protected |
+| TC-INV134-D1-04 | unset | `app` | empty string | `.github/workflows/** CODEOWNERS .github/CODEOWNERS` | protected (fail-closed) | protected |
+| TC-INV134-D1-05 | unset | `app` | malformed JSON | `.github/workflows/** CODEOWNERS .github/CODEOWNERS` | protected (fail-closed) | protected |
+| TC-INV134-D1-06 | unset | `app` | unset | `.github/workflows/** CODEOWNERS .github/CODEOWNERS` | protected (fail-closed) | protected |
+| TC-INV134-D1-07 | unset | unset (GitLab / no concept) | `{"workflows":"write"}` present | `.github/workflows/** CODEOWNERS .github/CODEOWNERS` | protected (mode gate) | protected |
+| TC-INV134-D1-08 | unset | `app`, `jq` unavailable (`command -v jq` false) | `{"workflows":"write"}` present | `.github/workflows/** CODEOWNERS .github/CODEOWNERS` | protected (fail-closed) | protected |
+| TC-INV134-D1-14 | `gitlab` | `app` (leftover conf) | `{"workflows":"write"}` present | `.github/workflows/** CODEOWNERS .github/CODEOWNERS` | protected (host gate — GitLab mints no scoped GitHub token) | protected |
+| TC-INV134-D1-15 | `github` (explicit) | `app` | `{"workflows":"write"}` present | `CODEOWNERS .github/CODEOWNERS` | NOT protected (explicit-github behaves like unset) | protected |
+| TC-INV134-D1-16 | unset | `app` | `{"workflows":"write"}` present | `CODEOWNERS .github/CODEOWNERS` | NOT protected (unset defaults to github, no regression) | protected |
 
 CODEOWNERS / `.github/CODEOWNERS` are protected in EVERY row — the capability
-check only ever touches `.github/workflows/**` membership.
+check only ever touches `.github/workflows/**` membership. The `CODE_HOST`
+gate (D1-14..16) was added after PR #498 round-1 codex review [P2] finding #1:
+a pure GitLab run retaining a leftover `GH_AUTH_MODE=app` + `workflows`-scoped
+`AGENT_TOKEN_PERMISSIONS` conf fragment must NOT relax the default, since
+GitLab mints no scoped GitHub token those vars could describe.
 
 ### Explicit value never rewritten (either direction)
 
@@ -53,6 +60,7 @@ check only ever touches `.github/workflows/**` membership.
 | TC-INV134-D2-03 | App + scope present | Prompt's `requires_privileged_token` guidance states the token's `workflows` scope is `true` for this configuration (never the old hardcoded "it does by default") |
 | TC-INV134-D2-04 | App, scope absent | Prompt's `requires_privileged_token` guidance states the token's `workflows` scope is `false` |
 | TC-INV134-D2-05 | Token mode, scope var present (mode gate) | Prompt's glob list still contains `.github/workflows/**` (mirrors D1-03) and the token-scope note reads `false` |
+| TC-INV134-D2-06 | `CODE_HOST=gitlab` + App-mode leftover conf (scope var present) | Prompt's glob list still contains `.github/workflows/**` (mirrors D1-14, the host gate) and the token-scope note reads `false` |
 
 ## D3 — anti-forge preservation (regression, unchanged behavior)
 
@@ -80,8 +88,14 @@ check only ever touches `.github/workflows/**` membership.
 | ID | Scenario | Assertion |
 |---|---|---|
 | TC-INV134-D4-05 | Aggregate `dev-actionable=false`, matched patterns non-empty | A comment is posted containing "Matched protected-path pattern(s):" naming each pattern, the `REVIEW_PROTECTED_PATHS` conf-lever sentence, and a trailing `<!-- inv92-matched-patterns: <space-separated patterns> -->` marker line |
-| TC-INV134-D4-06 | Aggregate `dev-actionable=true` (mixed) | No matched-patterns comment posted (only genuinely non-actionable aggregates trigger it) |
+| TC-INV134-D4-06 | Aggregate `dev-actionable=true`, NO matched patterns recorded | No matched-patterns comment posted (nothing to name) |
 | TC-INV134-D4-07 | Aggregate `dev-actionable=false`, but no FAILing agent recorded a matched pattern (agent self-reported `false` on a non-protected path) | No matched-patterns comment posted — nothing to name |
+| TC-INV134-D4-14 [mixed-failure regression, PR #498 round-1 codex review [P2] finding #2] | Aggregate `dev-actionable=true` (a MIXED FAIL: one protected-path finding + one ordinary actionable finding), but a matched pattern WAS recorded | A comment IS still posted, naming the pattern + carrying the marker; the lead sentence does NOT claim the whole FAIL is unactionable, and instead notes the dev agent is still re-dispatched for the remaining actionable finding(s) |
+
+The matched-pattern collection is computed UNCONDITIONALLY (never gated on
+the aggregate `dev-actionable` bit) — only whether the resulting
+`_AGG_MATCHED_PATTERNS` is non-empty controls whether the comment posts. The
+comment's lead sentence still branches on the aggregate for correct wording.
 
 ### Dispatcher-side: stall comment surfaces the marker when present, generic fallback otherwise
 

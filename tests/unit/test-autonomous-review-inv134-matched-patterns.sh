@@ -13,9 +13,15 @@
 #                     on the FAILing agent → comment posted naming the
 #                     pattern(s) + the REVIEW_PROTECTED_PATHS conf lever +
 #                     the machine-readable marker.
-#   TC-INV134-D4-06: aggregate dev-actionable=true → no comment posted.
+#   TC-INV134-D4-06: aggregate dev-actionable=true, no matched patterns
+#                     recorded → no comment posted.
 #   TC-INV134-D4-07: aggregate dev-actionable=false but no FAILing agent
 #                     recorded a matched pattern → no comment posted.
+#   TC-INV134-D4-14: MIXED failure (codex review round-1 finding #2) —
+#                     aggregate dev-actionable=TRUE but a matched pattern WAS
+#                     recorded (one protected-path finding + one ordinary
+#                     actionable finding) → comment still posted, with wording
+#                     that does not overclaim total non-actionability.
 #
 # Run: bash tests/unit/test-autonomous-review-inv134-matched-patterns.sh
 
@@ -46,7 +52,7 @@ assert_eq() {
 BLOCK_SLICE=$(mktemp)
 trap 'rm -f "$BLOCK_SLICE"' EXIT
 awk '
-  /^    # INV-134 \(#488\) D4: when the aggregate derivation above forced$/ { active=1 }
+  /^    # INV-134 \(#488\) D4: collect the sorted\/unique matched$/ { active=1 }
   active {
     print
     if ($0 == "    fi") { fi_count++; if (fi_count == 2) { exit } }
@@ -113,7 +119,7 @@ esac
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== TC-INV134-D4-06: dev-actionable=true → no matched-patterns comment ==="
+echo "=== TC-INV134-D4-06: dev-actionable=true, NO matched patterns recorded → no comment ==="
 # ---------------------------------------------------------------------------
 OUT=$(_run_block "true" "codex" "fail" "")
 assert_eq "TC-INV134-D4-06 no comment posted" "0" "$(_field "$OUT" COMMENT_COUNT)"
@@ -126,6 +132,36 @@ echo "=== TC-INV134-D4-07: dev-actionable=false but no FAILing agent recorded a 
 # on a NON-protected path (no matched pattern to name).
 OUT=$(_run_block "false" "codex" "fail" "")
 assert_eq "TC-INV134-D4-07 no comment posted (nothing matched)" "0" "$(_field "$OUT" COMMENT_COUNT)"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-INV134-D4-14 (codex review round-1 finding #2): dev-actionable=TRUE (mixed failure) but a matched pattern WAS recorded → comment still posted ==="
+# ---------------------------------------------------------------------------
+# A mixed FAIL: one blocking finding matched a protected path (non-actionable),
+# a second, ordinary finding is actionable — so the aggregate OR is "true" (a
+# dev-new IS still dispatched), but D4's own contract ("whenever the derivation
+# forces >=1 blocking finding non-actionable") still requires naming the
+# matched pattern. Pre-fix this was gated on aggregate=="false" and silently
+# dropped the marker/comment for exactly this case.
+OUT=$(_run_block "true" "codex" "fail" ".github/workflows/**")
+assert_eq "TC-INV134-D4-14 exactly one comment posted despite aggregate=true" "1" "$(_field "$OUT" COMMENT_COUNT)"
+BODY=$(_field "$OUT" COMMENT_BODY)
+case "$BODY" in
+  *"Matched protected-path pattern(s): \`.github/workflows/**\`"*) ok "TC-INV134-D4-14 comment names the matched pattern";;
+  *) bad "TC-INV134-D4-14 comment should name the matched pattern"; echo "      got: $BODY";;
+esac
+case "$BODY" in
+  *"<!-- inv92-matched-patterns: .github/workflows/** -->"*) ok "TC-INV134-D4-14 comment carries the machine-readable marker";;
+  *) bad "TC-INV134-D4-14 comment should carry the inv92-matched-patterns marker"; echo "      got: $BODY";;
+esac
+case "$BODY" in
+  *"not dev-agent-actionable"*) bad "TC-INV134-D4-14 mixed-case wording must NOT claim the whole FAIL is unactionable"; echo "      got: $BODY";;
+  *) ok "TC-INV134-D4-14 mixed-case wording does not overclaim total non-actionability";;
+esac
+case "$BODY" in
+  *"remaining actionable finding"*) ok "TC-INV134-D4-14 mixed-case wording notes the dev agent is still re-dispatched";;
+  *) bad "TC-INV134-D4-14 mixed-case wording should note the dev agent is still re-dispatched"; echo "      got: $BODY";;
+esac
 
 # ---------------------------------------------------------------------------
 echo ""

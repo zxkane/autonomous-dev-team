@@ -52,23 +52,31 @@ agent_token_has_workflow_scope() {
 # _review_protected_paths_default_list — INV-134 (#488) capability-aware DEFAULT.
 #
 # Echoes the built-in REVIEW_PROTECTED_PATHS default: `.github/workflows/**` is
-# OMITTED iff GH_AUTH_MODE == "app" AND agent_token_has_workflow_scope returns 0
-# (the minted agent token provably carries the `workflows` permission — a mint
-# requesting a permission the App grant lacks FAILS, so a running wrapper with
-# `workflows` in AGENT_TOKEN_PERMISSIONS proves both the conf intent and the
-# grant; see the INV-92/#298 header note above — NO GitHub API probe, the App's
-# grant is not the minted token's permission set). Every other case — token/PAT
-# mode, GitLab (no GH_AUTH_MODE concept), scope absent, AGENT_TOKEN_PERMISSIONS
-# empty/malformed/no jq — keeps `.github/workflows/**` protected: fail-closed,
-# never optimistic. CODEOWNERS / .github/CODEOWNERS are protected in EVERY case
-# (a maintainer-owned policy file, unrelated to token scope).
+# OMITTED iff CODE_HOST == "github" (or unset, which defaults to "github" —
+# lib-code-host.sh's own `${CODE_HOST:-github}` convention) AND GH_AUTH_MODE ==
+# "app" AND agent_token_has_workflow_scope returns 0 (the minted agent token
+# provably carries the `workflows` permission — a mint requesting a permission
+# the App grant lacks FAILS, so a running wrapper with `workflows` in
+# AGENT_TOKEN_PERMISSIONS proves both the conf intent and the grant; see the
+# INV-92/#298 header note above — NO GitHub API probe, the App's grant is not
+# the minted token's permission set). The CODE_HOST gate is load-bearing: only
+# the GitHub App/token-minting flow in lib-auth.sh reads GH_AUTH_MODE /
+# AGENT_TOKEN_PERMISSIONS to down-scope a REAL minted token — a GitLab run has
+# no App equivalent (§5.1) and mints no GitHub token at all, so a leftover
+# GH_AUTH_MODE=app + AGENT_TOKEN_PERMISSIONS containing "workflows" in that
+# config proves nothing about what the review agent can actually push. Every
+# other case — non-github CODE_HOST, token/PAT mode, scope absent,
+# AGENT_TOKEN_PERMISSIONS empty/malformed/no jq — keeps `.github/workflows/**`
+# protected: fail-closed, never optimistic. CODEOWNERS / .github/CODEOWNERS are
+# protected in EVERY case (a maintainer-owned policy file, unrelated to token
+# scope).
 #
 # This function is ONLY ever consulted when REVIEW_PROTECTED_PATHS is UNSET (see
 # the `${VAR-$(...)}` assignment below, which short-circuits the command
 # substitution entirely on any explicit value, including ""), so it never
 # rewrites an operator's explicit override in either direction.
 _review_protected_paths_default_list() {
-  if [ "${GH_AUTH_MODE:-}" = "app" ] && agent_token_has_workflow_scope; then
+  if [ "${CODE_HOST:-github}" = "github" ] && [ "${GH_AUTH_MODE:-}" = "app" ] && agent_token_has_workflow_scope; then
     printf '%s' "CODEOWNERS .github/CODEOWNERS"
   else
     printf '%s' ".github/workflows/** CODEOWNERS .github/CODEOWNERS"
@@ -197,11 +205,12 @@ NO_PROTECTED
   fi
   # Non-empty: advertise the exact protected glob list the lib matcher uses.
   # INV-134 (#488) D2: whether the dev agent's token has the `workflows` scope
-  # in THIS configuration is resolved from the SAME capability check D1's
-  # default derivation uses — never a hardcoded "it does by default" claim, so
-  # the prompt cannot assert a scope gap the running configuration disproves.
+  # in THIS configuration is resolved from the SAME capability check (incl. the
+  # CODE_HOST=github gate) D1's default derivation uses — never a hardcoded "it
+  # does by default" claim, so the prompt cannot assert a scope gap the running
+  # configuration disproves.
   local _wf_has_scope="false"
-  [ "${GH_AUTH_MODE:-}" = "app" ] && agent_token_has_workflow_scope && _wf_has_scope="true"
+  [ "${CODE_HOST:-github}" = "github" ] && [ "${GH_AUTH_MODE:-}" = "app" ] && agent_token_has_workflow_scope && _wf_has_scope="true"
   cat <<PROTECTED
 - Apply this rule:
   - If the finding's \`file\` matches a PROTECTED-PATH pattern — the

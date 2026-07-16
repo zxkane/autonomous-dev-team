@@ -473,6 +473,51 @@ assert_eq "TC-INV134-D1-08 jq unavailable ⇒ fail-closed default" \
   "list=[.github/workflows/** CODEOWNERS .github/CODEOWNERS]" "$(grep '^list=' /tmp/d1-08-$$.out)"
 rm -f /tmp/d1-08-$$.out
 
+# TC-INV134-D1-14 (codex review round-1 finding #1): a pure GitLab run
+# (CODE_HOST=gitlab) that RETAINS GH_AUTH_MODE=app and "workflows":"write" in
+# AGENT_TOKEN_PERMISSIONS (a leftover/copy-pasted GitHub-App conf fragment)
+# must still keep the conservative default — GitLab mints no scoped GitHub
+# App token at all, so GH_AUTH_MODE/AGENT_TOKEN_PERMISSIONS prove nothing about
+# what the review agent can actually push there.
+( unset REVIEW_PROTECTED_PATHS
+  export CODE_HOST=gitlab
+  export GH_AUTH_MODE=app
+  export AGENT_TOKEN_PERMISSIONS='{"contents":"write","workflows":"write"}'
+  source "$CLASSIFY_LIB"
+  echo "list=[$REVIEW_PROTECTED_PATHS]"
+) > /tmp/d1-14-$$.out 2>&1
+assert_eq "TC-INV134-D1-14 CODE_HOST=gitlab + App-mode leftover conf ⇒ conservative default (host gate)" \
+  "list=[.github/workflows/** CODEOWNERS .github/CODEOWNERS]" "$(grep '^list=' /tmp/d1-14-$$.out)"
+rm -f /tmp/d1-14-$$.out
+
+# TC-INV134-D1-15: CODE_HOST explicitly "github" + App mode + scope present ⇒
+# still omits workflows (the explicit-github form behaves identically to the
+# unset/default form D1-01 already covers).
+( unset REVIEW_PROTECTED_PATHS
+  export CODE_HOST=github
+  export GH_AUTH_MODE=app
+  export AGENT_TOKEN_PERMISSIONS='{"contents":"write","workflows":"write"}'
+  source "$CLASSIFY_LIB"
+  echo "list=[$REVIEW_PROTECTED_PATHS]"
+) > /tmp/d1-15-$$.out 2>&1
+assert_eq "TC-INV134-D1-15 CODE_HOST=github explicit + App mode + scope ⇒ omits workflows" \
+  "list=[CODEOWNERS .github/CODEOWNERS]" "$(grep '^list=' /tmp/d1-15-$$.out)"
+rm -f /tmp/d1-15-$$.out
+
+# TC-INV134-D1-16: CODE_HOST unset (defaults to github, mirroring
+# lib-code-host.sh's own ${CODE_HOST:-github} convention) + App mode + scope
+# present ⇒ still omits workflows (host gate does not regress the pre-fix
+# unset-CODE_HOST GitHub installs that D1-01 exercises without setting CODE_HOST).
+( unset REVIEW_PROTECTED_PATHS CODE_HOST
+  export GH_AUTH_MODE=app
+  export AGENT_TOKEN_PERMISSIONS='{"contents":"write","workflows":"write"}'
+  source "$CLASSIFY_LIB"
+  echo "list=[$REVIEW_PROTECTED_PATHS]"
+) > /tmp/d1-16-$$.out 2>&1
+assert_eq "TC-INV134-D1-16 CODE_HOST unset ⇒ defaults to github, omits workflows" \
+  "list=[CODEOWNERS .github/CODEOWNERS]" "$(grep '^list=' /tmp/d1-16-$$.out)"
+rm -f /tmp/d1-16-$$.out
+
 echo "--- explicit REVIEW_PROTECTED_PATHS never rewritten (either direction) ---"
 
 # TC-INV134-D1-09: explicit empty + App mode + scope present ⇒ still "" (not
@@ -594,6 +639,22 @@ esac
 case "$PR_D2_05" in
   *'`workflows` scope is'*'`false`'*) echo "  PASS: TC-INV134-D2-05b token mode ⇒ note reads scope=false"; PASS=$((PASS+1));;
   *) echo "  FAIL: TC-INV134-D2-05b token mode note should read scope=false"; echo "      got: $PR_D2_05"; FAIL=$((FAIL+1));;
+esac
+
+# TC-INV134-D2-06 (codex review round-1 finding #1, D2 companion): CODE_HOST=
+# gitlab + App-mode leftover conf ⇒ prompt glob list still keeps workflows and
+# the note reads scope=false — the prompt must never advertise a capability
+# the host gate doesn't actually grant.
+PR_D2_06="$( unset REVIEW_PROTECTED_PATHS
+  CODE_HOST=gitlab GH_AUTH_MODE=app AGENT_TOKEN_PERMISSIONS='{"contents":"write","workflows":"write"}' \
+  bash -c 'source "$1"; review_protected_paths_prompt_rule' _ "$CLASSIFY_LIB" )"
+case "$PR_D2_06" in
+  *".github/workflows/**"*) echo "  PASS: TC-INV134-D2-06 CODE_HOST=gitlab ⇒ prompt glob list keeps workflows (host gate)"; PASS=$((PASS+1));;
+  *) echo "  FAIL: TC-INV134-D2-06 CODE_HOST=gitlab should keep workflows in the glob list"; echo "      got: $PR_D2_06"; FAIL=$((FAIL+1));;
+esac
+case "$PR_D2_06" in
+  *'`workflows` scope is'*'`false`'*) echo "  PASS: TC-INV134-D2-06b CODE_HOST=gitlab ⇒ note reads scope=false"; PASS=$((PASS+1));;
+  *) echo "  FAIL: TC-INV134-D2-06b CODE_HOST=gitlab note should read scope=false"; echo "      got: $PR_D2_06"; FAIL=$((FAIL+1));;
 esac
 
 # ---------------------------------------------------------------------------

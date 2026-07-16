@@ -969,9 +969,14 @@ REVIEW_BOTS=""
 #
 # Default (when unset) is CAPABILITY-AWARE as of INV-134 (#488):
 #   - ".github/workflows/** CODEOWNERS .github/CODEOWNERS" — the conservative
-#     default, applied UNLESS GH_AUTH_MODE=app AND AGENT_TOKEN_PERMISSIONS
-#     includes "workflows":"write" (see below) — in which case the default
-#     is "CODEOWNERS .github/CODEOWNERS" (workflows omitted).
+#     default, applied UNLESS CODE_HOST is unset or "github" AND GH_AUTH_MODE=app
+#     AND AGENT_TOKEN_PERMISSIONS includes "workflows":"write" (see below) — in
+#     which case the default is "CODEOWNERS .github/CODEOWNERS" (workflows
+#     omitted). CODE_HOST matters because GH_AUTH_MODE/AGENT_TOKEN_PERMISSIONS
+#     only mean something on the GitHub-App token-minting path (lib-auth.sh) —
+#     on CODE_HOST=gitlab (or any non-github host) those vars mint no scoped
+#     GitHub token at all, so a leftover GH_AUTH_MODE=app conf fragment there
+#     proves nothing and must NOT relax the default.
 #   - .github/workflows/**         — editing GitHub Actions workflows needs the
 #                                    `workflows` token scope, which the agent's
 #                                    scoped token does NOT carry by default (see
@@ -981,22 +986,27 @@ REVIEW_BOTS=""
 #                                    protected in EVERY configuration (the
 #                                    capability check never touches these two).
 #
-# SANCTIONED UNLOCK (App mode only, INV-134): if your dev-agent GitHub App is
-# granted `workflows: write` and you want the autonomous dev agent to be able
-# to push workflow-file fixes, add `"workflows":"write"` to
-# AGENT_TOKEN_PERMISSIONS below (GH_AUTH_MODE=app required) — the default then
-# omits `.github/workflows/**` automatically; you do NOT also need to set
-# REVIEW_PROTECTED_PATHS explicitly. `agent_token_has_workflow_scope` is a pure
-# config-var read (no GitHub API call) — a mint requesting a permission the
-# App grant lacks fails outright, so a running wrapper with `workflows` in
-# this var is itself proof the App grant supports it.
+# SANCTIONED UNLOCK (GitHub App mode only, INV-134): if your dev-agent GitHub
+# App is granted `workflows: write` and you want the autonomous dev agent to be
+# able to push workflow-file fixes, add `"workflows":"write"` to
+# AGENT_TOKEN_PERMISSIONS below (GH_AUTH_MODE=app AND CODE_HOST unset/"github"
+# required) — the default then omits `.github/workflows/**` automatically; you
+# do NOT also need to set REVIEW_PROTECTED_PATHS explicitly. `agent_token_has_
+# workflow_scope` is a pure config-var read (no GitHub API call) — a mint
+# requesting a permission the App grant lacks fails outright, so a running
+# wrapper with `workflows` in this var is itself proof the App grant supports
+# it.
 #
-# PAT mode (GH_AUTH_MODE=token) and GitLab installs have NO equivalent
-# capability signal (a PAT cannot be down-scoped per-agent, and GitLab has no
-# GitHub-App concept) — for those, use the EXPLICIT override below instead:
+# PAT mode (GH_AUTH_MODE=token), GitLab installs (CODE_HOST=gitlab), and any
+# other non-github CODE_HOST have NO equivalent capability signal (a PAT
+# cannot be down-scoped per-agent, and GitLab has no GitHub-App concept) — for
+# those, use the EXPLICIT override below instead:
 # REVIEW_PROTECTED_PATHS="CODEOWNERS .github/CODEOWNERS" (drops workflows from
 # protection unconditionally; only do this if you've verified out-of-band that
-# the shared token/PAT can actually push workflow-file changes).
+# the shared token/PAT can actually push workflow-file changes). Leaving a
+# GH_AUTH_MODE=app / AGENT_TOKEN_PERMISSIONS fragment in place on a non-github
+# CODE_HOST is harmless — the default derivation ignores those vars entirely
+# outside CODE_HOST=github (or unset).
 #
 # Matching uses bash extglob/glob semantics (`**`/`*` cross `/`). Override to add
 # project-specific protected paths (e.g. a release-config or infra dir a human
