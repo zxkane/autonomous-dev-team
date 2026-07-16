@@ -113,7 +113,7 @@ chp_ci_status()         { chp_${CODE_HOST}_ci_status "$@"; }
 # header (providers/chp-github.sh) for the split rationale. Ungated (no
 # `.caps` entry), bare one-line shim — same posture as chp_ci_status /
 # chp_mergeable, since every CHP provider MUST implement it.
-chp_ci_rollup()          { chp_${CODE_HOST}_ci_rollup "$@"; }
+chp_ci_rollup()         { chp_${CODE_HOST}_ci_rollup "$@"; }
 chp_mergeable()         { chp_${CODE_HOST}_mergeable "$@"; }
 chp_create_pr()         { chp_${CODE_HOST}_create_pr "$@"; }
 chp_approve()           { chp_${CODE_HOST}_approve "$@"; }
