@@ -1036,6 +1036,7 @@ _d4_sete_probe() {
     mark_stalled() { echo "MARK_STALLED_CALLED"; }
     handle_completed_session_routing 100 "sid-d412" "2026-05-21T03:18:00Z"
     echo "REACHED_END"
+    echo "TOTAL_ITP_CALLS=$(<"$_d4_count_file")"
   ' 2>/dev/null
 }
 _D4_SETE_OUT="$(_d4_sete_probe)"
@@ -1043,6 +1044,12 @@ assert_contains "TC-INV134-D4-12 mark_stalled reached despite itp_list_comments 
   "MARK_STALLED_CALLED" "$_D4_SETE_OUT"
 assert_contains "TC-INV134-D4-12 function returns normally (does not abort the caller)" \
   "REACHED_END" "$_D4_SETE_OUT"
+# Evidence the probe genuinely reached _inv92_matched_patterns's OWN failing
+# call (not just the two calls before it) — >=3 total calls is only possible
+# if both prior checks succeeded and control fell through into
+# _inv92_matched_patterns, which made the 3rd (failing) call.
+assert_contains "TC-INV134-D4-12 reached the 3rd itp_list_comments call inside _inv92_matched_patterns (not a vacuous pass)" \
+  "TOTAL_ITP_CALLS=3" "$_D4_SETE_OUT"
 
 # Cleanup
 reset_mocks

@@ -440,16 +440,21 @@ echo "=== _same_head_verdict_aware_recovery's dev-actionable=false branch must n
 # `set -e` if `itp_list_comments` (inside it) transiently fails. Spawn a
 # FRESH bash subshell with real `set -euo pipefail` (mirroring
 # dispatcher-tick.sh:583's `if handle_pending_dev_pr_exists ...; then`) and
-# prove mark_stalled is still reached. This call site is CURRENTLY only ever
-# reached via that `if` context — under which bash already suppresses
-# errexit for the whole call chain (the codebase's own INV-108 precedent,
-# lib-dispatch.sh:2160) — so the `|| true` fix in _inv92_matched_patterns is
-# defense-in-depth here, not load-bearing at THIS specific call site (unlike
-# the direct dispatcher-tick.sh:693 call TC-INV134-D4-12 pins). Kept as a
-# regression pin anyway: a future refactor that calls
-# _same_head_verdict_aware_recovery as a plain (non-`if`) statement would
-# make this call site load-bearing too, and this test would still pass
-# either way — the fix's absence would only be caught by TC-INV134-D4-12.
+# prove mark_stalled is still reached AFTER _inv92_matched_patterns actually
+# ran (the call-count threshold below must be high enough to let the
+# comment-read preflight and the idempotency check both succeed first, or
+# this probe passes vacuously without ever entering _inv92_matched_patterns
+# at all — the exact defect an independent review caught in an earlier
+# draft of this test, which used too low a threshold). This call site is
+# CURRENTLY only ever reached via the `if handle_pending_dev_pr_exists`
+# context — under which bash already suppresses errexit for the whole call
+# chain (the codebase's own INV-108 precedent, lib-dispatch.sh:2160) — so
+# the `|| true` fix in _inv92_matched_patterns is defense-in-depth here, not
+# load-bearing at THIS specific call site (unlike the direct
+# dispatcher-tick.sh:693 call TC-INV134-D4-12 pins). Kept as a regression
+# pin anyway: a future refactor that calls _same_head_verdict_aware_recovery
+# as a plain (non-`if`) statement would make this call site load-bearing
+# too.
 _d4_13_sete_probe() {
   bash -euo pipefail -c '
     export REPO=zxkane/autonomous-dev-team REPO_OWNER=zxkane PROJECT_ID=d4-13-sete-probe-$$ MAX_RETRIES=3 MAX_CONCURRENT=5
@@ -464,10 +469,20 @@ _d4_13_sete_probe() {
       printf -v "$_v" "%s" "failed-substantive"; printf -v "$_c" "%s" ""
       [ -n "$_da" ] && printf -v "$_da" "%s" "false"
     }
+    # THREE prior itp_list_comments calls happen before ever reaching
+    # _inv92_matched_patterns inside _same_head_verdict_aware_recovery: (1)
+    # the comment-read preflight (lib-dispatch.sh ~3605), (2) the
+    # dev-actionable=false idempotency check. Both MUST succeed or an
+    # earlier `if`/`return 1` short-circuits before _inv92_matched_patterns
+    # is ever called — a threshold too low here would make this probe pass
+    # vacuously without exercising the bug (exactly the mistake caught by
+    # independent review on an earlier draft: `-le 1` let the failure land
+    # on the preflight, never reaching this branch at all). The THIRD call
+    # (inside _inv92_matched_patterns) must FAIL.
     _d4_13_count_file="$(mktemp)"; echo 0 > "$_d4_13_count_file"
     itp_list_comments() {
       local _n; _n=$(<"$_d4_13_count_file"); _n=$((_n + 1)); echo "$_n" > "$_d4_13_count_file"
-      if [ "$_n" -le 1 ]; then
+      if [ "$_n" -le 2 ]; then
         printf "%s" "[]"
         return 0
       fi
@@ -481,6 +496,7 @@ _d4_13_sete_probe() {
       echo "HANDLE_PENDING_RETURNED_TRUE"
     fi
     echo "REACHED_END"
+    echo "TOTAL_ITP_CALLS=$(<"$_d4_13_count_file")"
   ' 2>/dev/null
 }
 _D4_13_SETE_OUT="$(_d4_13_sete_probe)"
@@ -488,6 +504,12 @@ assert_match "TC-INV134-D4-13 mark_stalled reached despite itp_list_comments fai
   "MARK_STALLED_CALLED" "$_D4_13_SETE_OUT"
 assert_match "TC-INV134-D4-13 function returns normally (does not abort the caller)" \
   "REACHED_END" "$_D4_13_SETE_OUT"
+# Evidence the probe genuinely reached _inv92_matched_patterns's OWN failing
+# call (not just the two calls before it) — >=3 total calls is only possible
+# if the preflight AND the idempotency check both succeeded and control fell
+# through into _inv92_matched_patterns, which made the 3rd (failing) call.
+assert_match "TC-INV134-D4-13 reached the 3rd itp_list_comments call inside _inv92_matched_patterns (not a vacuous pass)" \
+  "TOTAL_ITP_CALLS=3" "$_D4_13_SETE_OUT"
 
 echo
 echo "=== Summary ==="
