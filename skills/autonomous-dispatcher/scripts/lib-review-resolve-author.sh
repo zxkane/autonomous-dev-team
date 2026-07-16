@@ -104,11 +104,15 @@ _rpam_fallback() {
 # stderr.
 #
 # Success path: `chp_pr_view PR author` resolves a non-null, non-empty,
-# NOT-a-bot author → `@<login>`.
+# single-token STRING, NOT-a-bot author → `@<login>`.
 #
-# Fallback path (→ `_rpam_fallback`): bot author, null/empty author,
-# non-numeric/empty PR arg, `chp_pr_view` failure, or malformed
-# (non-JSON-object) output.
+# Fallback path (→ `_rpam_fallback`): bot author, null/empty author, a
+# non-string `.author` shape (e.g. `{"login":"evil"}` — a malformed
+# provider-leaf projection would otherwise be echoed verbatim into the
+# mention, producing a multiline/multi-token comment body — #495 review
+# round 3 finding), an author string containing whitespace (same
+# multi-token risk), non-numeric/empty PR arg, `chp_pr_view` failure, or
+# malformed (non-JSON-object) output.
 resolve_pr_author_mention() {
   local pr="${1:-}"
   if [[ ! "$pr" =~ ^[0-9]+$ ]]; then
@@ -130,12 +134,19 @@ resolve_pr_author_mention() {
   fi
 
   local login
-  login="$(jq -r '.author // empty' <<<"$raw" 2>/dev/null)"
+  login="$(jq -r '.author | if type == "string" then . else "" end' <<<"$raw" 2>/dev/null)"
   if [ -z "$login" ]; then
-    echo "WARN: resolve_pr_author_mention: PR #${pr} has no resolvable author — falling back to the operator target" >&2
+    echo "WARN: resolve_pr_author_mention: PR #${pr} has no resolvable string author — falling back to the operator target" >&2
     _rpam_fallback
     return 0
   fi
+  case "$login" in
+    *[[:space:]]*)
+      echo "WARN: resolve_pr_author_mention: PR #${pr} author '${login}' is not a single token — falling back to the operator target" >&2
+      _rpam_fallback
+      return 0
+      ;;
+  esac
 
   if _rpam_is_bot_login "$login"; then
     echo "INFO: resolve_pr_author_mention: PR #${pr} author '${login}' classified as a bot — falling back to the operator target" >&2

@@ -171,7 +171,12 @@ is genuinely PR-scoped:
    null/empty author, non-numeric PR arg, or `chp_pr_view` failure, the
    resolver falls back to `@${HUMAN_ESCALATION_LOGIN:-$REPO_OWNER}`. The
    resolver ALWAYS exits 0 and emits exactly one `@<token>` — it never aborts
-   a `set -euo pipefail` caller.
+   a `set -euo pipefail` caller. **Malformed `.author` shape hardening (#495
+   review round 3):** the resolver only accepts a single-token JSON *string*
+   author; a non-string shape (e.g. a stray `{"login":"…"}` object surviving
+   a provider-leaf regression) or a whitespace/newline-containing string
+   falls back rather than being echoed verbatim into the mention — otherwise
+   the posted comment body itself could become multiline/multi-token.
 
    **`DEV_BOT_LOGIN`** (`autonomous.conf.example`, optional, defaults empty —
    #495 review finding #1): the dispatcher-side counterpart to `BOT_LOGIN`.

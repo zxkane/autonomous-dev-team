@@ -238,6 +238,26 @@ out=$(_RPAM_MODE=malformed _run_resolver resolve_pr_author_mention 42 2>/dev/nul
 assert_rc_eq "TC-PAEM-019 malformed output rc" "0" "$rc"
 assert_eq "TC-PAEM-019 malformed output falls back" "@the-owner" "$out"
 
+# TC-PAEM-019b/c/d (#495 review round 3): a malformed `.author` SHAPE inside
+# an otherwise well-formed JSON object must fall back, not be echoed verbatim
+# into the mention token — an object/array shape or a whitespace-containing
+# string would otherwise produce a multiline/multi-token comment body.
+out=$(_RPAM_MODE=ok _RPAM_AUTHOR='{"login":"evil"}' _run_resolver resolve_pr_author_mention 42 2>/dev/null); rc=$?
+assert_rc_eq "TC-PAEM-019b object-shaped author rc" "0" "$rc"
+assert_eq "TC-PAEM-019b object-shaped author falls back (not echoed verbatim)" "@the-owner" "$out"
+
+out=$(_RPAM_MODE=ok _RPAM_AUTHOR='["evil","actor"]' _run_resolver resolve_pr_author_mention 42 2>/dev/null); rc=$?
+assert_rc_eq "TC-PAEM-019c array-shaped author rc" "0" "$rc"
+assert_eq "TC-PAEM-019c array-shaped author falls back (not echoed verbatim)" "@the-owner" "$out"
+
+out=$(_RPAM_MODE=ok _RPAM_AUTHOR='"evil actor"' _run_resolver resolve_pr_author_mention 42 2>/dev/null); rc=$?
+assert_rc_eq "TC-PAEM-019d whitespace-containing string author rc" "0" "$rc"
+assert_eq "TC-PAEM-019d whitespace-containing string author falls back (not a multi-token mention)" "@the-owner" "$out"
+
+out=$(_RPAM_MODE=ok _RPAM_AUTHOR='"evil\nactor"' _run_resolver resolve_pr_author_mention 42 2>/dev/null); rc=$?
+assert_rc_eq "TC-PAEM-019e newline-containing string author rc" "0" "$rc"
+assert_eq "TC-PAEM-019e newline-containing string author falls back (not a multiline mention)" "@the-owner" "$out"
+
 out=$(_run_resolver resolve_pr_author_mention "abc" 2>/dev/null); rc=$?
 assert_rc_eq "TC-PAEM-020 non-numeric PR arg rc" "0" "$rc"
 assert_eq "TC-PAEM-020 non-numeric PR arg falls back" "@the-owner" "$out"
