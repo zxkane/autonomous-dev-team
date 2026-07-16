@@ -8435,7 +8435,7 @@ The comment is posted ONLY after a successful signal; the transition is `in-prog
 - [INV-10](#inv-10-5-minute-idle-gate-before-sigterm) — the pre-existing idle gate this invariant keeps necessary-but-insufficient; unchanged boundary (`strict > 300s`).
 - [INV-30](#inv-30-pid_alive-is-authoritative-under-all-execution-backends) — the reason dispatcher-side `get_pid`/`kill -0` are unusable under `remote-aws-ssm`, forcing the compare-and-signal design to run entirely on the wrapper host.
 - [INV-135](#inv-135-the-agent-progress-lease-is-a-producer-only-signal-refreshed-on-launch-and-per-complete-output-record-never-by-the-heartbeat) — the producer this invariant consumes; the lease file contract, schema, and residuals are defined there.
-- [`dispatcher-flow.md` § Step 5a](dispatcher-flow.md#step-5a-alive-in-progress--pr-ready-for-review-54-56) — runtime walkthrough of the updated gate ordering.
+- [`dispatcher-flow.md` § Step 5a](dispatcher-flow.md#step-5a-alive-in-progress--pr-ready-for-review-54-56-progress-gated-since-inv-137-485) — runtime walkthrough of the updated gate ordering.
 - [`remote-backend.md`](remote-backend.md) — the snapshot + compare-and-signal transport contract.
 
 ---
