@@ -631,7 +631,7 @@ done
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== TC-LEASE-024..028: EAGAIN on the shared nonblocking pipe (issue #508) ==="
+echo "=== TC-LEASE-024..029: EAGAIN on the shared nonblocking pipe (issue #508) ==="
 # ---------------------------------------------------------------------------
 # Root cause: the wrapper's stdout is `exec > >(tee -a run.log)`, the SAME
 # open file description the Claude CLI (Node.js) inherits as its stderr.

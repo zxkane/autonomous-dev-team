@@ -1341,7 +1341,7 @@ _agent_progress_cleanup() {
 # boundary landing mid-UTF-8-codepoint still round-trips byte-for-byte.
 #
 # The retry BUDGET is tracked ONCE for the WHOLE record, not reset per slice
-# (round-1 review finding [P2]): a per-slice `attempts=0` reset let a
+# (round-2 review finding [P2]): a per-slice `attempts=0` reset let a
 # slowly-draining reader hand each 4096-byte slice of a large record its own
 # fresh ~2s allowance, so a record with N slices could retry for N*2s with no
 # overall bound — the exact "bounded total" the issue's fix contract requires.
@@ -1373,7 +1373,12 @@ _agent_progress_write_retry() {
   # matching every other write site in this recorder.
   exec {write_fd}>&1
   deadline=$(_agent_progress_write_retry_now_seconds)
-  deadline=$(awk -v n="$deadline" -v b="${AGENT_PROGRESS_WRITE_RETRY_BUDGET_SECONDS:-2}" 'BEGIN{printf "%.6f", n + b}')
+  # LC_ALL=C prefixed directly on the awk invocation (not relying on the
+  # function-local `local LC_ALL=C` above, which only reaches a child
+  # process if LC_ALL was already exported) — an exported LC_NUMERIC/LANG
+  # with a comma decimal separator would otherwise make awk's `%.6f` emit
+  # (and then mis-reparse) a comma, corrupting the deadline math.
+  deadline=$(LC_ALL=C awk -v n="$deadline" -v b="${AGENT_PROGRESS_WRITE_RETRY_BUDGET_SECONDS:-2}" 'BEGIN{printf "%.6f", n + b}')
   while (( off < total )); do
     take=$(( total - off < chunk ? total - off : chunk ))
     piece="${data:off:take}"
@@ -1398,7 +1403,7 @@ _agent_progress_write_retry() {
       # RETRY_BUDGET_SECONDS), matching the issue's "bounded total (e.g.
       # ~2s worth)" guidance regardless of how many slices the record took.
       now=$(_agent_progress_write_retry_now_seconds)
-      if awk -v n="$now" -v d="$deadline" 'BEGIN{exit !(n >= d)}'; then
+      if LC_ALL=C awk -v n="$now" -v d="$deadline" 'BEGIN{exit !(n >= d)}'; then
         printf 'lib-agent.sh: _agent_progress_recorder: dropping output record (%d of %d bytes written) after %d retries — write error: Resource temporarily unavailable\n' \
           "$wrote" "$total" "$attempts" >&2 || true  # best-effort diagnostic; a failed write to a full pipe must not itself abort the record-drop path
         exec {write_fd}>&-
