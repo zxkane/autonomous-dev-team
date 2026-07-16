@@ -195,6 +195,8 @@ _MOCK_NOPROG_NOTICE_PRESENT="0"
 _MOCK_NONACT_NOTICE_PRESENT="0"  # INV-92 (#298) Branch B′ notice already posted?
 _MOCK_ATTEMPT_WRITE_FAILS="0"    # 1 = reject attempt-marker writes (finding 2)
 _MOCK_ATTEMPT_WRITE_TRIES=0
+_MOCK_MATCHED_PATTERNS_MARKER=""  # INV-134 (#488) D4: when non-empty, itp_list_comments
+                                   # emits a comment carrying `<!-- inv92-matched-patterns: … -->`
 
 fetch_pr_for_issue() {
   # [INV-123] (#461): a nonzero return simulates a resolve_pr_for_issue
@@ -232,6 +234,13 @@ itp_list_comments() {
   # `non-actionable-finding:<head>` (head defaults to `none` when no PR resolved).
   if [[ "${_MOCK_NONACT_NOTICE_PRESENT:-0}" != "0" ]]; then
     _bodies+=("non-actionable-finding:${_MOCK_PR_HEAD:-none} prior notice")
+  fi
+  # INV-134 (#488) D4: when the test declares a matched-patterns marker, emit a
+  # review-wrapper-style comment carrying it so `_inv92_matched_patterns` (the
+  # dispatcher-side reader) has something to find.
+  if [[ -n "${_MOCK_MATCHED_PATTERNS_MARKER:-}" ]]; then
+    _bodies+=("Non-actionable findings comment.
+<!-- inv92-matched-patterns: ${_MOCK_MATCHED_PATTERNS_MARKER} -->")
   fi
   if [[ "${_MOCK_NOTICE_PRESENT:-0}" != "0" ]]; then
     # The fresh-dev/INV-12 notices are session-scoped — the branch searches for
@@ -274,6 +283,7 @@ reset_mocks() {
   _MOCK_NONACT_NOTICE_PRESENT="0"
   _MOCK_ATTEMPT_WRITE_FAILS="0"
   _MOCK_ATTEMPT_WRITE_TRIES=0
+  _MOCK_MATCHED_PATTERNS_MARKER=""
   _MOCK_NOTICE_SESSION=""   # #281: session id the synthesized INV-12/INV-35 marker carries
   _MOCK_PR_LOOKUP_FAILS="0" # [INV-123] (#461): simulate fetch_pr_for_issue transport failure
   unset REVIEW_RETRY_LIMIT
@@ -892,6 +902,49 @@ assert_returns "INV92-RT-006 returns 0" 0 \
 assert_eq "INV92-RT-006 mark_stalled fired (no PR)" "100 " "$_MOCK_MARK_STALLED_CALLS"
 assert_eq "INV92-RT-006 NO dispatch dev-new" "" "$_MOCK_DISPATCH_CALLS"
 assert_contains "INV92-RT-006 notice keys non-actionable-finding:none" "non-actionable-finding:none" "$_MOCK_LAST_COMMENT_BODY"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== INV-134 (#488) D4: stall notice surfaces the matched-patterns marker ==="
+# ---------------------------------------------------------------------------
+
+# TC-INV134-D4-08: Branch B′ fires with an `inv92-matched-patterns:` marker
+# already on the issue (posted by the review wrapper) — the escalation notice
+# names the matched pattern(s) + the REVIEW_PROTECTED_PATHS conf lever.
+reset_mocks
+_MOCK_VERDICT="failed-substantive"
+_MOCK_DEV_ACTIONABLE="false"
+_MOCK_PR_HEAD="cafef00d"
+_MOCK_LAST_REVIEWED_HEAD="cafef00d"
+_MOCK_MATCHED_PATTERNS_MARKER=".github/workflows/** CODEOWNERS"
+prepare_log 100
+assert_returns "TC-INV134-D4-08 returns 0" 0 \
+  handle_completed_session_routing 100 "sid-d408" "2026-05-21T03:18:00Z"
+assert_eq "TC-INV134-D4-08 mark_stalled fired" "100 " "$_MOCK_MARK_STALLED_CALLS"
+assert_contains "TC-INV134-D4-08 notice names matched patterns" \
+  "Matched \`REVIEW_PROTECTED_PATHS\` pattern(s): .github/workflows/** CODEOWNERS" "$_MOCK_LAST_COMMENT_BODY"
+
+# TC-INV134-D4-09: Branch B′ fires with NO marker present — the notice is
+# byte-identical to the pre-#488 generic wording (no pattern sentence at all).
+reset_mocks
+_MOCK_VERDICT="failed-substantive"
+_MOCK_DEV_ACTIONABLE="false"
+_MOCK_PR_HEAD="cafef00d"
+_MOCK_LAST_REVIEWED_HEAD="cafef00d"
+prepare_log 100
+assert_returns "TC-INV134-D4-09 returns 0" 0 \
+  handle_completed_session_routing 100 "sid-d409" "2026-05-21T03:18:00Z"
+assert_eq "TC-INV134-D4-09 mark_stalled fired" "100 " "$_MOCK_MARK_STALLED_CALLS"
+case "$_MOCK_LAST_COMMENT_BODY" in
+  *"Matched \`REVIEW_PROTECTED_PATHS\` pattern(s)"*)
+    echo -e "  ${RED}FAIL${NC}: TC-INV134-D4-09 notice should NOT mention matched patterns when no marker exists"
+    FAIL=$((FAIL + 1))
+    ;;
+  *)
+    echo -e "  ${GREEN}PASS${NC}: TC-INV134-D4-09 no marker ⇒ generic fallback wording, no pattern sentence"
+    PASS=$((PASS + 1))
+    ;;
+esac
 
 # Cleanup
 reset_mocks

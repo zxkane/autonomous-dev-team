@@ -1885,8 +1885,17 @@ handle_completed_session_routing() {
         if itp_list_comments "$issue_num" 2>/dev/null \
             | jq -r "[.[].body | select(contains(\"${_na_marker}\"))] | length" \
             2>/dev/null | grep -q '^0$'; then
+          # INV-134 (#488) D4: surface the matched REVIEW_PROTECTED_PATHS
+          # pattern(s) when the review wrapper's `inv92-matched-patterns:`
+          # marker is present on the issue; otherwise fall back to the
+          # unchanged generic wording (no new failure mode).
+          local _na_patterns _na_pat_sentence=""
+          _na_patterns="$(_inv92_matched_patterns "$issue_num")"
+          if [ -n "$_na_patterns" ]; then
+            _na_pat_sentence=" Matched \`REVIEW_PROTECTED_PATHS\` pattern(s): ${_na_patterns}."
+          fi
           itp_post_comment "$issue_num" \
-            "Substantive review failure on completed session \`${session_id}\` is **not resolvable by the autonomous dev agent**: the review classified every blocking finding as requiring a human or a privileged token the agent's scoped token lacks (e.g. a \`.github/workflows\` edit needs the \`workflows\` scope, or a CODEOWNERS / maintainer-owned change — [INV-92]). Marking stalled — no \`dev-new\` will be dispatched (\`reason=non_actionable_finding\`). @${REPO_OWNER} please apply the change manually, grant the required scope, or split the criterion into a maintainer follow-up. (\`${_na_marker}\`)"
+            "Substantive review failure on completed session \`${session_id}\` is **not resolvable by the autonomous dev agent**: the review classified every blocking finding as requiring a human or a privileged token the agent's scoped token lacks (e.g. a \`.github/workflows\` edit needs the \`workflows\` scope, or a CODEOWNERS / maintainer-owned change — [INV-92]).${_na_pat_sentence} Marking stalled — no \`dev-new\` will be dispatched (\`reason=non_actionable_finding\`). @${REPO_OWNER} please apply the change manually, grant the required scope, or split the criterion into a maintainer follow-up. (\`${_na_marker}\`)"
         fi
         mark_stalled "$issue_num"
         return 0
@@ -3085,6 +3094,23 @@ last_reviewed_head() {
     | jq -r '[.[].body | capture("Reviewed HEAD: `(?<sha>[0-9a-f]{7,40})`"; "g") | .sha] | last // empty'
 }
 
+# INV-134 (#488) D4: echoes the newest `inv92-matched-patterns:` marker's
+# space-separated pattern list posted by the review wrapper's non-actionable
+# findings comment (autonomous-review.sh), or empty if no such marker exists
+# on the issue. The dispatcher's own stall notices (Branch B′ below and
+# `_same_head_verdict_aware_recovery`'s dev-actionable=false branch) only ever
+# see the coarse `dev-actionable=false` trailer bit — this is the sole channel
+# carrying WHICH REVIEW_PROTECTED_PATHS pattern forced that classification, so
+# the stall comment can name it instead of pointing at [INV-92] alone. A
+# transport failure / no match yields empty — the caller's existing generic
+# wording is the fallback, never a new failure mode (D4's own spec).
+_inv92_matched_patterns() {
+  local issue_num="$1"
+  itp_list_comments "$issue_num" 2>/dev/null \
+    | jq -r '[.[].body | select(type == "string") | capture("<!-- inv92-matched-patterns: (?<p>[^\\n]*) -->"; "g") | .p] | last // empty' \
+    2>/dev/null
+}
+
 # [INV-85] (#274): returns 0 (true) if any issue comment carries the
 # bot-permission signature that proves the only fix is one the scoped agent
 # token cannot perform — a `Resource not accessible by integration` 403 in a
@@ -3592,8 +3618,14 @@ _same_head_verdict_aware_recovery() {
     if itp_list_comments "$issue_num" 2>/dev/null \
         | jq -r "[.[].body | select(contains(\"${_na_marker}\"))] | length" \
         2>/dev/null | grep -q '^0$'; then
+      # INV-134 (#488) D4: same marker-surfacing fallback as Branch B′ above.
+      local _na_patterns _na_pat_sentence=""
+      _na_patterns="$(_inv92_matched_patterns "$issue_num")"
+      if [ -n "$_na_patterns" ]; then
+        _na_pat_sentence=" Matched \`REVIEW_PROTECTED_PATHS\` pattern(s): ${_na_patterns}."
+      fi
       itp_post_comment "$issue_num" \
-        "PR ${pr_ref} HEAD \`${current_head}\` was reviewed with a FAILED verdict that classified every blocking finding as **not resolvable by the autonomous dev agent** (requires a human or a privileged token the agent's scoped token lacks, [INV-92]), and ${_cause_desc}. Marking stalled — no \`dev-new\` will be dispatched. @${REPO_OWNER} please apply the change manually. (\`${_na_marker}\`)"
+        "PR ${pr_ref} HEAD \`${current_head}\` was reviewed with a FAILED verdict that classified every blocking finding as **not resolvable by the autonomous dev agent** (requires a human or a privileged token the agent's scoped token lacks, [INV-92]), and ${_cause_desc}.${_na_pat_sentence} Marking stalled — no \`dev-new\` will be dispatched. @${REPO_OWNER} please apply the change manually. (\`${_na_marker}\`)"
     fi
     mark_stalled "$issue_num"
     return 0

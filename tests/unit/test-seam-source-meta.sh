@@ -112,6 +112,11 @@ note() { echo -e "  ${YEL}NOTE${NC}: $1"; }
 #     pattern as test-autonomous-review-verdict-via-helper.sh's own waiver above)
 #     are both mktemp-fixture vars this test authors inline — same shape as every
 #     other dynamic-source waiver in this list.
+#   - test-autonomous-review-inv134-matched-patterns.sh:dynamic-source: PERMANENT
+#     (#488). BLOCK_SLICE is a mktemp function-slice fixture (the INV-134 D4
+#     matched-patterns aggregation + comment-post block, `awk`-extracted from
+#     the wrapper) — same shape as test-autonomous-review-diffcap-wiring.sh's
+#     own waiver above.
 WAIVERS=(
   "test-issue-308-b3b4-chp-reads.sh:lib-review-e2e.sh:permanent — #308 AC4 FAIL-SOFT proof sources the lib with NO CHP seam on purpose"
   "test-autonomous-review-sequential-e2e.sh:lib-review-e2e.sh:owned by open PR #337 (adds sandbox seam repairs); remove waiver post-#337"
@@ -127,6 +132,7 @@ WAIVERS=(
   "test-w1d-ci-status-mergeable-parity.sh:dynamic-source:_W1D_LIB_DISPATCH is env-threaded from the harness's literal \$SCRIPTS/lib-dispatch.sh binding; the gh stub is defined in the SAME bash -c scope BEFORE the source (seam precedes source)"
   "test-lane-gc-p3-kill-paths.sh:dynamic-source:PGA_SLICE/KSW_SLICE are mktemp function-slice fixtures (_pid_or_group_alive/kill_stale_wrapper extracted from dispatch-local.sh)"
   "test-autonomous-review-diffcap-wiring.sh:dynamic-source:BLOCK_SLICE/_FN_SLICE are mktemp function-slice fixtures (the INV-124 diffcap block / build_review_prompt extracted from the wrapper)"
+  "test-autonomous-review-inv134-matched-patterns.sh:dynamic-source:BLOCK_SLICE is a mktemp function-slice fixture (the INV-134 D4 matched-patterns block extracted from the wrapper)"
 )
 is_waived() { # <harness> <lib-or-pseudo-lib>
   local h="$1" l="$2" e key rest elib

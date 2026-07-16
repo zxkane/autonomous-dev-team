@@ -2909,11 +2909,18 @@ declare -a AGENT_VERDICT_SOURCES=()
 # finding is dev-actionable; "false" only when EVERY blocking finding is
 # non-actionable.
 declare -a AGENT_DEV_ACTIONABLE=()
+# INV-134 (#488) D4: per-agent sorted/unique REVIEW_PROTECTED_PATHS pattern(s)
+# matched by this agent's blocking findings — a sibling of AGENT_DEV_ACTIONABLE,
+# computed from the SAME live `_art_json` for the SAME reason (the per-run
+# artifact dir is `rm -rf`'d before the emit site runs). Empty string when no
+# blocking finding of this agent matched a protected pattern.
+declare -a AGENT_MATCHED_PATTERNS=()
 for _i in "${!AGENT_NAMES[@]}"; do
   AGENT_VERDICTS+=("")        # filled in below
   AGENT_VERDICT_BODIES+=("")
   AGENT_VERDICT_SOURCES+=("")
   AGENT_DEV_ACTIONABLE+=("true")   # zero-regression default until derived below
+  AGENT_MATCHED_PATTERNS+=("")
 done
 
 # INV-78 (#233): the verdict-artifact channel — resolve verdicts from the typed
@@ -2983,6 +2990,12 @@ for _i in "${!AGENT_NAMES[@]}"; do
         # finding is non-actionable; "true" otherwise (incl. absent/legacy fields).
         if declare -F review_classify_artifact_dev_actionable >/dev/null 2>&1; then
           AGENT_DEV_ACTIONABLE[$_i]="$(review_classify_artifact_dev_actionable "$_art_json")"
+        fi
+        # INV-134 (#488) D4: stash this agent's matched protected-path pattern(s)
+        # from the SAME live `_art_json`, mirroring AGENT_DEV_ACTIONABLE above —
+        # the stall-notice diagnostics need the pattern text, not just the bit.
+        if declare -F review_classify_artifact_matched_patterns >/dev/null 2>&1; then
+          AGENT_MATCHED_PATTERNS[$_i]="$(review_classify_artifact_matched_patterns "$_art_json")"
         fi
         log "INV-78: resolved review agent '${AGENT_NAMES[$_i]}' verdict-source=artifact verdict=${_art_verdict} (path ${_art_path}) dev-actionable=${AGENT_DEV_ACTIONABLE[$_i]:-true}"
       else
@@ -4493,6 +4506,55 @@ else
     # No FAILing agent resolved an artifact (e.g. comment-only fallback) → fail-open.
     [[ "$_any_fail_seen" == "true" ]] || _AGG_DEV_ACTIONABLE="true"
     log "INV-92: aggregate dev-actionable=${_AGG_DEV_ACTIONABLE} for the substantive FAIL trailer (any-fail-seen=${_any_fail_seen})."
+
+    # INV-134 (#488) D4: when the aggregate derivation above forced
+    # dev-actionable=false, collect the sorted/unique matched
+    # REVIEW_PROTECTED_PATHS pattern(s) across every FAILing agent's
+    # AGENT_MATCHED_PATTERNS (a sibling of AGENT_DEV_ACTIONABLE) so the findings
+    # comment below can name WHICH pattern forced it — the dispatcher's own stall
+    # comment (lib-dispatch.sh) only ever sees the coarse trailer bit, never the
+    # per-finding path. Reached only when aggregate=false, which by construction
+    # means the OR-loop above never broke early — every FAILing agent's slot was
+    # visited — so a fresh pass here is safe and simple, not a re-derivation.
+    _AGG_MATCHED_PATTERNS=""
+    if [[ "$_AGG_DEV_ACTIONABLE" == "false" ]]; then
+      _agg_pat_tmp=""
+      for _i in "${!AGENT_NAMES[@]}"; do
+        [[ "${AGENT_VERDICTS[$_i]:-}" == "fail" ]] || continue
+        [[ -n "${AGENT_MATCHED_PATTERNS[$_i]:-}" ]] || continue
+        _agg_pat_tmp+="${AGENT_MATCHED_PATTERNS[$_i]}"$'\n'
+      done
+      [[ -n "$_agg_pat_tmp" ]] && _AGG_MATCHED_PATTERNS="$(printf '%s' "$_agg_pat_tmp" | sort -u)"
+    fi
+
+    # INV-134 (#488) D4: post the machine-readable marker comment NOW (rather
+    # than folding it into the already-posted aggregate verdict comment above,
+    # or deferring to a later branch that may `exit 0` early, e.g. the
+    # round-cap breaker below) — a dedicated, idempotent-per-round comment,
+    # mirroring how `emit_verdict_trailer` posts the routing trailer as its
+    # own separate comment rather than editing an earlier one. The dispatcher
+    # (lib-dispatch.sh) only ever reads the coarse `dev-actionable` trailer
+    # bit; this comment is the ONLY place the matched pattern text lives, so
+    # the dispatcher's stall notice greps for the `inv92-matched-patterns:`
+    # marker across issue comments when it needs to surface it.
+    if [[ -n "$_AGG_MATCHED_PATTERNS" ]]; then
+      # Read line-by-line into an array — NEVER word-split the raw string
+      # (an unquoted expansion would pathname-expand a glob pattern like
+      # `.github/workflows/**` against this checkout's real filesystem).
+      _agg_pat_arr=()
+      while IFS= read -r _agg_pat_line; do
+        [[ -n "$_agg_pat_line" ]] && _agg_pat_arr+=("$_agg_pat_line")
+      done <<<"$_AGG_MATCHED_PATTERNS"
+      _agg_pat_oneline="${_agg_pat_arr[*]}"
+      _agg_pat_list_md=""
+      for _agg_pat_line in "${_agg_pat_arr[@]}"; do
+        _agg_pat_list_md+="\`${_agg_pat_line}\`, "
+      done
+      _agg_pat_list_md="${_agg_pat_list_md%, }"
+      itp_post_comment "$ISSUE_NUMBER" \
+        "This substantive FAIL was classified **not dev-agent-actionable** ([INV-92]/[INV-134]): every blocking finding either matched a \`REVIEW_PROTECTED_PATHS\` pattern or was self-reported non-actionable by the agent. Matched protected-path pattern(s): ${_agg_pat_list_md}. If the dev agent's token can actually edit these paths in this deployment, adjust the \`REVIEW_PROTECTED_PATHS\` conf lever (or, for \`.github/workflows/**\` specifically under \`GH_AUTH_MODE=app\`, add \`workflows\` to \`AGENT_TOKEN_PERMISSIONS\` so the capability-aware default applies).
+<!-- inv92-matched-patterns: ${_agg_pat_oneline} -->" 2>/dev/null || true
+    fi
 
     # -----------------------------------------------------------------------
     # [#449] INV-127: review-round-cap escalation breaker.

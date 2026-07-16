@@ -65,6 +65,7 @@ _MOCK_ACQUIRE_RC=0
 _MOCK_LABEL_SWAP_RC=0
 _MOCK_DISPATCH_RC=0
 _MOCK_COMMENT_FETCH_RC=0        # 1 = itp_list_comments fails (rate-limit/auth/transport blip)
+_MOCK_MATCHED_PATTERNS_MARKER='' # INV-134 (#488) D4: inv92-matched-patterns marker text, if any
 
 _TRACE_FILE=""
 _rec() {
@@ -93,6 +94,10 @@ itp_list_comments() {
   [ "$_MOCK_SELF_HEAL_PRESENT" = "1" ] && body+=" self-heal-lost-session:${_MOCK_CURRENT_HEAD}"
   [ "$_MOCK_CRASHED_RETRY_PRESENT" = "1" ] && body+=" crashed-session-retry:${_MOCK_CURRENT_HEAD}"
   [ "$_MOCK_NONSUB_PRESENT" = "1" ] && body+=" self-heal-non-substantive:${_MOCK_CURRENT_HEAD}"
+  if [ -n "$_MOCK_MATCHED_PATTERNS_MARKER" ]; then
+    printf '%s\n' "[{\"body\":\"${body}\"},{\"body\":\"<!-- inv92-matched-patterns: ${_MOCK_MATCHED_PATTERNS_MARKER} -->\"}]"
+    return 0
+  fi
   printf '%s\n' "[{\"body\":\"${body}\"}]"
 }
 itp_post_comment()     { _rec itp_post_comment "$@"; }
@@ -206,6 +211,19 @@ assert_match "TC-466-VERDICT-002 mark_stalled fired" "^mark_stalled" "$(_trace_a
 assert_eq   "TC-466-VERDICT-002 ZERO dev-new" "0" "$(_trace_verbs | grep -c '^dispatch$')"
 assert_match "TC-466-VERDICT-002 posts crashed-session-non-actionable marker" "crashed-session-non-actionable:sha-A" "$(_trace_all)"
 assert_no_match "TC-466-VERDICT-002 NO stale-verdict park" "stale-verdict:" "$(_trace_all)"
+
+# ===========================================================================
+echo
+echo "=== TC-INV134-D4-10: same-HEAD dev-actionable=false surfaces the inv92-matched-patterns marker when present ==="
+# ===========================================================================
+_reset
+_MOCK_VERDICT='failed-substantive'; _MOCK_DEV_ACTIONABLE='false'
+_MOCK_MATCHED_PATTERNS_MARKER='.github/workflows/**'
+handle_pending_dev_pr_exists 99
+rc=$?
+assert_eq   "TC-INV134-D4-10 returns 0" "0" "$rc"
+assert_match "TC-INV134-D4-10 mark_stalled fired" "^mark_stalled" "$(_trace_all)"
+assert_match "TC-INV134-D4-10 notice names the matched pattern" "Matched .REVIEW_PROTECTED_PATHS. pattern\(s\): \.github/workflows/\*\*" "$(_trace_all)"
 
 # ===========================================================================
 echo

@@ -141,7 +141,7 @@ _LIVENESS_GRAMMARS_JSON=$(cat <<'_LIVENESS_GRAMMARS_JSON_EOF'
   },
   {
     "name": "non-actionable-finding:",
-    "re": "^Substantive review failure on completed session `[^`\\n]+` is \\*\\*not resolvable by the autonomous dev agent\\*\\*: the review classified every blocking finding as requiring a human or a privileged token the agent's scoped token lacks \\(e\\.g\\. a `\\.github/workflows` edit needs the `workflows` scope, or a CODEOWNERS / maintainer-owned change — \\[INV-92\\]\\)\\. Marking stalled — no `dev-new` will be dispatched \\(`reason=non_actionable_finding`\\)\\. @[a-zA-Z0-9_-]+ please apply the change manually, grant the required scope, or split the criterion into a maintainer follow-up\\. \\(`non-actionable-finding:[^`\\n]*`\\)$",
+    "re": "^Substantive review failure on completed session `[^`\\n]+` is \\*\\*not resolvable by the autonomous dev agent\\*\\*: the review classified every blocking finding as requiring a human or a privileged token the agent's scoped token lacks \\(e\\.g\\. a `\\.github/workflows` edit needs the `workflows` scope, or a CODEOWNERS / maintainer-owned change — \\[INV-92\\]\\)\\.( Matched `REVIEW_PROTECTED_PATHS` pattern\\(s\\): [^\\n]*\\.)? Marking stalled — no `dev-new` will be dispatched \\(`reason=non_actionable_finding`\\)\\. @[a-zA-Z0-9_-]+ please apply the change manually, grant the required scope, or split the criterion into a maintainer follow-up\\. \\(`non-actionable-finding:[^`\\n]*`\\)$",
     "digest": true
   },
   {
@@ -161,7 +161,7 @@ _LIVENESS_GRAMMARS_JSON=$(cat <<'_LIVENESS_GRAMMARS_JSON_EOF'
   },
   {
     "name": "crashed-session-non-actionable:",
-    "re": "^PR (#[0-9]+|\\(number unknown\\)) HEAD `[^`\\n]+` was reviewed with a FAILED verdict that classified every blocking finding as \\*\\*not resolvable by the autonomous dev agent\\*\\* \\(requires a human or a privileged token the agent's scoped token lacks, \\[INV-92\\]\\), and a `Dev Session ID:` was resolved for the prior dev session, but its completion could not be confirmed \\(a non-terminal stop reason such as `api_error`, a non-claude dev CLI, or an unreadable session log\\)\\. Marking stalled — no `dev-new` will be dispatched\\. @[a-zA-Z0-9_-]+ please apply the change manually\\. \\(`crashed-session-non-actionable:[^`\\n]*`\\)$",
+    "re": "^PR (#[0-9]+|\\(number unknown\\)) HEAD `[^`\\n]+` was reviewed with a FAILED verdict that classified every blocking finding as \\*\\*not resolvable by the autonomous dev agent\\*\\* \\(requires a human or a privileged token the agent's scoped token lacks, \\[INV-92\\]\\), and a `Dev Session ID:` was resolved for the prior dev session, but its completion could not be confirmed \\(a non-terminal stop reason such as `api_error`, a non-claude dev CLI, or an unreadable session log\\)\\.( Matched `REVIEW_PROTECTED_PATHS` pattern\\(s\\): [^\\n]*\\.)? Marking stalled — no `dev-new` will be dispatched\\. @[a-zA-Z0-9_-]+ please apply the change manually\\. \\(`crashed-session-non-actionable:[^`\\n]*`\\)$",
     "digest": true
   },
   {

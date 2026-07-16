@@ -371,6 +371,309 @@ assert_eq "jq still REJECTS an unknown finding key (additionalProperties:false i
 
 # ---------------------------------------------------------------------------
 echo ""
+echo "=== INV-134 (#488) D1: capability-aware DEFAULT derivation ==="
+# ---------------------------------------------------------------------------
+# unset REVIEW_PROTECTED_PATHS in every case below. Re-source in a subshell per
+# case so the top-of-file default assignment re-evaluates against the case's env.
+
+# TC-INV134-D1-01: App mode + workflows scope present ⇒ default OMITS workflows.
+( unset REVIEW_PROTECTED_PATHS
+  export GH_AUTH_MODE=app
+  export AGENT_TOKEN_PERMISSIONS='{"contents":"write","workflows":"write"}'
+  source "$CLASSIFY_LIB"
+  echo "list=[$REVIEW_PROTECTED_PATHS]"
+  review_path_is_protected ".github/workflows/ci.yml" && echo "wf:0" || echo "wf:1"
+  review_path_is_protected "CODEOWNERS" && echo "co:0" || echo "co:1"
+) > /tmp/d1-01-$$.out 2>&1
+assert_eq "TC-INV134-D1-01 default list omits workflows" "list=[CODEOWNERS .github/CODEOWNERS]" "$(grep '^list=' /tmp/d1-01-$$.out)"
+assert_eq "TC-INV134-D1-01 workflows finding NOT protected" "wf:1" "$(grep -o 'wf:[01]' /tmp/d1-01-$$.out)"
+assert_eq "TC-INV134-D1-01 CODEOWNERS still protected" "co:0" "$(grep -o 'co:[01]' /tmp/d1-01-$$.out)"
+rm -f /tmp/d1-01-$$.out
+
+# TC-INV134-D1-02: App mode, scope absent (default perms) ⇒ conservative default.
+( unset REVIEW_PROTECTED_PATHS
+  export GH_AUTH_MODE=app
+  export AGENT_TOKEN_PERMISSIONS='{"contents":"write","issues":"write","pull_requests":"read"}'
+  source "$CLASSIFY_LIB"
+  echo "list=[$REVIEW_PROTECTED_PATHS]"
+) > /tmp/d1-02-$$.out 2>&1
+assert_eq "TC-INV134-D1-02 scope absent ⇒ conservative default" \
+  "list=[.github/workflows/** CODEOWNERS .github/CODEOWNERS]" "$(grep '^list=' /tmp/d1-02-$$.out)"
+rm -f /tmp/d1-02-$$.out
+
+# TC-INV134-D1-03: Token mode + workflows key present in the var (mode gate) ⇒
+# conservative default retained (capability is not knowable outside App mode).
+( unset REVIEW_PROTECTED_PATHS
+  export GH_AUTH_MODE=token
+  export AGENT_TOKEN_PERMISSIONS='{"contents":"write","workflows":"write"}'
+  source "$CLASSIFY_LIB"
+  echo "list=[$REVIEW_PROTECTED_PATHS]"
+) > /tmp/d1-03-$$.out 2>&1
+assert_eq "TC-INV134-D1-03 token mode ⇒ conservative default (mode gate)" \
+  "list=[.github/workflows/** CODEOWNERS .github/CODEOWNERS]" "$(grep '^list=' /tmp/d1-03-$$.out)"
+rm -f /tmp/d1-03-$$.out
+
+# TC-INV134-D1-04: App mode, AGENT_TOKEN_PERMISSIONS empty ⇒ fail-closed.
+( unset REVIEW_PROTECTED_PATHS
+  export GH_AUTH_MODE=app
+  export AGENT_TOKEN_PERMISSIONS=''
+  source "$CLASSIFY_LIB"
+  echo "list=[$REVIEW_PROTECTED_PATHS]"
+) > /tmp/d1-04-$$.out 2>&1
+assert_eq "TC-INV134-D1-04 empty perms ⇒ fail-closed default" \
+  "list=[.github/workflows/** CODEOWNERS .github/CODEOWNERS]" "$(grep '^list=' /tmp/d1-04-$$.out)"
+rm -f /tmp/d1-04-$$.out
+
+# TC-INV134-D1-05: App mode, malformed JSON ⇒ fail-closed.
+( unset REVIEW_PROTECTED_PATHS
+  export GH_AUTH_MODE=app
+  export AGENT_TOKEN_PERMISSIONS='not json {'
+  source "$CLASSIFY_LIB"
+  echo "list=[$REVIEW_PROTECTED_PATHS]"
+) > /tmp/d1-05-$$.out 2>&1
+assert_eq "TC-INV134-D1-05 malformed perms ⇒ fail-closed default" \
+  "list=[.github/workflows/** CODEOWNERS .github/CODEOWNERS]" "$(grep '^list=' /tmp/d1-05-$$.out)"
+rm -f /tmp/d1-05-$$.out
+
+# TC-INV134-D1-06: App mode, AGENT_TOKEN_PERMISSIONS unset ⇒ fail-closed.
+( unset REVIEW_PROTECTED_PATHS AGENT_TOKEN_PERMISSIONS
+  export GH_AUTH_MODE=app
+  source "$CLASSIFY_LIB"
+  echo "list=[$REVIEW_PROTECTED_PATHS]"
+) > /tmp/d1-06-$$.out 2>&1
+assert_eq "TC-INV134-D1-06 unset perms ⇒ fail-closed default" \
+  "list=[.github/workflows/** CODEOWNERS .github/CODEOWNERS]" "$(grep '^list=' /tmp/d1-06-$$.out)"
+rm -f /tmp/d1-06-$$.out
+
+# TC-INV134-D1-07: GH_AUTH_MODE unset (GitLab / no App concept) + workflows key
+# present ⇒ conservative default (mode gate — GitLab has no App equivalent).
+( unset REVIEW_PROTECTED_PATHS GH_AUTH_MODE
+  export AGENT_TOKEN_PERMISSIONS='{"contents":"write","workflows":"write"}'
+  source "$CLASSIFY_LIB"
+  echo "list=[$REVIEW_PROTECTED_PATHS]"
+) > /tmp/d1-07-$$.out 2>&1
+assert_eq "TC-INV134-D1-07 GH_AUTH_MODE unset ⇒ conservative default" \
+  "list=[.github/workflows/** CODEOWNERS .github/CODEOWNERS]" "$(grep '^list=' /tmp/d1-07-$$.out)"
+rm -f /tmp/d1-07-$$.out
+
+echo "--- explicit REVIEW_PROTECTED_PATHS never rewritten (either direction) ---"
+
+# TC-INV134-D1-09: explicit empty + App mode + scope present ⇒ still "" (not
+# re-populated with CODEOWNERS just because workflows would be omitted).
+( export REVIEW_PROTECTED_PATHS=""
+  export GH_AUTH_MODE=app
+  export AGENT_TOKEN_PERMISSIONS='{"contents":"write","workflows":"write"}'
+  source "$CLASSIFY_LIB"
+  echo "list=[$REVIEW_PROTECTED_PATHS]"
+) > /tmp/d1-09-$$.out 2>&1
+assert_eq "TC-INV134-D1-09 explicit empty preserved under capability-unlocked config" \
+  "list=[]" "$(grep '^list=' /tmp/d1-09-$$.out)"
+rm -f /tmp/d1-09-$$.out
+
+# TC-INV134-D1-10: explicit empty + scope absent ⇒ still "".
+( export REVIEW_PROTECTED_PATHS=""
+  export GH_AUTH_MODE=app
+  export AGENT_TOKEN_PERMISSIONS='{"contents":"write"}'
+  source "$CLASSIFY_LIB"
+  echo "list=[$REVIEW_PROTECTED_PATHS]"
+) > /tmp/d1-10-$$.out 2>&1
+assert_eq "TC-INV134-D1-10 explicit empty preserved under scope-absent config" \
+  "list=[]" "$(grep '^list=' /tmp/d1-10-$$.out)"
+rm -f /tmp/d1-10-$$.out
+
+# TC-INV134-D1-11: explicit custom list + App mode + scope present ⇒ preserved
+# verbatim (workflows is not re-added just because the operator's list omits it).
+( export REVIEW_PROTECTED_PATHS="infra/**"
+  export GH_AUTH_MODE=app
+  export AGENT_TOKEN_PERMISSIONS='{"contents":"write","workflows":"write"}'
+  source "$CLASSIFY_LIB"
+  echo "list=[$REVIEW_PROTECTED_PATHS]"
+) > /tmp/d1-11-$$.out 2>&1
+assert_eq "TC-INV134-D1-11 explicit custom list preserved verbatim" \
+  "list=[infra/**]" "$(grep '^list=' /tmp/d1-11-$$.out)"
+rm -f /tmp/d1-11-$$.out
+
+# TC-INV134-D1-12: explicit list EXPLICITLY includes .github/workflows/** + App
+# mode + scope present ⇒ still preserved verbatim (the capability check never
+# strips an explicitly-listed workflow pattern).
+( export REVIEW_PROTECTED_PATHS=".github/workflows/** infra/**"
+  export GH_AUTH_MODE=app
+  export AGENT_TOKEN_PERMISSIONS='{"contents":"write","workflows":"write"}'
+  source "$CLASSIFY_LIB"
+  echo "list=[$REVIEW_PROTECTED_PATHS]"
+  review_path_is_protected ".github/workflows/ci.yml" && echo "wf:0" || echo "wf:1"
+) > /tmp/d1-12-$$.out 2>&1
+assert_eq "TC-INV134-D1-12 explicit workflows pattern preserved verbatim" \
+  "list=[.github/workflows/** infra/**]" "$(grep '^list=' /tmp/d1-12-$$.out)"
+assert_eq "TC-INV134-D1-12 explicit workflows pattern still protected" \
+  "wf:0" "$(grep -o 'wf:[01]' /tmp/d1-12-$$.out)"
+rm -f /tmp/d1-12-$$.out
+
+# TC-INV134-D1-13: an explicit value (including "") never invokes the
+# capability probe at all — `${VAR-$(...)}` short-circuits the command
+# substitution. Prove it by shadowing agent_token_has_workflow_scope with a
+# call-counting stub AFTER sourcing the lib (so the real default assignment at
+# source-time already ran), then re-run the default assignment line manually
+# with the explicit var set — the stub must see zero calls.
+( export REVIEW_PROTECTED_PATHS=""
+  source "$CLASSIFY_LIB"
+  _CALLS=0
+  agent_token_has_workflow_scope() { _CALLS=$((_CALLS + 1)); return 0; }
+  export GH_AUTH_MODE=app
+  # Re-run the exact default-assignment expression the lib uses at source time.
+  REVIEW_PROTECTED_PATHS="${REVIEW_PROTECTED_PATHS-$(_review_protected_paths_default_list)}"
+  echo "calls=${_CALLS}"
+) > /tmp/d1-13-$$.out 2>&1
+assert_eq "TC-INV134-D1-13 explicit value short-circuits the capability probe" \
+  "calls=0" "$(grep '^calls=' /tmp/d1-13-$$.out)"
+rm -f /tmp/d1-13-$$.out
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== INV-134 (#488) D2: prompt/derivation consistency ==="
+# ---------------------------------------------------------------------------
+
+# TC-INV134-D2-01/03: App + scope present ⇒ prompt glob list omits workflows,
+# and the requires_privileged_token note states scope=true for this config.
+PR_D2_01="$( unset REVIEW_PROTECTED_PATHS
+  GH_AUTH_MODE=app AGENT_TOKEN_PERMISSIONS='{"contents":"write","workflows":"write"}' \
+  bash -c 'source "$1"; review_protected_paths_prompt_rule' _ "$CLASSIFY_LIB" )"
+case "$PR_D2_01" in
+  *".github/workflows/**"*) echo "  FAIL: TC-INV134-D2-01 prompt glob list should OMIT workflows under capability-unlocked config"; FAIL=$((FAIL+1));;
+  *) echo "  PASS: TC-INV134-D2-01 prompt glob list omits workflows under capability-unlocked config"; PASS=$((PASS+1));;
+esac
+case "$PR_D2_01" in
+  *'`workflows` scope is'*'`true`'*) echo "  PASS: TC-INV134-D2-03 prompt states workflows scope=true for this config"; PASS=$((PASS+1));;
+  *) echo "  FAIL: TC-INV134-D2-03 prompt should state workflows scope=true"; echo "      got: $PR_D2_01"; FAIL=$((FAIL+1));;
+esac
+case "$PR_D2_01" in
+  *"it does by default"*) echo "  FAIL: TC-INV134-D2-03b prompt still hardcodes the retired \"it does by default\" claim"; FAIL=$((FAIL+1));;
+  *) echo "  PASS: TC-INV134-D2-03b prompt no longer hardcodes \"it does by default\""; PASS=$((PASS+1));;
+esac
+
+# TC-INV134-D2-02/04: App, scope absent ⇒ prompt glob list KEEPS workflows, and
+# the note states scope=false.
+PR_D2_02="$( unset REVIEW_PROTECTED_PATHS
+  GH_AUTH_MODE=app AGENT_TOKEN_PERMISSIONS='{"contents":"write"}' \
+  bash -c 'source "$1"; review_protected_paths_prompt_rule' _ "$CLASSIFY_LIB" )"
+case "$PR_D2_02" in
+  *".github/workflows/**"*) echo "  PASS: TC-INV134-D2-02 prompt glob list keeps workflows when scope absent"; PASS=$((PASS+1));;
+  *) echo "  FAIL: TC-INV134-D2-02 prompt glob list should keep workflows"; echo "      got: $PR_D2_02"; FAIL=$((FAIL+1));;
+esac
+case "$PR_D2_02" in
+  *'`workflows` scope is'*'`false`'*) echo "  PASS: TC-INV134-D2-04 prompt states workflows scope=false for this config"; PASS=$((PASS+1));;
+  *) echo "  FAIL: TC-INV134-D2-04 prompt should state workflows scope=false"; echo "      got: $PR_D2_02"; FAIL=$((FAIL+1));;
+esac
+
+# TC-INV134-D2-05: token mode + workflows key present (mode gate) ⇒ prompt
+# glob list still keeps workflows (mirrors D1-03) and note reads scope=false.
+PR_D2_05="$( unset REVIEW_PROTECTED_PATHS
+  GH_AUTH_MODE=token AGENT_TOKEN_PERMISSIONS='{"contents":"write","workflows":"write"}' \
+  bash -c 'source "$1"; review_protected_paths_prompt_rule' _ "$CLASSIFY_LIB" )"
+case "$PR_D2_05" in
+  *".github/workflows/**"*) echo "  PASS: TC-INV134-D2-05 token mode ⇒ prompt glob list keeps workflows (mode gate)"; PASS=$((PASS+1));;
+  *) echo "  FAIL: TC-INV134-D2-05 token mode should keep workflows in the glob list"; echo "      got: $PR_D2_05"; FAIL=$((FAIL+1));;
+esac
+case "$PR_D2_05" in
+  *'`workflows` scope is'*'`false`'*) echo "  PASS: TC-INV134-D2-05b token mode ⇒ note reads scope=false"; PASS=$((PASS+1));;
+  *) echo "  FAIL: TC-INV134-D2-05b token mode note should read scope=false"; echo "      got: $PR_D2_05"; FAIL=$((FAIL+1));;
+esac
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== INV-134 (#488) D3: anti-forge preservation across capability outcomes ==="
+# ---------------------------------------------------------------------------
+
+# TC-INV134-D3-01: App + scope present ⇒ workflows is NOT in the default
+# protected list, so a `.github/workflows/ci.yml` finding asserting
+# actionable=true is genuinely actionable (nothing to override).
+( unset REVIEW_PROTECTED_PATHS
+  export GH_AUTH_MODE=app
+  export AGENT_TOKEN_PERMISSIONS='{"contents":"write","workflows":"write"}'
+  source "$CLASSIFY_LIB"
+  review_classify_artifact_dev_actionable \
+    '{"verdict":"FAIL","blockingFindings":[{"title":"wf","file":".github/workflows/ci.yml","actionable_by_dev_agent":true}]}'
+) > /tmp/d3-01-$$.out 2>&1
+assert_eq "TC-INV134-D3-01 capability-unlocked workflows finding stays actionable" \
+  "true" "$(cat /tmp/d3-01-$$.out)"
+rm -f /tmp/d3-01-$$.out
+
+# TC-INV134-D3-02: App, scope absent ⇒ workflows IS in the default protected
+# list, so the SAME forged actionable=true is still overridden to false.
+( unset REVIEW_PROTECTED_PATHS
+  export GH_AUTH_MODE=app
+  export AGENT_TOKEN_PERMISSIONS='{"contents":"write"}'
+  source "$CLASSIFY_LIB"
+  review_classify_artifact_dev_actionable \
+    '{"verdict":"FAIL","blockingFindings":[{"title":"wf","file":".github/workflows/ci.yml","actionable_by_dev_agent":true}]}'
+) > /tmp/d3-02-$$.out 2>&1
+assert_eq "TC-INV134-D3-02 scope-absent forged workflows finding still overridden false" \
+  "false" "$(cat /tmp/d3-02-$$.out)"
+rm -f /tmp/d3-02-$$.out
+
+# TC-INV134-D3-03: any config, agent-asserted false on a non-protected path is
+# never promoted to true (regression, already covered above but re-pinned
+# under the capability-unlocked config specifically).
+( unset REVIEW_PROTECTED_PATHS
+  export GH_AUTH_MODE=app
+  export AGENT_TOKEN_PERMISSIONS='{"contents":"write","workflows":"write"}'
+  source "$CLASSIFY_LIB"
+  review_classify_artifact_dev_actionable \
+    '{"verdict":"FAIL","blockingFindings":[{"title":"code","file":"src/foo.ts","actionable_by_dev_agent":false}]}'
+) > /tmp/d3-03-$$.out 2>&1
+assert_eq "TC-INV134-D3-03 agent-asserted false on non-protected path never promoted" \
+  "false" "$(cat /tmp/d3-03-$$.out)"
+rm -f /tmp/d3-03-$$.out
+
+# TC-INV134-D3-04: App + scope present ⇒ CODEOWNERS finding forged true is
+# STILL overridden false (CODEOWNERS protected in every config).
+( unset REVIEW_PROTECTED_PATHS
+  export GH_AUTH_MODE=app
+  export AGENT_TOKEN_PERMISSIONS='{"contents":"write","workflows":"write"}'
+  source "$CLASSIFY_LIB"
+  review_classify_artifact_dev_actionable \
+    '{"verdict":"FAIL","blockingFindings":[{"title":"owners","file":"CODEOWNERS","actionable_by_dev_agent":true}]}'
+) > /tmp/d3-04-$$.out 2>&1
+assert_eq "TC-INV134-D3-04 CODEOWNERS forged true still overridden false" \
+  "false" "$(cat /tmp/d3-04-$$.out)"
+rm -f /tmp/d3-04-$$.out
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== INV-134 (#488) D4: review_classify_artifact_matched_patterns ==="
+# ---------------------------------------------------------------------------
+( unset REVIEW_PROTECTED_PATHS AGENT_TOKEN_PERMISSIONS GH_AUTH_MODE
+  source "$CLASSIFY_LIB"
+
+  # TC-INV134-D4-01: multiple findings, mixed protected/non-protected ⇒ sorted
+  # unique matched patterns.
+  J_MULTI='{"verdict":"FAIL","blockingFindings":[{"title":"a","file":".github/workflows/ci.yml"},{"title":"b","file":"CODEOWNERS"},{"title":"c","file":"src/foo.ts"}]}'
+  echo "d4-01=[$(review_classify_artifact_matched_patterns "$J_MULTI" | tr '\n' ',')]"
+
+  # TC-INV134-D4-02: no protected match ⇒ empty.
+  J_NONE='{"verdict":"FAIL","blockingFindings":[{"title":"c","file":"src/foo.ts"}]}'
+  echo "d4-02=[$(review_classify_artifact_matched_patterns "$J_NONE" | tr '\n' ',')]"
+
+  # TC-INV134-D4-03: non-JSON input ⇒ empty (fail-empty).
+  echo "d4-03=[$(review_classify_artifact_matched_patterns "not json at all" | tr '\n' ',')]"
+
+  # TC-INV134-D4-04: two findings both matching the SAME pattern ⇒ deduped
+  # single entry.
+  J_DUP='{"verdict":"FAIL","blockingFindings":[{"title":"a","file":".github/workflows/ci.yml"},{"title":"b","file":".github/workflows/deploy.yml"}]}'
+  echo "d4-04=[$(review_classify_artifact_matched_patterns "$J_DUP" | tr '\n' ',')]"
+) > /tmp/d4-$$.out 2>&1
+assert_eq "TC-INV134-D4-01 multi-finding sorted unique matched patterns" \
+  "d4-01=[.github/workflows/**,CODEOWNERS,]" "$(grep '^d4-01=' /tmp/d4-$$.out)"
+assert_eq "TC-INV134-D4-02 no protected match ⇒ empty" \
+  "d4-02=[]" "$(grep '^d4-02=' /tmp/d4-$$.out)"
+assert_eq "TC-INV134-D4-03 non-JSON input ⇒ empty (fail-empty)" \
+  "d4-03=[]" "$(grep '^d4-03=' /tmp/d4-$$.out)"
+assert_eq "TC-INV134-D4-04 duplicate matches deduped to one entry" \
+  "d4-04=[.github/workflows/**,]" "$(grep '^d4-04=' /tmp/d4-$$.out)"
+rm -f /tmp/d4-$$.out
+
+# ---------------------------------------------------------------------------
+echo ""
 echo "=== Summary ==="
 echo "  PASS: $PASS"
 echo "  FAIL: $FAIL"
