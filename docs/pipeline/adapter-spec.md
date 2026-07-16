@@ -483,6 +483,24 @@ pipeline that ultimately lands in `/tmp/agent-*-issue-N.log` — anything it
 alters corrupts the log every downstream consumer (`is_session_completed`,
 `metrics_parse_tokens`, the remote probe, an operator `tail -f`) reads.
 
+**R3 amendment — bounded EAGAIN retry (issue #508).** The wrapper's own
+stdout (`exec > >(tee -a run.log)`) is the SAME open file description the
+Claude CLI (Node.js) inherits as its stderr, and Node's `O_NONBLOCK` flag on
+that shared pipe can make the recorder's own write get transient `EAGAIN`
+once the pipe buffer is momentarily full — bash's `printf` does not retry
+`EAGAIN` on its own. `_agent_progress_write_retry` (`lib-agent.sh`) closes
+this gap: both `printf` sites in the read loop go through it instead of a
+bare `printf`, retrying a failed `PIPE_BUF`-sized write slice for up to ~2s
+before giving up. This does not weaken R3 — the byte-identical contract still
+holds for every write that lands within the retry budget (`tee` always
+drains, so a `SIGPIPE`-free EAGAIN is transient by construction). The ONLY
+carve-out is bound exhaustion (a reader that stalls, not dies, for the full
+~2s): that record is dropped with exactly one best-effort stderr diagnostic,
+never a silent drop and never an unbounded hang. See
+[INV-135](invariants.md#inv-135-the-agent-progress-lease-is-a-producer-only-signal-refreshed-on-launch-and-per-complete-output-record-never-by-the-heartbeat)
+for the full rationale and the atomic-`PIPE_BUF`-slicing mechanics (why a
+naive whole-string retry would risk resending already-delivered bytes).
+
 **Clause R4 (exit-status transparency).** The recorder's own exit status
 (always `0`) **MUST NOT** be read by any caller. Every call site appends the
 recorder strictly AFTER the CLI's own `_run_with_timeout` stage (and after any

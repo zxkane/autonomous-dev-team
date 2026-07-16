@@ -1305,6 +1305,61 @@ _agent_progress_cleanup() {
   return 0
 }
 
+# _agent_progress_write_retry <bytes> — write raw bytes to fd 1 with a
+# bounded EAGAIN retry (issue #508). The wrapper's stdout is
+# `exec > >(tee -a run.log)`, the SAME open file description the Claude CLI
+# (Node.js) inherits as its own stderr; Node sets O_NONBLOCK on that shared
+# pipe (the flag lives on the open file description, not per-fd), so once
+# Node's own writes fill the pipe buffer this recorder's `printf` can get
+# EAGAIN and — bash `printf` does not retry EAGAIN itself — silently drop the
+# record. `tee` is a fast, always-draining reader, so EAGAIN here is
+# transient by construction; retrying the write is correct. A genuinely dead
+# reader raises SIGPIPE/EPIPE (not EAGAIN) and is unaffected by this loop.
+#
+# Bytes ALREADY accepted by a partial write() must never be resent — bash's
+# printf can itself return a short count before erroring (observed: an
+# 8000-byte `printf '%s'` into a pipe with ~4096-6000 bytes of room writes
+# exactly one 4096-byte chunk via its own internal write() then fails EAGAIN
+# on the remainder; a sub-PIPE_BUF write is atomic and either fully lands or
+# is fully rejected). Since bash exposes no return value for "how many bytes
+# did printf actually write", this helper writes fixed PIPE_BUF-sized (4096)
+# slices in a loop instead of one `printf` call for the whole string — each
+# slice attempt is retried on EAGAIN, but a slice that reports success is
+# NEVER re-sent, so no byte is ever duplicated. `LC_ALL=C` makes `${#s}` and
+# `${s:off:len}` operate on raw bytes (not multibyte characters), so a slice
+# boundary landing mid-UTF-8-codepoint still round-trips byte-for-byte.
+_agent_progress_write_retry() {
+  local LC_ALL=C
+  local data="$1" total wrote=0 off=0 chunk=4096 take piece attempts
+  total=${#data}
+  [[ "$total" -eq 0 ]] && return 0
+  while (( off < total )); do
+    take=$(( total - off < chunk ? total - off : chunk ))
+    piece="${data:off:take}"
+    attempts=0
+    while :; do
+      if printf '%s' "$piece" 2>/dev/null; then
+        off=$(( off + take ))
+        wrote=$(( wrote + take ))
+        break
+      fi
+      attempts=$(( attempts + 1 ))
+      # ~2s total budget per slice (40 * 0.05s), matches the issue's
+      # "bounded total (e.g. ~2s worth)" guidance. A dead reader would have
+      # already raised SIGPIPE/EPIPE (fatal, not looped here) rather than
+      # EAGAIN, so this bound only ever protects against a pathological
+      # stall in an otherwise-live reader.
+      if (( attempts >= 40 )); then
+        printf 'lib-agent.sh: _agent_progress_recorder: dropping output record (%d of %d bytes written) after %d retries — write error: Resource temporarily unavailable\n' \
+          "$wrote" "$total" "$attempts" >&2 || true
+        return 1
+      fi
+      sleep 0.05
+    done
+  done
+  return 0
+}
+
 # _agent_progress_recorder <framing> — shared pass-through progress recorder
 # (R2/R3), composed into every dev launch path's pipeline. Streams stdin to
 # stdout with NO buffering/modification (byte-identical, including a final
@@ -1363,9 +1418,14 @@ _agent_progress_recorder() {
       break
     fi
     if [[ $rc -eq 0 ]]; then
-      printf '%s\n' "$line"
+      # `|| true`: a non-zero return here means retry-bound exhaustion (the
+      # record was dropped after the diagnostic below already fired) — never
+      # let that abort the whole read loop under a caller's `set -e`, the
+      # same rationale as the `read -r line || rc=$?` guard above.
+      _agent_progress_write_retry "$line
+" || true
     else
-      printf '%s' "$line"
+      _agent_progress_write_retry "$line" || true
     fi
     # A complete non-empty output record: under "line" framing every non-empty
     # line counts; under "json" framing only a line that is a COMPLETE JSON

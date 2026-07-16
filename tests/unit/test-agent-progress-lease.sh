@@ -16,11 +16,26 @@
 #   - R4: the Claude stream-json migration does not break the three existing
 #     consumers of the final `{"type":"result",...}` log line.
 #
+# TC-LEASE-024..027 (issue #508): the recorder's shared-nonblocking-pipe
+# EAGAIN hazard — the wrapper's `exec > >(tee -a run.log)` stdout is the SAME
+# open file description the Claude CLI (Node.js) inherits as its stderr, and
+# Node's O_NONBLOCK flag on that shared pipe can make the recorder's own
+# printf fail transiently. Driven through a REAL O_NONBLOCK pipe via a
+# python3 fcntl helper with a stalling/never-draining reader (skipped if
+# python3 is unavailable): byte-identical passthrough (checksum + line count
+# + the no-trailing-newline final line) under real EAGAIN pressure, zero
+# write-error diagnostics for the transient case, bounded-retry exhaustion
+# completing instead of hanging with exactly one diagnostic, and the
+# zero-AGENT_PROGRESS_FILE fast path staying a byte-identical bare `cat`
+# under the same pressure.
+#
 # Strategy: source lib-agent.sh (+ lib-dispatch.sh / lib-metrics.sh where
 # needed) in sandboxed subshells with stub CLIs on PATH, mirroring
 # test-lib-agent-codex.sh / test-lib-agent-agy.sh. No real sleeps — a fake
 # `date` stub or explicit epoch arithmetic stands in for a frozen clock where
-# ordering matters.
+# ordering matters (except TC-LEASE-024..027's pipe-pressure harness, which
+# needs real wall-clock timing to force genuine EAGAIN and to prove the
+# bounded-retry loop does not hang).
 #
 # Run: bash tests/unit/test-agent-progress-lease.sh
 
@@ -606,6 +621,265 @@ for code in 0 124 137 143; do
   )
   assert_eq "TC-LEASE-016 exit code $code propagates through the recorder (PIPESTATUS)" "$code" "$rc"
 done
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-LEASE-024..027: EAGAIN on the shared nonblocking pipe (issue #508) ==="
+# ---------------------------------------------------------------------------
+# Root cause: the wrapper's stdout is `exec > >(tee -a run.log)`, the SAME
+# open file description the Claude CLI (Node.js) inherits as its stderr.
+# Node sets O_NONBLOCK on that shared pipe (the flag lives on the open file
+# description, not per-fd), so once Node's own writes fill the pipe buffer
+# this recorder's underlying `printf` can get EAGAIN — and bash's printf does
+# not retry EAGAIN itself, silently dropping the record. These tests drive
+# the REAL recorder through a REAL O_NONBLOCK pipe (via a python3 fcntl
+# helper, per the issue's mandated repro shape) with a reader that stalls
+# long enough to force genuine EAGAIN, then drains slowly.
+_sha() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    shasum -a 256 "$1" | awk '{print $1}'
+  fi
+}
+
+HAVE_PY3=0
+command -v python3 >/dev/null 2>&1 && HAVE_PY3=1
+
+if [[ "$HAVE_PY3" -eq 1 ]]; then
+  PY_DRIVER="$TMPROOT/drive_recorder.py"
+  cat > "$PY_DRIVER" <<'PYEOF'
+# Drives a child command's stdout through a pipe whose write end is put into
+# O_NONBLOCK mode. Phase 1 stalls WITHOUT reading at all for <stall_seconds>
+# so the 64KB pipe buffer fills and the child's own writes start hitting
+# real EAGAIN (mirrors the issue's "helper has set O_NONBLOCK ... reader
+# drains slowly" repro shape). Phase 2 drains slowly in small chunks until
+# the child's stdout closes.
+#   drive_recorder.py <out_file> <stall_seconds> -- <cmd...>
+import os, sys, fcntl, time
+
+args = sys.argv[1:]
+sep = args.index('--')
+out_path = args[0]
+stall_seconds = float(args[1])
+cmd = args[sep + 1:]
+
+r, w = os.pipe()
+fl = fcntl.fcntl(w, fcntl.F_GETFL)
+fcntl.fcntl(w, fcntl.F_SETFL, fl | os.O_NONBLOCK)
+
+pid = os.fork()
+if pid == 0:
+    os.close(r)
+    os.dup2(w, 1)
+    os.close(w)
+    os.execvp(cmd[0], cmd)
+    os._exit(127)
+
+os.close(w)
+fl_r = fcntl.fcntl(r, fcntl.F_GETFL)
+fcntl.fcntl(r, fcntl.F_SETFL, fl_r | os.O_NONBLOCK)
+
+start = time.time()
+with open(out_path, 'wb') as out:
+    while time.time() - start < stall_seconds:
+        time.sleep(0.01)
+    while True:
+        try:
+            chunk = os.read(r, 128)
+        except BlockingIOError:
+            time.sleep(0.02)
+            continue
+        if not chunk:
+            break
+        out.write(chunk)
+        out.flush()
+        time.sleep(0.01)
+
+os.close(r)
+_, status = os.waitpid(pid, 0)
+sys.exit(os.waitstatus_to_exitcode(status))
+PYEOF
+
+  # A fixture large enough (>64KB, the typical pipe capacity) to guarantee
+  # the stall phase above fills the buffer and forces real EAGAIN — not
+  # merely a framing/format fixture like TC-LEASE-011's small one.
+  EAGAIN_FIXTURE="$TMPROOT/eagain-fixture.jsonl"
+  : > "$EAGAIN_FIXTURE"
+  for i in $(seq 1 500); do
+    printf '{"type":"assistant","message":{"content":[{"type":"text","text":"chunk-%d-%s"}]}}\n' \
+      "$i" "$(printf 'x%.0s' $(seq 1 200))" >> "$EAGAIN_FIXTURE"
+  done
+  # Final record has NO trailing newline — the same no-trailing-newline
+  # contract TC-LEASE-011b pins, now under retry pressure.
+  printf '{"type":"result","subtype":"success","stop_reason":"end_turn","terminal_reason":"completed","duration_ms":1234,"usage":{"input_tokens":100,"output_tokens":20}}' >> "$EAGAIN_FIXTURE"
+
+  RECORDER_DRIVER="$TMPROOT/run_recorder.sh"
+  cat > "$RECORDER_DRIVER" <<'SHEOF'
+#!/bin/bash
+# This script's own stdout must remain whatever the caller wired it to (the
+# pressured pipe from drive_recorder.py) — never redirected to a file here.
+set -uo pipefail
+LIB="$1" FIXTURE="$2" PROGRESS_FILE="$3" FRAMING="$4" ERR_LOG="$5"
+env -u AUTONOMOUS_CONF_DIR \
+  AUTONOMOUS_PID_DIR="$(dirname "$PROGRESS_FILE")" \
+  PROJECT_ID="testproj" \
+  PROJECT_DIR="$(dirname "$PROGRESS_FILE")" \
+  AGENT_CMD=claude \
+  AGENT_PROGRESS_FILE="$PROGRESS_FILE" \
+  RUN_ID="run-eagain" \
+  bash -c '
+    mkdir -p "$AUTONOMOUS_PID_DIR"
+    unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE
+    source "'"$LIB"'"
+    cat "'"$FIXTURE"'" | _agent_progress_recorder "'"$FRAMING"'"
+  ' 2>"$ERR_LOG"
+SHEOF
+  chmod +x "$RECORDER_DRIVER"
+
+  # ---------------------------------------------------------------------
+  # TC-LEASE-024: byte-identical passthrough under EAGAIN pressure — record
+  # count AND checksum match, including the final no-trailing-newline
+  # {"type":"result"} line, and NO write-error reaches stderr.
+  # ---------------------------------------------------------------------
+  EAGAIN_OUT="$TMPROOT/eagain-out.jsonl"
+  EAGAIN_ERR="$TMPROOT/eagain-err.log"
+  EAGAIN_PROGRESS_DIR="$TMPROOT/eagain-pd"
+  rm -rf "$EAGAIN_PROGRESS_DIR"
+  # Stall duration is deliberately well under the recorder's own ~2s
+  # per-slice retry budget (40 * 0.05s) — long enough to overflow the 64KB
+  # pipe and force genuine EAGAIN, short enough that the reader is
+  # guaranteed to start draining before any single slice could exhaust its
+  # retry budget and fire the bound-exhaustion diagnostic this test asserts
+  # is ABSENT. TC-LEASE-026 (below) is the dedicated exhaustion test and
+  # uses a reader that never drains at all.
+  python3 "$PY_DRIVER" "$EAGAIN_OUT" 1.0 -- \
+    bash "$RECORDER_DRIVER" "$LIB" "$EAGAIN_FIXTURE" "$EAGAIN_PROGRESS_DIR/progress.json" json "$EAGAIN_ERR" \
+    >/dev/null 2>&1
+
+  expected_sha=$(_sha "$EAGAIN_FIXTURE")
+  actual_sha=$(_sha "$EAGAIN_OUT")
+  assert_eq "TC-LEASE-024 recorder output is byte-identical (checksum) under EAGAIN pressure" \
+    "$expected_sha" "$actual_sha"
+
+  expected_lines=$(wc -l < "$EAGAIN_FIXTURE")
+  actual_lines=$(wc -l < "$EAGAIN_OUT")
+  assert_eq "TC-LEASE-024 recorder output line count matches fixture under EAGAIN pressure" \
+    "$expected_lines" "$actual_lines"
+
+  if grep -q '"type":"result"' "$EAGAIN_OUT" 2>/dev/null; then
+    ok "TC-LEASE-024 final {\"type\":\"result\"} record survives EAGAIN pressure"
+  else
+    bad "TC-LEASE-024 final {\"type\":\"result\"} record was dropped under EAGAIN pressure"
+  fi
+
+  if grep -q "write error" "$EAGAIN_ERR" 2>/dev/null; then
+    bad "TC-LEASE-024 no write-error diagnostic reaches stderr under transient EAGAIN (tee always drains)"
+  else
+    ok "TC-LEASE-024 no write-error diagnostic reaches stderr under transient EAGAIN (tee always drains)"
+  fi
+
+  # ---------------------------------------------------------------------
+  # TC-LEASE-025: the no-trailing-newline final-line contract still holds
+  # under the retry path specifically (not just "some fixture happens to
+  # end without a newline" — this isolates that exact byte).
+  # ---------------------------------------------------------------------
+  last_byte_fixture=$(tail -c 1 "$EAGAIN_FIXTURE" | od -An -tx1 | tr -d ' \n')
+  last_byte_out=$(tail -c 1 "$EAGAIN_OUT" | od -An -tx1 | tr -d ' \n')
+  assert_eq "TC-LEASE-025 final line's no-trailing-newline byte survives the retry path" \
+    "$last_byte_fixture" "$last_byte_out"
+
+  # ---------------------------------------------------------------------
+  # TC-LEASE-026: bounded-retry exhaustion — a reader that NEVER drains (the
+  # pipe fills once and stays full forever) must not hang the recorder. The
+  # wall-clock bound is asserted directly; the single stderr diagnostic is
+  # asserted per dropped record (never a loud loop of the same error).
+  # ---------------------------------------------------------------------
+  STUCK_DRIVER="$TMPROOT/drive_stuck.py"
+  cat > "$STUCK_DRIVER" <<'PYEOF'
+# Fills the pipe once, then NEVER reads from it again. Polls the child's own
+# exit status without WNOHANG's "0 vs still-running" ambiguity (checks the
+# returned pid, not the status value) so a bound-respecting recorder is
+# correctly distinguished from a genuine hang.
+#   drive_stuck.py <timeout_s> -- <cmd...>
+import os, sys, time, fcntl
+
+args = sys.argv[1:]
+sep = args.index('--')
+timeout_s = float(args[0])
+cmd = args[sep + 1:]
+
+r, w = os.pipe()
+fl = fcntl.fcntl(w, fcntl.F_GETFL)
+fcntl.fcntl(w, fcntl.F_SETFL, fl | os.O_NONBLOCK)
+
+pid = os.fork()
+if pid == 0:
+    os.close(r)
+    os.dup2(w, 1)
+    os.close(w)
+    os.execvp(cmd[0], cmd)
+    os._exit(127)
+
+os.close(w)
+start = time.time()
+while True:
+    try:
+        got_pid, status = os.waitpid(pid, os.WNOHANG)
+    except ChildProcessError:
+        got_pid = 0
+    if got_pid == pid:
+        print(f"EXITED after {time.time()-start:.2f}s status={status}")
+        sys.exit(0)
+    if time.time() - start > timeout_s:
+        print(f"HUNG past {timeout_s}s bound")
+        os.kill(pid, 9)
+        os.waitpid(pid, 0)
+        sys.exit(1)
+    time.sleep(0.05)
+PYEOF
+
+  # Single-record fixture, but large enough on its own (>64KB) to fill the
+  # pipe and force this exact record into the retry-exhaustion path.
+  STUCK_FIXTURE="$TMPROOT/stuck-fixture.jsonl"
+  python3 -c "print('{\"type\":\"result\",\"pad\":\"' + 'x'*70000 + '\"}', end='')" > "$STUCK_FIXTURE"
+  STUCK_ERR="$TMPROOT/stuck-err.log"
+  STUCK_PROGRESS_DIR="$TMPROOT/stuck-pd"
+  rm -rf "$STUCK_PROGRESS_DIR"
+
+  stuck_out=$(timeout 20 python3 "$STUCK_DRIVER" 10 -- \
+    bash "$RECORDER_DRIVER" "$LIB" "$STUCK_FIXTURE" "$STUCK_PROGRESS_DIR/progress.json" json "$STUCK_ERR" 2>&1)
+  stuck_driver_rc=$?
+
+  assert_eq "TC-LEASE-026 recorder completes within the wall-clock bound instead of hanging on a never-draining reader" \
+    "0" "$stuck_driver_rc"
+  assert_contains "TC-LEASE-026 recorder process actually exited (not killed by the test's own timeout)" \
+    "EXITED" "$stuck_out"
+
+  # `grep -c` already prints "0" (and exits 1) on zero matches — no `|| echo
+  # 0` fallback needed, and adding one would double-print "0\n0" on a
+  # genuine zero-match run and mask that failure mode instead of surfacing it.
+  diag_count=$(grep -c "dropping output record" "$STUCK_ERR" 2>/dev/null)
+  assert_eq "TC-LEASE-026 exactly one best-effort stderr diagnostic for the exhausted record" "1" "$diag_count"
+
+  # ---------------------------------------------------------------------
+  # TC-LEASE-027: the zero-AGENT_PROGRESS_FILE fast path (bare `cat`) is
+  # unaffected by the retry helper — still byte-identical, still a plain
+  # `cat`, even under the same EAGAIN pressure.
+  # ---------------------------------------------------------------------
+  FASTPATH_OUT="$TMPROOT/fastpath-out.jsonl"
+  python3 "$PY_DRIVER" "$FASTPATH_OUT" 1.0 -- bash -c '
+    unset AGENT_PROGRESS_FILE
+    source "'"$LIB"'"
+    cat "'"$EAGAIN_FIXTURE"'" | _agent_progress_recorder json
+  ' >/dev/null 2>&1
+
+  fastpath_sha=$(_sha "$FASTPATH_OUT")
+  assert_eq "TC-LEASE-027 fast path (AGENT_PROGRESS_FILE unset) stays byte-identical under the same pressure" \
+    "$expected_sha" "$fastpath_sha"
+else
+  echo "  SKIP: TC-LEASE-024..027 require python3 (not found on PATH) — the fcntl-based nonblocking-pipe harness has no shell-only equivalent"
+fi
 
 # ---------------------------------------------------------------------------
 echo ""
