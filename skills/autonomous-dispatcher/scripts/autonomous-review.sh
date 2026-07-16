@@ -4513,7 +4513,7 @@ if [[ "$PASSED_VERDICT" == "true" ]]; then
     log "ERROR: Failed to submit PR approval for PR #${PR_NUMBER}."
     log "Falling back to manual review notification."
     itp_post_comment "$ISSUE_NUMBER" \
-      "Review PASSED but formal PR approval failed (permission issue?). @${HUMAN_ESCALATION_LOGIN:-$REPO_OWNER} please approve and merge PR #${PR_NUMBER} manually.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
+      "Review PASSED but formal PR approval failed (permission issue?). $(resolve_operator_mention) please approve and merge PR #${PR_NUMBER} manually.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
     itp_transition_state "$ISSUE_NUMBER" "reviewing" "approved" 2>/dev/null || true
     log "Issue #${ISSUE_NUMBER} marked as approved. Manual merge required due to approval failure."
     exit 0
@@ -4532,7 +4532,7 @@ if [[ "$PASSED_VERDICT" == "true" ]]; then
 
     # Notify project owner to merge manually
     itp_post_comment "$ISSUE_NUMBER" \
-      "Review PASSED — this issue has the 'no-auto-close' label. @${HUMAN_ESCALATION_LOGIN:-$REPO_OWNER} please review and merge PR #${PR_NUMBER} when ready.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
+      "Review PASSED — this issue has the 'no-auto-close' label. $(resolve_operator_mention) please review and merge PR #${PR_NUMBER} when ready.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
 
     # Update labels: remove reviewing, add approved (keep no-auto-close and autonomous)
     itp_transition_state "$ISSUE_NUMBER" "reviewing" "approved" 2>/dev/null || true

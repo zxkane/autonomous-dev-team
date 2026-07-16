@@ -835,12 +835,16 @@ if PASSED_VERDICT == true:                 # mergeable gate already proceeded (g
 ```
 
 **Mention-target note (issue #495).** The approval-failed comment (step 3)
-and the no-auto-close comment (step 4) both mention
-`@${HUMAN_ESCALATION_LOGIN:-$REPO_OWNER}` — the maintainer target, NEVER the
-PR author (`resolve_pr_author_mention` is not called at either site): a PR
-author cannot approve or merge their own PR, so redirecting the mention to
-the PR author would be actively wrong. See [dispatcher-flow.md's escalation-comment
-mention-target policy](dispatcher-flow.md#escalation-comment-mention-target-policy-issue-495)
+and the no-auto-close comment (step 4) both call `resolve_operator_mention`
+(no args) — the maintainer target, NEVER the PR author
+(`resolve_pr_author_mention` is not called at either site): a PR author
+cannot approve or merge their own PR, so redirecting the mention to the PR
+author would be actively wrong. `resolve_operator_mention` (review round 4
+finding #1) is a validated wrapper over the SAME `HUMAN_ESCALATION_LOGIN`/
+`REPO_OWNER` fallback chain the PR-author resolver falls through to — it
+replaced a raw `@${HUMAN_ESCALATION_LOGIN:-$REPO_OWNER}` interpolation that
+bypassed the resolver's own malformed-token validation. See
+[dispatcher-flow.md's escalation-comment mention-target policy](dispatcher-flow.md#escalation-comment-mention-target-policy-issue-495)
 for the full three-class policy (PR-scoped / maintainer-only / operator-only)
 this pipeline now follows.
 

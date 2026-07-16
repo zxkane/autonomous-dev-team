@@ -1,5 +1,6 @@
 #!/bin/bash
-# lib-review-resolve-author.sh — resolve_pr_author_mention (issue #495).
+# lib-review-resolve-author.sh — resolve_pr_author_mention +
+# resolve_operator_mention (issue #495).
 #
 # Human-in-the-loop escalation comments ("marking stalled", "please
 # investigate") unconditionally @-mentioned `${REPO_OWNER}`. On GitLab,
@@ -14,6 +15,14 @@
 # notifies nobody. So this resolver is bot-detection-FIRST: it only emits the
 # real PR author when that author is demonstrably a human, and otherwise falls
 # back through `HUMAN_ESCALATION_LOGIN` to `REPO_OWNER`.
+#
+# `resolve_operator_mention` (no args) is the sibling entry point for the 8
+# sites that never resolve a PR author at all (the 2 maintainer-only sites +
+# the 6 operator-only sites where no PR is guaranteed to exist) — it's the
+# SAME validated `HUMAN_ESCALATION_LOGIN`/`REPO_OWNER` fallback chain
+# `resolve_pr_author_mention` falls through to, exposed directly so those 8
+# sites stop interpolating `${HUMAN_ESCALATION_LOGIN:-$REPO_OWNER}` raw and
+# skipping the malformed-token validation (#495 review round 4 finding #1).
 #
 # Lives in its own lib (mirrors lib-pr-linkage.sh / lib-review-request-
 # changes.sh layering) so BOTH the dispatcher (`lib-dispatch.sh`) AND the
@@ -119,6 +128,24 @@ _rpam_fallback() {
     echo "WARN: resolve_pr_author_mention: configured HUMAN_ESCALATION_LOGIN '${human}' is not a valid single-token mention — falling back to REPO_OWNER" >&2
   fi
   printf '@%s' "${REPO_OWNER:-}"
+}
+
+# resolve_operator_mention — the validated operator-target mention for sites
+# that never call resolve_pr_author_mention: the 2 maintainer-only sites
+# (approval-failed, no-auto-close — a PR author can't approve/merge their own
+# PR) and the 6 operator-only sites (no PR guaranteed to exist — MAX_RETRIES,
+# the non-substantive flip cap, the degraded no-progress tracker notice, the
+# liveness bookkeeping-marker warning, the liveness tier-1 notice, and the
+# class-level park backstop). All 8 previously interpolated
+# `@${HUMAN_ESCALATION_LOGIN:-$REPO_OWNER}` directly, which bypassed
+# `_rpam_fallback`'s validation — a `HUMAN_ESCALATION_LOGIN` containing
+# whitespace or an embedded `@` would be echoed verbatim into these comment
+# bodies too, breaking the same "exactly one `@<token>`" contract R2 already
+# guards for the resolver's own fallback path (#495 review round 4 finding
+# #1). Same rc-0/single-token contract as `resolve_pr_author_mention`;
+# `_rpam_fallback` is the exact same validated chain.
+resolve_operator_mention() {
+  _rpam_fallback
 }
 
 # resolve_pr_author_mention <PR_NUMBER>

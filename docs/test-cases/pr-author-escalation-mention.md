@@ -76,21 +76,30 @@ Source-shape assertions (grep the migrated line, fixed-string) against
 
 ### Maintainer-target sites (unchanged target — never the PR author)
 
+Review round 4 finding #1: these sites previously interpolated
+`@${HUMAN_ESCALATION_LOGIN:-$REPO_OWNER}` raw, bypassing the malformed-token
+validation `_rpam_fallback` already applies to the resolver's own fallback
+path. Both now call the new `resolve_operator_mention` (no args) — the SAME
+validated fallback chain, exposed as a public entry point for sites that
+never resolve a PR author.
+
 | ID | Site | Expected |
 |----|------|----------|
-| TC-PAEM-040 | `autonomous-review.sh` approval-failed fallback notice | mentions `@${HUMAN_ESCALATION_LOGIN:-$REPO_OWNER}` — NEVER calls `resolve_pr_author_mention` (a PR author cannot approve their own PR) |
-| TC-PAEM-041 | `autonomous-review.sh` no-auto-close "please review and merge" notice | mentions `@${HUMAN_ESCALATION_LOGIN:-$REPO_OWNER}` — NEVER calls `resolve_pr_author_mention` |
+| TC-PAEM-040 | `autonomous-review.sh` approval-failed fallback notice | calls `resolve_operator_mention` — NEVER `resolve_pr_author_mention` (a PR author cannot approve their own PR) |
+| TC-PAEM-041 | `autonomous-review.sh` no-auto-close "please review and merge" notice | calls `resolve_operator_mention` — NEVER `resolve_pr_author_mention` |
 
-### Operator-target sites (no PR guaranteed — variable substitution only)
+### Operator-target sites (no PR guaranteed — resolve_operator_mention, no PR-author resolution)
 
 | ID | Site | Expected |
 |----|------|----------|
-| TC-PAEM-050 | `lib-dispatch.sh` MAX_RETRIES stall notice | mentions `@${HUMAN_ESCALATION_LOGIN:-$REPO_OWNER}`; does **NOT** call `resolve_pr_author_mention` (can fire with zero PRs) |
-| TC-PAEM-051 | `lib-dispatch.sh` non-substantive flip-cap notice | mentions `@${HUMAN_ESCALATION_LOGIN:-$REPO_OWNER}`, no resolver call |
-| TC-PAEM-052 | `lib-dispatch.sh` API-rejection warning (no-progress marker post failure) | mentions `@${HUMAN_ESCALATION_LOGIN:-$REPO_OWNER}`, no resolver call |
-| TC-PAEM-053 | `lib-dispatch.sh` liveness bookkeeping-marker warning | mentions `@${HUMAN_ESCALATION_LOGIN:-$REPO_OWNER}`, no resolver call |
-| TC-PAEM-054 | `lib-dispatch.sh` liveness tier-1 notice | mentions `@${HUMAN_ESCALATION_LOGIN:-$REPO_OWNER}`, no resolver call |
-| TC-PAEM-055 | `lib-dispatch.sh` class-level park backstop notice | mentions `@${HUMAN_ESCALATION_LOGIN:-$REPO_OWNER}`, no resolver call |
+| TC-PAEM-050 | `lib-dispatch.sh` MAX_RETRIES stall notice | calls `resolve_operator_mention`; does **NOT** call `resolve_pr_author_mention` (can fire with zero PRs) |
+| TC-PAEM-051 | `lib-dispatch.sh` non-substantive flip-cap notice | calls `resolve_operator_mention`, no `resolve_pr_author_mention` call |
+| TC-PAEM-052 | `lib-dispatch.sh` API-rejection warning (no-progress marker post failure) | calls `resolve_operator_mention`, no `resolve_pr_author_mention` call |
+| TC-PAEM-053 | `lib-dispatch.sh` liveness bookkeeping-marker warning | calls `resolve_operator_mention`, no `resolve_pr_author_mention` call |
+| TC-PAEM-054 | `lib-dispatch.sh` liveness tier-1 notice | calls `resolve_operator_mention`, no `resolve_pr_author_mention` call |
+| TC-PAEM-055 | `lib-dispatch.sh` class-level park backstop notice | calls `resolve_operator_mention`, no `resolve_pr_author_mention` call |
+| TC-PAEM-061/062 | `lib-dispatch.sh` / `autonomous-review.sh` have zero remaining raw `${HUMAN_ESCALATION_LOGIN:-$REPO_OWNER}` interpolations | 0 occurrences in either file |
+| TC-PAEM-063–066 | `resolve_operator_mention` itself: unset `HUMAN_ESCALATION_LOGIN` falls back to `@$REPO_OWNER`; well-formed value is honored; whitespace-containing / embedded-`@` values are rejected and fall back to `@$REPO_OWNER` | rc 0, exactly one `@<token>` in every row — same validated chain as `_rpam_fallback` |
 
 ### Never-touch (prompt text, not comments)
 

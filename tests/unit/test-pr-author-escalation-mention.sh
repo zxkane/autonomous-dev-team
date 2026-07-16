@@ -381,33 +381,40 @@ assert_contains "TC-PAEM-036 [#453] same-HEAD E2E-gate breaker report calls reso
 # fallback chain) — the source-shape pin (TC-PAEM-031) proves THIS call site
 # is wired to it.
 
-# --- Maintainer-target sites (never resolve_pr_author_mention) ---
-assert_contains "TC-PAEM-040 approval-failed fallback mentions HUMAN_ESCALATION_LOGIN:-REPO_OWNER" \
-  "$WRAPPER_SRC" 'Review PASSED but formal PR approval failed (permission issue?). @${HUMAN_ESCALATION_LOGIN:-$REPO_OWNER} please approve and merge PR #${PR_NUMBER} manually.'
+# --- Maintainer-target sites (never resolve_pr_author_mention; validated
+# via resolve_operator_mention, not a raw HUMAN_ESCALATION_LOGIN:-REPO_OWNER
+# interpolation — #495 review round 4 finding #1) ---
+assert_contains "TC-PAEM-040 approval-failed fallback calls resolve_operator_mention" \
+  "$WRAPPER_SRC" 'Review PASSED but formal PR approval failed (permission issue?). $(resolve_operator_mention) please approve and merge PR #${PR_NUMBER} manually.'
 assert_not_contains "TC-PAEM-040b approval-failed fallback never calls resolve_pr_author_mention" \
   "$WRAPPER_SRC" 'approval failed (permission issue?). $(resolve_pr_author_mention'
 
-assert_contains "TC-PAEM-041 no-auto-close notice mentions HUMAN_ESCALATION_LOGIN:-REPO_OWNER" \
-  "$WRAPPER_SRC" "Review PASSED — this issue has the 'no-auto-close' label. @"'${HUMAN_ESCALATION_LOGIN:-$REPO_OWNER} please review and merge PR #${PR_NUMBER} when ready.'
+assert_contains "TC-PAEM-041 no-auto-close notice calls resolve_operator_mention" \
+  "$WRAPPER_SRC" "Review PASSED — this issue has the 'no-auto-close' label. "'$(resolve_operator_mention) please review and merge PR #${PR_NUMBER} when ready.'
 assert_not_contains "TC-PAEM-041b no-auto-close notice never calls resolve_pr_author_mention" \
   "$WRAPPER_SRC" "no-auto-close' label. \$(resolve_pr_author_mention"
 
-# --- Operator-target sites (pure variable substitution, no resolver call) ---
+# --- Operator-target sites (validated via resolve_operator_mention, no
+# resolve_pr_author_mention call — #495 review round 4 finding #1: the prior
+# raw @${HUMAN_ESCALATION_LOGIN:-$REPO_OWNER} interpolation bypassed the
+# malformed-token validation _rpam_fallback already applies to the resolver's
+# own fallback path) ---
 for pair in \
-  "TC-PAEM-050|Marking as stalled. @"'${HUMAN_ESCALATION_LOGIN:-$REPO_OWNER}'" please investigate manually." \
-  "TC-PAEM-051|Marking stalled. @"'${HUMAN_ESCALATION_LOGIN:-$REPO_OWNER}'" please investigate the upstream review dependency" \
-  "TC-PAEM-052|one-retry bound ([INV-85]) is degraded for this HEAD; the issue is still bounded by \\\`MAX_RETRIES\\\`. @"'${HUMAN_ESCALATION_LOGIN:-$REPO_OWNER}'" no action needed" \
-  "TC-PAEM-053|please verify before removing the label. @"'${HUMAN_ESCALATION_LOGIN:-$REPO_OWNER}' \
-  "TC-PAEM-054|@"'${HUMAN_ESCALATION_LOGIN:-$REPO_OWNER}'" this issue may need attention." \
-  "TC-PAEM-055|@"'${HUMAN_ESCALATION_LOGIN:-$REPO_OWNER}'" please investigate — this is the class-level backstop" \
+  "TC-PAEM-050|Marking as stalled. "'$(resolve_operator_mention)'" please investigate manually." \
+  "TC-PAEM-051|Marking stalled. "'$(resolve_operator_mention)'" please investigate the upstream review dependency" \
+  "TC-PAEM-052|one-retry bound ([INV-85]) is degraded for this HEAD; the issue is still bounded by \\\`MAX_RETRIES\\\`. "'$(resolve_operator_mention)'" no action needed" \
+  "TC-PAEM-053|please verify before removing the label. "'$(resolve_operator_mention)' \
+  "TC-PAEM-054|"'$(resolve_operator_mention)'" this issue may need attention." \
+  "TC-PAEM-055|"'$(resolve_operator_mention)'" please investigate — this is the class-level backstop" \
   ; do
   id="${pair%%|*}"
   needle="${pair#*|}"
-  assert_contains "$id operator-target site uses HUMAN_ESCALATION_LOGIN:-REPO_OWNER" "$DISPATCH_SRC" "$needle"
+  assert_contains "$id operator-target site calls resolve_operator_mention" "$DISPATCH_SRC" "$needle"
 done
 
-# None of the 6 operator sites should have been converted to a resolver call
-# (they can fire with zero PRs in scope).
+# None of the 8 direct-fallback sites should have been converted to
+# resolve_pr_author_mention (the 6 operator sites can fire with zero PRs in
+# scope; the 2 maintainer sites must never target the PR author).
 assert_not_contains "TC-PAEM-050b MAX_RETRIES stall does not call resolve_pr_author_mention" \
   "$DISPATCH_SRC" 'Marking as stalled. $(resolve_pr_author_mention'
 
@@ -419,6 +426,30 @@ assert_contains "TC-PAEM-060b the remaining bare mention is the requirement-drif
 
 bare_owner_count_dispatch=$(grep -o '@\${REPO_OWNER}' "$DISPATCH_LIB" | wc -l | tr -d ' ')
 assert_eq "TC-PAEM-060c lib-dispatch.sh has ZERO remaining bare @\${REPO_OWNER} literals" "0" "$bare_owner_count_dispatch"
+
+# --- Zero remaining raw HUMAN_ESCALATION_LOGIN:-REPO_OWNER interpolations
+# anywhere (#495 review round 4 finding #1: every one of the 8 direct sites
+# must route through the validated resolve_operator_mention helper) ---
+raw_direct_count_dispatch=$(grep -c '\${HUMAN_ESCALATION_LOGIN:-\$REPO_OWNER}' "$DISPATCH_LIB")
+assert_eq "TC-PAEM-061 lib-dispatch.sh has ZERO raw HUMAN_ESCALATION_LOGIN:-REPO_OWNER interpolations" "0" "$raw_direct_count_dispatch"
+raw_direct_count_wrapper=$(grep -c '\${HUMAN_ESCALATION_LOGIN:-\$REPO_OWNER}' "$WRAPPER")
+assert_eq "TC-PAEM-062 autonomous-review.sh has ZERO raw HUMAN_ESCALATION_LOGIN:-REPO_OWNER interpolations" "0" "$raw_direct_count_wrapper"
+
+# --- resolve_operator_mention itself: validated single-token contract,
+# identical to resolve_pr_author_mention's own fallback chain ---
+out=$(_run_resolver resolve_operator_mention 2>/dev/null); rc=$?
+assert_rc_eq "TC-PAEM-063 resolve_operator_mention (unset HUMAN_ESCALATION_LOGIN) rc" "0" "$rc"
+assert_eq "TC-PAEM-063 resolve_operator_mention falls back to REPO_OWNER when unset" "@the-owner" "$out"
+
+out=$(HUMAN_ESCALATION_LOGIN="maintainer1" _run_resolver resolve_operator_mention 2>/dev/null)
+assert_eq "TC-PAEM-064 resolve_operator_mention honors a well-formed HUMAN_ESCALATION_LOGIN" "@maintainer1" "$out"
+
+out=$(HUMAN_ESCALATION_LOGIN="two words" _run_resolver resolve_operator_mention 2>/dev/null); rc=$?
+assert_rc_eq "TC-PAEM-065 resolve_operator_mention (malformed HUMAN_ESCALATION_LOGIN) rc" "0" "$rc"
+assert_eq "TC-PAEM-065 resolve_operator_mention rejects a whitespace-containing HUMAN_ESCALATION_LOGIN, falls back to REPO_OWNER" "@the-owner" "$out"
+
+out=$(HUMAN_ESCALATION_LOGIN="alice@evil" _run_resolver resolve_operator_mention 2>/dev/null)
+assert_eq "TC-PAEM-066 resolve_operator_mention rejects an embedded-@ HUMAN_ESCALATION_LOGIN, falls back to REPO_OWNER" "@the-owner" "$out"
 
 # --- No occurrences in dispatcher-tick.sh ---
 if [ -f "$DISPATCHER_TICK" ]; then

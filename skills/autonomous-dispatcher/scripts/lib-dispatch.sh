@@ -913,7 +913,7 @@ mark_stalled() {
   local counted_dispatcher_crashes=$(( dispatcher_crashes - false_positives ))
   # [INV-123]: no_pr_attempts is an additional named term below.
   itp_post_comment "$issue_num" \
-    "Issue has exceeded the maximum retry limit (${MAX_RETRIES} failed attempts: ${agent_failures} agent failures + ${no_pr_attempts} no-PR retry attempts + ${counted_dispatcher_crashes} dispatcher-detected crashes; ${false_positives} dispatcher false positives suppressed per #99). Marking as stalled. @${HUMAN_ESCALATION_LOGIN:-$REPO_OWNER} please investigate manually."
+    "Issue has exceeded the maximum retry limit (${MAX_RETRIES} failed attempts: ${agent_failures} agent failures + ${no_pr_attempts} no-PR retry attempts + ${counted_dispatcher_crashes} dispatcher-detected crashes; ${false_positives} dispatcher false positives suppressed per #99). Marking as stalled. $(resolve_operator_mention) please investigate manually."
 }
 
 # ---------------------------------------------------------------------------
@@ -1784,7 +1784,7 @@ handle_completed_session_routing() {
       if [ "$_limit" -gt 0 ] && [ "$_flip_count" -ge "$_limit" ]; then
         log "  issue #${issue_num} non-substantive review failure (cause=${_cause}) reached REVIEW_RETRY_LIMIT=${_limit} — stalling"
         itp_post_comment "$issue_num" \
-          "Persistent review-failure-non-substantive on session \`${session_id}\` (cause=\`${_cause}\`, flips=${_flip_count}/${_limit}). Marking stalled. @${HUMAN_ESCALATION_LOGIN:-$REPO_OWNER} please investigate the upstream review dependency (bot/CI/transport)."
+          "Persistent review-failure-non-substantive on session \`${session_id}\` (cause=\`${_cause}\`, flips=${_flip_count}/${_limit}). Marking stalled. $(resolve_operator_mention) please investigate the upstream review dependency (bot/CI/transport)."
         mark_stalled "$issue_num"
         return 0
       fi
@@ -2236,7 +2236,7 @@ CBREPORT
            && ! itp_post_comment "$issue_num" "$_attempt_marker" 2>/dev/null; then
           log "  WARNING: failed to post the no-progress attempt marker for issue #${issue_num} HEAD ${_np_current_head} after retry — N=1 no-progress bound degraded for this HEAD (MAX_RETRIES remains the backstop)."
           itp_post_comment "$issue_num" \
-            "⚠️ Dispatched a fresh dev session for the substantive review failure, but could not record the per-HEAD no-progress attempt tracker for \`${_np_current_head}\` (GitHub API rejected the hidden marker comment twice). The per-HEAD one-retry bound ([INV-85]) is degraded for this HEAD; the issue is still bounded by \`MAX_RETRIES\`. @${HUMAN_ESCALATION_LOGIN:-$REPO_OWNER} no action needed unless the issue churns dev retries against an unchanged HEAD." 2>/dev/null \
+            "⚠️ Dispatched a fresh dev session for the substantive review failure, but could not record the per-HEAD no-progress attempt tracker for \`${_np_current_head}\` (GitHub API rejected the hidden marker comment twice). The per-HEAD one-retry bound ([INV-85]) is degraded for this HEAD; the issue is still bounded by \`MAX_RETRIES\`. $(resolve_operator_mention) no action needed unless the issue churns dev retries against an unchanged HEAD." 2>/dev/null \
             || log "  WARNING: operator notice for the degraded no-progress tracker also failed to post for issue #${issue_num}."
         fi
       fi
@@ -4214,7 +4214,7 @@ _liveness_post_marker() {
   itp_post_comment "$issue_num" "$marker_text" 2>/dev/null && return 0
   log "  WARNING: issue #${issue_num} liveness watchdog: failed to post the bookkeeping marker after retry — the no-op counter may reset to count=1 next tick (degraded, not a crash; [INV-128])."
   itp_post_comment "$issue_num" \
-    "⚠️ The liveness watchdog could not record its bookkeeping marker for issue #${issue_num} this tick (GitHub API rejected the comment twice). The no-op counter may reset next tick — a transient degradation, not a stall. If this issue was JUST transitioned to \`stalled\`, the resume-cutoff marker may be missing; please verify before removing the label. @${HUMAN_ESCALATION_LOGIN:-$REPO_OWNER}" \
+    "⚠️ The liveness watchdog could not record its bookkeeping marker for issue #${issue_num} this tick (GitHub API rejected the comment twice). The no-op counter may reset next tick — a transient degradation, not a stall. If this issue was JUST transitioned to \`stalled\`, the resume-cutoff marker may be missing; please verify before removing the label. $(resolve_operator_mention)" \
     2>/dev/null \
     || log "  WARNING: issue #${issue_num} liveness watchdog: operator notice for the degraded marker write also failed to post."
   return 1
@@ -4406,7 +4406,7 @@ No observable progress for **${count}** ticks on issue #${issue_num} (\`reason=l
 - Non-idempotent comment count: ${non_idem_count}
 - Marker digest: \`${marker_digest:-<none>}\`
 
-@${HUMAN_ESCALATION_LOGIN:-$REPO_OWNER} this issue may need attention. If this is a legitimate slow wait, any observable change (a comment, a label edit, or a push) resets the clock. Without one, this issue transitions to \`stalled\` after **${stall}** total unchanged ticks.
+$(resolve_operator_mention) this issue may need attention. If this is a legitimate slow wait, any observable change (a comment, a label edit, or a push) resets the clock. Without one, this issue transitions to \`stalled\` after **${stall}** total unchanged ticks.
 TIER1REPORT
 )" || true
       ;;
@@ -4502,7 +4502,7 @@ This issue's observable state (label + PR head + non-idempotent comments + marke
 - Transitioned to \`stalled\` (\`autonomous\` is retained — removing \`stalled\` re-arms via Step 2 and resets the retry counter, [INV-05]).
 - Posted this one-time report.
 
-@${HUMAN_ESCALATION_LOGIN:-$REPO_OWNER} please investigate — this is the class-level backstop (a specific breaker for this park shape may not exist yet). To resume: fix per the evidence above, then remove the \`stalled\` label.
+$(resolve_operator_mention) please investigate — this is the class-level backstop (a specific breaker for this park shape may not exist yet). To resume: fix per the evidence above, then remove the \`stalled\` label.
 TIER2REPORT
 )" || true
       ;;

@@ -201,16 +201,28 @@ is genuinely PR-scoped:
    (byte-identical to pre-#495-finding-#1 behavior).
 2. **Maintainer-only sites** — the review wrapper's approval-failed fallback
    and the `no-auto-close` "please review and merge" notice (`autonomous-
-   review.sh`, Step 4c equivalent on the review side) never call the
-   resolver: a PR author cannot approve or merge their own PR, so these
-   mention `@${HUMAN_ESCALATION_LOGIN:-$REPO_OWNER}` directly regardless of
-   who authored the PR.
+   review.sh`, Step 4c equivalent on the review side) never call
+   `resolve_pr_author_mention`: a PR author cannot approve or merge their own
+   PR, so these call the sibling `resolve_operator_mention` (no args) instead.
 3. **Operator-only sites where no PR is guaranteed** — the MAX_RETRIES stall
    above (Step 4a; can fire with zero PRs in flight), the non-substantive
    flip-cap notice, the liveness bookkeeping-marker warning, the liveness
-   tier-1 notice (Step 6), and the class-level park backstop mention
-   `@${HUMAN_ESCALATION_LOGIN:-$REPO_OWNER}` via plain variable substitution
-   — no resolver call, since there may be no PR to resolve an author from.
+   tier-1 notice (Step 6), and the class-level park backstop also call
+   `resolve_operator_mention` — no `resolve_pr_author_mention` call, since
+   there may be no PR to resolve an author from.
+
+   **`resolve_operator_mention` (#495 review round 4 finding #1):** these 8
+   sites (the 2 maintainer-only + 6 operator-only above) originally
+   interpolated `@${HUMAN_ESCALATION_LOGIN:-$REPO_OWNER}` directly — a plain
+   variable substitution that bypassed `_rpam_fallback`'s malformed-token
+   validation (the same whitespace/embedded-`@` guard the resolver's OWN
+   fallback path already applies to a misconfigured `HUMAN_ESCALATION_LOGIN`,
+   round 3 finding #2). `resolve_operator_mention` (`lib-review-resolve-
+   author.sh`, no args, same file as `resolve_pr_author_mention`) is a thin
+   public wrapper over the identical `_rpam_fallback` chain, so a malformed
+   configured value now falls back to `REPO_OWNER` at these 8 sites exactly
+   as it already did inside the resolver's own fallback path — closing the
+   validation gap without introducing a second fallback implementation.
 
 `HUMAN_ESCALATION_LOGIN` (`autonomous.conf.example`, new optional key near
 `REPO_OWNER`) is the fallback login for classes 1 and 3 when the PR-author

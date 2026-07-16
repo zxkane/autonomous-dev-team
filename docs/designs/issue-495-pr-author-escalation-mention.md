@@ -31,12 +31,20 @@ constant, since only one verb needs the new field).
 Call sites split into three classes, enumerated (not grep-converted, since two of the
 grep-matched sites are prompt-heredoc text, not comment bodies):
 
-1. **PR-scoped stall/escalation reports** (a PR is already resolved) → call the resolver.
-2. **Maintainer-only sites** (approval-failed, no-auto-close) → always
-   `@${HUMAN_ESCALATION_LOGIN:-$REPO_OWNER}` directly, never the resolver — a PR author
+1. **PR-scoped stall/escalation reports** (a PR is already resolved) → call
+   `resolve_pr_author_mention <PR_NUMBER>`.
+2. **Maintainer-only sites** (approval-failed, no-auto-close) → call the sibling
+   `resolve_operator_mention` (no args), never `resolve_pr_author_mention` — a PR author
    cannot approve or merge their own PR.
 3. **Operator-only sites** (no PR guaranteed to exist — MAX_RETRIES, liveness notices, the
-   class-level park backstop) → same plain fallback substitution, no resolver call.
+   class-level park backstop) → also call `resolve_operator_mention`, no PR-author resolver
+   call.
+
+`resolve_operator_mention` (round 4 finding #1) is a thin public wrapper over the same
+`_rpam_fallback` chain `resolve_pr_author_mention` falls through to — added because the
+2 maintainer-only + 6 operator-only sites originally interpolated
+`@${HUMAN_ESCALATION_LOGIN:-$REPO_OWNER}` directly, bypassing the malformed-token
+validation the resolver's own fallback path already applies.
 
 The 2 genuine prompt-text literals inside `build_review_prompt` are left byte-unchanged.
 
@@ -53,6 +61,8 @@ tracked as separate issues (all are hardening of the same resolver/propagation s
 | 3 | The round-1 ambient-leak fix only covered the INLINE branch of the per-project loop — the LOCAL path-entry branch had no `unset` at all | Same `unset HUMAN_ESCALATION_LOGIN DEV_BOT_LOGIN` added immediately before the local-path branch's `AUTONOMOUS_CONF=... bash dispatcher-tick.sh` invocation |
 | 3 | `_rpam_fallback` prints a configured `HUMAN_ESCALATION_LOGIN` verbatim — a value containing whitespace or an embedded `@` breaks the same single-token contract from the config side | `_rpam_fallback` validates the configured value (`_rpam_malformed_mention_token`) before using it; a malformed value falls through to `REPO_OWNER` instead |
 | 3 | Missing design canvas + PR template Pipeline Docs section | This doc; PR body updated to the repo's template shape |
+| 4 | The 8 maintainer-/operator-target sites interpolated `@${HUMAN_ESCALATION_LOGIN:-$REPO_OWNER}` directly, bypassing `_rpam_fallback`'s malformed-token validation entirely — a value containing whitespace or an embedded `@` broke the exactly-one-token contract at these 8 sites even though the resolver's own fallback path (round 3 finding) was already hardened against it | New `resolve_operator_mention` (no args, `lib-review-resolve-author.sh`) — a thin public wrapper over the SAME `_rpam_fallback` chain; all 8 sites now call it instead of interpolating the raw conf var |
+| 4 | PR #499's description is missing the repo's PR template's Pipeline Docs declaration/Test Plan checklist | **Not resolved by this dev round** — the scoped agent token has `pull_requests:read`, not `pull_requests:write` (`gh pr edit`/`PATCH .../pulls/N` both 403 "Resource not accessible by integration"); there is no [INV-79] broker for editing an EXISTING PR's body (only `drain_agent_pr_create` for the initial create). Flagged for a maintainer to edit the PR body directly, or as a follow-up broker if this recurs. |
 
 The round-1 `DEV_BOT_LOGIN`-unset gap (a plain-login bot author with no configured
 `DEV_BOT_LOGIN`) remains a documented residual — closing it would require a raw `gh api
