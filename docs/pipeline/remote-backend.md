@@ -198,6 +198,29 @@ gap between the two round-trips, and the second call would kill it
 anyway. Folding both into a single remote shell invocation closes that
 window entirely.
 
+**Poll-timeout recovery, not a bare timeout-as-no-op (shared `lib-ssm.sh::_ssm_run_remote_command`)**:
+`REMOTE_LIVENESS_CHECK_TIMEOUT_SECONDS` (default 8) is shorter than
+`SSM_COMMAND_TIMEOUT_SECONDS` (default 30) — the dispatcher-side poll
+loop can hit its deadline while the remote command is still executing.
+For a read-only `--snapshot` that only costs a wasted tick, but a
+bare "poll timed out ⇒ rc=2" would be UNSAFE for `--compare-and-signal`:
+the remote script can still reach its `kill -TERM` line and succeed
+*after* the caller has already been told "indeterminate," leaving the
+wrapper actually killed with no handoff comment and no label
+transition. On poll-loop timeout the helper now (1) best-effort issues
+`aws ssm cancel-command` for the in-flight command — for a still-running
+`AWS-RunShellScript` invocation this stops the remote script before an
+unreached `kill -TERM` line executes (it cannot retroactively undo a
+signal already sent; that residual race is accepted, same fail-safe
+posture as [INV-137]'s other documented residuals) — then (2) makes ONE
+more `get-command-invocation` check immediately after, so a command that
+in fact completed (`Success`) in the gap between the last poll and the
+cancel is still reported truthfully instead of being silently downgraded
+to indeterminate. Only after BOTH the cancel and the follow-up check fail
+to observe `Success` does the helper return `rc=2` — which the caller
+(`_remote_dev_progress_compare_and_signal`) still, correctly, treats
+identically to `ABORTED:remote-transport-failure`.
+
 ## `pid_alive` switching contract
 
 `lib-dispatch.sh::pid_alive` MUST consult the liveness transport BEFORE

@@ -36,6 +36,7 @@ a reimplemented test-only decision.
 - TC-DPS-032: SSM timeout (poll deadline exceeded) → UNKNOWN, never STALE.
 - TC-DPS-033: remote stdout is not valid single-line JSON / doesn't match any of the three shapes → UNKNOWN, never STALE.
 - TC-DPS-034: remote driver computes age using the REMOTE host's clock, not the controller's (proven by injecting a controller-side clock skew and asserting the remote-computed age is unaffected).
+- TC-DPS-035..048: remote-driver parity for every UNKNOWN fixture family exercised locally by TC-DPS-005..018 (missing progress.json/run-id, symlinked progress.json/run-id, bad mode, malformed JSON, missing required field, bad `schema_version`, non-numeric `pid`/`updated_at_epoch`, negative/future `updated_at_epoch`, pid mismatch, prior-run `run_id` mismatch) — same fixtures, run through the REAL remote driver against a stubbed SSM transport, asserting `state=UNKNOWN` for each so a divergence in the duplicated remote classifier can't pass despite the identical-semantics requirement.
 
 ## Step 5a decision matrix (extracted real control-flow block)
 

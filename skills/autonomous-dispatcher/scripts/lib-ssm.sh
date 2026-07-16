@@ -142,6 +142,29 @@ _ssm_build_full_cmd() {
 #
 # Stdout: on Success, prints the remote command's StandardOutputContent
 # (stripped of trailing newline); on any other path, stdout is empty.
+#
+# Poll-timeout handling (agent-progress-snapshot-remote-aws-ssm.sh review
+# finding #2): REMOTE_LIVENESS_CHECK_TIMEOUT_SECONDS (default 8) is far
+# shorter than SSM_COMMAND_TIMEOUT_SECONDS (default 30) — the remote
+# command can still be executing when this helper's poll loop gives up.
+# For a read-only snapshot that's harmless, but the SAME helper also
+# drives agent-progress-snapshot-remote-aws-ssm.sh's --compare-and-signal
+# mode, whose remote script ends in `kill -TERM`. A caller that treats a
+# bare poll-loop timeout as "no signal was sent" (rc=2 -> ABORTED) can be
+# wrong: the remote command can still complete — and send the signal —
+# AFTER this helper has already returned indeterminate, leaving no
+# handoff comment and no label transition even though the wrapper was, in
+# fact, killed. On timeout this helper now (1) best-effort issues
+# `aws ssm cancel-command` — for a still-InProgress AWS-RunShellScript
+# invocation, SSM Agent attempts to terminate the running script process,
+# which stops it BEFORE it reaches a not-yet-executed `kill -TERM` line
+# (it cannot retroactively undo a signal already sent, but that residual
+# race is unavoidable in any cooperative-cancel design and is no worse
+# than doing nothing) — then (2) makes ONE more get-command-invocation
+# check immediately after, so a command that in fact completed (Success)
+# in the gap between the last poll and the timeout/cancel is still
+# reported truthfully instead of being silently downgraded to
+# indeterminate.
 _ssm_run_remote_command() {
   local instance_id="$1"
   local region="$2"
@@ -188,7 +211,7 @@ _ssm_run_remote_command() {
       --command-id "$command_id" \
       --output json 2>/dev/null) || {
       now=$(date +%s)
-      [[ "$now" -ge "$t_deadline" ]] && return 2
+      [[ "$now" -ge "$t_deadline" ]] && { _ssm_poll_timeout_recover "$instance_id" "$region" "$command_id"; return $?; }
       continue
     }
     status=$(printf '%s' "$get_out" | jq -r '.Status // empty')
@@ -205,10 +228,7 @@ _ssm_run_remote_command() {
         ;;
       InProgress|Pending|Delayed)
         now=$(date +%s)
-        [[ "$now" -ge "$t_deadline" ]] && {
-          echo "[lib-ssm] WARN: poll-loop timeout (status=$status)" >&2
-          return 2
-        }
+        [[ "$now" -ge "$t_deadline" ]] && { _ssm_poll_timeout_recover "$instance_id" "$region" "$command_id"; return $?; }
         continue
         ;;
       *)
@@ -217,4 +237,54 @@ _ssm_run_remote_command() {
         ;;
     esac
   done
+}
+
+# _ssm_poll_timeout_recover <instance-id> <region> <command_id>
+#
+# Called ONLY when _ssm_run_remote_command's dispatcher-side poll loop
+# (REMOTE_LIVENESS_CHECK_TIMEOUT_SECONDS, default 8) has hit its deadline
+# while the remote command may still be executing (SSM_COMMAND_TIMEOUT_SECONDS
+# gives it up to 30s). Best-effort `cancel-command` first (stops an
+# AWS-RunShellScript invocation that is still InProgress — for
+# --compare-and-signal, this prevents a delayed remote script from reaching
+# its not-yet-executed `kill -TERM` line after the caller has already been
+# told "indeterminate"; it cannot undo a signal already sent, which remains
+# a documented residual), THEN one more get-command-invocation check so a
+# command that actually completed (Success) in the gap between the last
+# poll and this cancel is still reported truthfully rather than silently
+# downgraded to a transport-fault rc=2 the caller would otherwise have to
+# treat as "no signal sent" when a signal may, in fact, have been sent.
+#
+# Stdout: on Success, prints StandardOutputContent (stripped of trailing
+# newline), same contract as the main poll loop; empty on any other path.
+# Returns 0 (Success confirmed) or 2 (still indeterminate after recovery).
+_ssm_poll_timeout_recover() {
+  local instance_id="$1" region="$2" command_id="$3"
+  echo "[lib-ssm] WARN: poll-loop timeout — attempting cancel-command + one final invocation check" >&2
+  # Best-effort only: cancel-command failing (already completed, already
+  # cancelled, transport blip) does not change what we do next — the
+  # follow-up get-command-invocation check below is what actually decides
+  # the return value, so a swallowed cancel failure is safe either way.
+  aws ssm cancel-command \
+    --command-id "$command_id" \
+    --instance-ids "$instance_id" \
+    --region "$region" >/dev/null 2>&1 || true  # best-effort; outcome decided below regardless
+
+  local get_out status stdout_content
+  get_out=$(aws ssm get-command-invocation \
+    --instance-id "$instance_id" \
+    --region "$region" \
+    --command-id "$command_id" \
+    --output json 2>/dev/null) || {
+    echo "[lib-ssm] WARN: post-cancel get-command-invocation failed — remaining indeterminate" >&2
+    return 2
+  }
+  status=$(printf '%s' "$get_out" | jq -r '.Status // empty')
+  if [[ "$status" == "Success" ]]; then
+    stdout_content=$(printf '%s' "$get_out" | jq -r '.StandardOutputContent // empty')
+    printf '%s' "${stdout_content%$'\n'}"
+    return 0
+  fi
+  echo "[lib-ssm] WARN: post-cancel Status=$status — remaining indeterminate" >&2
+  return 2
 }

@@ -90,8 +90,18 @@ if [[ "$MODE_FLAG" == "--compare-and-signal" ]]; then
     echo "ERROR: --compare-and-signal requires a non-empty expected_run_id" >&2
     exit 1
   fi
-  if [[ "$EXPECTED_RUN_ID" =~ [^a-zA-Z0-9._-] ]]; then
-    echo "ERROR: expected_run_id contains unsafe characters: '$EXPECTED_RUN_ID'" >&2
+  # The lease schema (#493) only requires run_id to be a non-empty string —
+  # a pre-set RUN_ID (operator override, mint_run_id's own ts-suffixed
+  # format is always safe, but an override is not) can legitimately contain
+  # spaces or other non-control characters, and the producer preserves it
+  # verbatim in the lease (lib-agent.sh's `_agent_progress_refresh` only
+  # strips control chars and JSON-escapes `\`/`"`). Narrowing the accepted
+  # charset here (as a prior revision did) silently drops the legitimate
+  # stale-handoff path for any such run_id instead of just handling it
+  # safely — so we base64-encode it below for remote interpolation instead
+  # of restricting what characters it may contain.
+  if [[ "$EXPECTED_RUN_ID" =~ [[:cntrl:]] ]]; then
+    echo "ERROR: expected_run_id contains control characters: '$EXPECTED_RUN_ID'" >&2
     exit 1
   fi
 fi
@@ -275,13 +285,24 @@ else
   # run_id==expected} hold, send SIGTERM to the confirmed pid — all within
   # this ONE remote shell invocation, so there is no gap between the final
   # recheck and the signal for a race to land in.
+  #
+  # EXPECTED_RUN_ID is base64-encoded here and decoded remotely (same
+  # technique _ssm_build_full_cmd already uses for the whole INNER_CMD)
+  # because it is now only checked for control characters, not restricted
+  # to a safe charset — a literal interpolation like the PID's below would
+  # let a run_id containing `"` or `$(...)` break out of the assignment and
+  # execute arbitrary remote shell.
+  EXPECTED_RUN_ID_B64=$(printf '%s' "$EXPECTED_RUN_ID" | base64 | tr -d '\n') || {
+    echo "ERROR: failed to base64-encode expected_run_id" >&2
+    exit 1
+  }
   INNER_CMD=$(cat <<EOF
 ${profile_prefix}set -u
 PROJECT_ID="${SSM_REMOTE_PROJECT_ID}"
 N="${ISSUE_NUM}"
 DEV_PROGRESS_STALE_SECONDS="${DEV_PROGRESS_STALE_SECONDS}"
 EXPECTED_PID="${EXPECTED_PID}"
-EXPECTED_RUN_ID="${EXPECTED_RUN_ID}"
+EXPECTED_RUN_ID=\$(printf '%s' '${EXPECTED_RUN_ID_B64}' | base64 -d) || exit 1
 ${_snapshot_body}
 SNAP=\$(snapshot)
 RSTATE=\$(printf '%s' "\$SNAP" | jq -r '.state // "UNKNOWN"' 2>/dev/null) || RSTATE="UNKNOWN"

@@ -54,6 +54,22 @@ assert_contains() {
   fi
 }
 
+# Poll (short bounded increments) rather than a fixed wall-clock sleep for
+# "did this PID actually die yet" — a real SIGTERM's delivery is async, so
+# a fixed sleep is inherently a guess at how long that takes and is flaky
+# under scheduling pressure. Same technique as
+# test-codex-rerun-orphan-containment.sh's wait_for_pid_gone. Returns 0 as
+# soon as the pid is gone, 1 if it's still alive after the deadline.
+_wait_for_pid_gone() {
+  local pid="$1" timeout_s="${2:-5}" i
+  local iterations=$((timeout_s * 20))
+  for ((i = 0; i < iterations; i++)); do
+    kill -0 "$pid" 2>/dev/null || return 0
+    sleep 0.05
+  done
+  return 1
+}
+
 TMPROOT=$(mktemp -d)
 trap 'rm -rf "$TMPROOT"' EXIT
 
@@ -333,6 +349,109 @@ _write_remote_lease 202 111 run-a "$((NOW - 1801))"
 out=$(_run_remote_snapshot "$REMOTE_PROJECT" 202 "$REMOTE_XDG")
 assert_eq "TC-DPS-030b: remote STALE (age=1801) matches local" "STALE" "$(_state_of "$out")"
 
+# TC-DPS-035..048: remote UNKNOWN-family parity. Same fixture families as
+# the local probe's TC-DPS-005..018, run through the REAL remote driver
+# (stubbed aws/SSM transport, real remote shell snippet executed locally)
+# — a divergence in the duplicated remote classifier (agent-progress-
+# snapshot-remote-aws-ssm.sh's own copy of the snapshot logic) must fail
+# one of these, not just the FRESH/STALE-only TC-DPS-030 pair above.
+_remote_dir() { echo "$REMOTE_XDG/autonomous-${REMOTE_PROJECT}"; }
+
+# TC-DPS-035: progress.json missing -> UNKNOWN
+_write_remote_lease 220 111 run-a "$NOW"
+rm -f "$(_remote_dir)/issue-220.progress.json"
+out=$(_run_remote_snapshot "$REMOTE_PROJECT" 220 "$REMOTE_XDG")
+assert_eq "TC-DPS-035: remote missing progress.json -> UNKNOWN" "UNKNOWN" "$(_state_of "$out")"
+
+# TC-DPS-036: run-id missing -> UNKNOWN
+_write_remote_lease 221 111 run-a "$NOW"
+rm -f "$(_remote_dir)/issue-221.run-id"
+out=$(_run_remote_snapshot "$REMOTE_PROJECT" 221 "$REMOTE_XDG")
+assert_eq "TC-DPS-036: remote missing run-id -> UNKNOWN" "UNKNOWN" "$(_state_of "$out")"
+
+# TC-DPS-037: progress.json is a symlink -> UNKNOWN
+_write_remote_lease 222 111 run-a "$NOW"
+mv "$(_remote_dir)/issue-222.progress.json" "$TMPROOT/evil-remote-222.json"
+ln -sf "$TMPROOT/evil-remote-222.json" "$(_remote_dir)/issue-222.progress.json"
+out=$(_run_remote_snapshot "$REMOTE_PROJECT" 222 "$REMOTE_XDG")
+assert_eq "TC-DPS-037: remote symlinked progress.json -> UNKNOWN" "UNKNOWN" "$(_state_of "$out")"
+rm -f "$(_remote_dir)/issue-222.progress.json"
+
+# TC-DPS-038: bad mode 0644 -> UNKNOWN
+_write_remote_lease 223 111 run-a "$NOW"
+chmod 644 "$(_remote_dir)/issue-223.progress.json"
+out=$(_run_remote_snapshot "$REMOTE_PROJECT" 223 "$REMOTE_XDG")
+assert_eq "TC-DPS-038: remote mode 0644 -> UNKNOWN" "UNKNOWN" "$(_state_of "$out")"
+
+# TC-DPS-039: malformed JSON -> UNKNOWN
+_write_remote_lease 224 111 run-a "$NOW"
+echo "not json" > "$(_remote_dir)/issue-224.progress.json"
+chmod 600 "$(_remote_dir)/issue-224.progress.json"
+out=$(_run_remote_snapshot "$REMOTE_PROJECT" 224 "$REMOTE_XDG")
+assert_eq "TC-DPS-039: remote malformed JSON -> UNKNOWN" "UNKNOWN" "$(_state_of "$out")"
+
+# TC-DPS-040: missing required field -> UNKNOWN
+_write_remote_lease 225 111 run-a "$NOW"
+printf '{"schema_version":1,"pid":111,"updated_at_epoch":%s}\n' "$NOW" > "$(_remote_dir)/issue-225.progress.json"
+chmod 600 "$(_remote_dir)/issue-225.progress.json"
+out=$(_run_remote_snapshot "$REMOTE_PROJECT" 225 "$REMOTE_XDG")
+assert_eq "TC-DPS-040: remote missing run_id field -> UNKNOWN" "UNKNOWN" "$(_state_of "$out")"
+
+# TC-DPS-041: schema_version != 1 -> UNKNOWN
+_write_remote_lease 226 111 run-a "$NOW"
+printf '{"schema_version":2,"run_id":"run-a","pid":111,"updated_at_epoch":%s}\n' "$NOW" > "$(_remote_dir)/issue-226.progress.json"
+chmod 600 "$(_remote_dir)/issue-226.progress.json"
+out=$(_run_remote_snapshot "$REMOTE_PROJECT" 226 "$REMOTE_XDG")
+assert_eq "TC-DPS-041: remote schema_version=2 -> UNKNOWN" "UNKNOWN" "$(_state_of "$out")"
+
+# TC-DPS-042: pid non-numeric -> UNKNOWN
+_write_remote_lease 227 111 run-a "$NOW"
+printf '{"schema_version":1,"run_id":"run-a","pid":"abc","updated_at_epoch":%s}\n' "$NOW" > "$(_remote_dir)/issue-227.progress.json"
+chmod 600 "$(_remote_dir)/issue-227.progress.json"
+out=$(_run_remote_snapshot "$REMOTE_PROJECT" 227 "$REMOTE_XDG")
+assert_eq "TC-DPS-042: remote non-numeric pid -> UNKNOWN" "UNKNOWN" "$(_state_of "$out")"
+
+# TC-DPS-043: updated_at_epoch non-numeric -> UNKNOWN
+_write_remote_lease 228 111 run-a "$NOW"
+printf '{"schema_version":1,"run_id":"run-a","pid":111,"updated_at_epoch":"abc"}\n' > "$(_remote_dir)/issue-228.progress.json"
+chmod 600 "$(_remote_dir)/issue-228.progress.json"
+out=$(_run_remote_snapshot "$REMOTE_PROJECT" 228 "$REMOTE_XDG")
+assert_eq "TC-DPS-043: remote non-numeric updated_at_epoch -> UNKNOWN" "UNKNOWN" "$(_state_of "$out")"
+
+# TC-DPS-044: updated_at_epoch negative -> UNKNOWN
+_write_remote_lease 229 111 run-a "$NOW"
+printf '{"schema_version":1,"run_id":"run-a","pid":111,"updated_at_epoch":-5}\n' > "$(_remote_dir)/issue-229.progress.json"
+chmod 600 "$(_remote_dir)/issue-229.progress.json"
+out=$(_run_remote_snapshot "$REMOTE_PROJECT" 229 "$REMOTE_XDG")
+assert_eq "TC-DPS-044: remote negative updated_at_epoch -> UNKNOWN" "UNKNOWN" "$(_state_of "$out")"
+
+# TC-DPS-045: updated_at_epoch in the future -> UNKNOWN
+_write_remote_lease 230 111 run-a "$((NOW + 1000))"
+out=$(_run_remote_snapshot "$REMOTE_PROJECT" 230 "$REMOTE_XDG")
+assert_eq "TC-DPS-045: remote future updated_at_epoch -> UNKNOWN" "UNKNOWN" "$(_state_of "$out")"
+
+# TC-DPS-046: lease pid != current issue-N.pid -> UNKNOWN
+_write_remote_lease 231 111 run-a "$NOW"
+echo "999" > "$(_remote_dir)/issue-231.pid"
+chmod 600 "$(_remote_dir)/issue-231.pid"
+out=$(_run_remote_snapshot "$REMOTE_PROJECT" 231 "$REMOTE_XDG")
+assert_eq "TC-DPS-046: remote pid mismatch -> UNKNOWN" "UNKNOWN" "$(_state_of "$out")"
+
+# TC-DPS-047: lease run_id != current run-id (prior-run lease) -> UNKNOWN, never FRESH
+_write_remote_lease 232 111 run-a "$NOW"
+echo "run-PRIOR" > "$(_remote_dir)/issue-232.run-id"
+chmod 600 "$(_remote_dir)/issue-232.run-id"
+out=$(_run_remote_snapshot "$REMOTE_PROJECT" 232 "$REMOTE_XDG")
+assert_eq "TC-DPS-047: remote prior-run lease (run_id mismatch) -> UNKNOWN, never FRESH" "UNKNOWN" "$(_state_of "$out")"
+
+# TC-DPS-048: run-id is a symlink -> UNKNOWN
+_write_remote_lease 233 111 run-a "$NOW"
+mv "$(_remote_dir)/issue-233.run-id" "$TMPROOT/evil-remote-233.run-id"
+ln -sf "$TMPROOT/evil-remote-233.run-id" "$(_remote_dir)/issue-233.run-id"
+out=$(_run_remote_snapshot "$REMOTE_PROJECT" 233 "$REMOTE_XDG")
+assert_eq "TC-DPS-048: remote symlinked run-id -> UNKNOWN" "UNKNOWN" "$(_state_of "$out")"
+rm -f "$(_remote_dir)/issue-233.run-id"
+
 # TC-DPS-031: SSM send-command failure -> UNKNOWN, never STALE
 out=$(
   stub_bin="$TMPROOT/fail-stub-bin"
@@ -412,14 +531,21 @@ assert_eq "TC-DPS-033: malformed remote stdout -> rc=2 (indeterminate, never STA
 # NOT touching the controller's own `date` — the remote inner script's own
 # `date -u +%s` call (executed via the stub's `bash -c`) is what computes AGE,
 # so this is inherently remote-clock-derived; assert the resulting age is
-# still exactly what the remote-side computation would produce.
-_write_remote_lease 205 111 run-a "$((NOW - 1801))"
+# still exactly what the remote-side computation would produce. The
+# tolerance window is computed from the REAL wall clock at assertion time
+# (not a fixed constant) — this block runs after an increasing number of
+# earlier fixture/driver invocations elsewhere in this file, so a fixed
+# "< N seconds since script start" window would grow flaky as this file
+# gains more test cases ahead of it.
+_write_epoch=$(date -u +%s)
+_write_remote_lease 205 111 run-a "$((_write_epoch - 1801))"
 out=$(_run_remote_snapshot "$REMOTE_PROJECT" 205 "$REMOTE_XDG")
 remote_age=$(jq -r '.age' <<<"$out" 2>/dev/null)
-if [[ "$remote_age" -ge 1801 ]] && [[ "$remote_age" -lt 1810 ]]; then
+_expected_age_ceiling=$(( $(date -u +%s) - _write_epoch + 1801 + 5 ))
+if [[ "$remote_age" -ge 1801 ]] && [[ "$remote_age" -le "$_expected_age_ceiling" ]]; then
   ok "TC-DPS-034: remote age computed independently (age=${remote_age}, expected ~1801)"
 else
-  bad "TC-DPS-034: remote age computed independently (got age=${remote_age}, expected ~1801)"
+  bad "TC-DPS-034: remote age computed independently (got age=${remote_age}, expected <= ${_expected_age_ceiling})"
 fi
 
 # Compare-and-signal: SIGNALED path against a real background process.
@@ -428,12 +554,11 @@ REAL_PID=$!
 _write_remote_lease 206 "$REAL_PID" run-sig "$((NOW - 1801))"
 out=$(_run_remote_cas "$REMOTE_PROJECT" 206 "$REMOTE_XDG" "$REAL_PID" "run-sig")
 assert_eq "TC-S5A-031 (remote CAS): matching pid/run_id -> SIGNALED" "SIGNALED" "$out"
-sleep 0.3
-if kill -0 "$REAL_PID" 2>/dev/null; then
+if _wait_for_pid_gone "$REAL_PID" 5; then
+  ok "TC-S5A-031 (remote CAS): process actually terminated"
+else
   bad "TC-S5A-031 (remote CAS): process actually terminated"
   kill "$REAL_PID" 2>/dev/null
-else
-  ok "TC-S5A-031 (remote CAS): process actually terminated"
 fi
 
 # Compare-and-signal: ABORTED on run_id mismatch — process must survive.
@@ -442,7 +567,9 @@ REAL_PID2=$!
 _write_remote_lease 207 "$REAL_PID2" run-sig "$((NOW - 1801))"
 out=$(_run_remote_cas "$REMOTE_PROJECT" 207 "$REMOTE_XDG" "$REAL_PID2" "WRONG-RUN-ID")
 assert_eq "TC-S5A-032 (remote CAS): run_id mismatch -> ABORTED" "ABORTED:run-id-changed" "$out"
-sleep 0.3
+# No signal was ever sent on this path (ABORTED short-circuits before
+# `kill -TERM`), so there is no async-delivery race to wait out here —
+# check liveness immediately.
 if kill -0 "$REAL_PID2" 2>/dev/null; then
   ok "TC-S5A-032 (remote CAS): process survives an aborted signal"
 else
