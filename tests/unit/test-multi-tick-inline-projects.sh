@@ -86,6 +86,8 @@ fi
   printf 'SSM_REMOTE_PROJECT_DIR=%s\n' "${SSM_REMOTE_PROJECT_DIR:-<unset>}"
   printf 'ISSUE_FILTER=%s\n' "${ISSUE_FILTER:-<unset>}"
   printf 'ISSUE_SCAN_LIMIT=%s\n' "${ISSUE_SCAN_LIMIT:-<unset>}"
+  printf 'HUMAN_ESCALATION_LOGIN=%s\n' "${HUMAN_ESCALATION_LOGIN:-<unset>}"
+  printf 'DEV_BOT_LOGIN=%s\n' "${DEV_BOT_LOGIN:-<unset>}"
   printf '%s\n' '---'
 } >> "$TICK_RECORD_FILE"
 exit 0
@@ -467,6 +469,140 @@ assert_contains "TC-IFILT-124 ambient ISSUE_FILTER does NOT leak into omitting p
 assert_contains "TC-IFILT-124 ambient ISSUE_SCAN_LIMIT does NOT leak into omitting project" "ISSUE_SCAN_LIMIT=<unset>" "$record"
 assert_not_contains "TC-IFILT-124 stale ambient filter value absent from record" "label:stale-ambient" "$record"
 assert_not_contains "TC-IFILT-124 stale ambient scan limit absent from record" "ISSUE_SCAN_LIMIT=999" "$record"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-PAEM-130: HUMAN_ESCALATION_LOGIN/DEV_BOT_LOGIN export into inline project subshell (#495 review finding #2) ==="
+# ---------------------------------------------------------------------------
+# Without this export, an inline (remote-aws-ssm) project's dispatcher-tick.sh
+# process never sees an operator-set HUMAN_ESCALATION_LOGIN/DEV_BOT_LOGIN —
+# every dispatcher-side escalation fallback on that project silently reverts
+# to REPO_OWNER (the exact GitLab group-blast problem issue #495 exists to
+# fix), even though the SAME conf keys work correctly for a local (path-entry)
+# project whose autonomous.conf is sourced directly.
+CONF="$TMPROOT/disp-paem-130.conf"
+RECORD="$TMPROOT/record-paem-130"
+: > "$RECORD"
+cat > "$CONF" <<'EOF'
+PROJECTS=()
+PROJECTS+=( '
+PROJECT_ID=projEscalation
+REPO=myorg/projEscalation
+EXECUTION_BACKEND=remote-aws-ssm
+SSM_INSTANCE_ID=i-esc
+SSM_REMOTE_PROJECT_DIR=/data/git/projEscalation
+SSM_REMOTE_PROJECT_ID=projEscalation
+HUMAN_ESCALATION_LOGIN=maintainer1
+DEV_BOT_LOGIN=my-org-ci-bot
+' )
+EOF
+DISPATCHER_CONF="$CONF" TICK_RECORD_FILE="$RECORD" \
+  bash "$SANDBOX/dispatcher-multi-tick.sh" >/dev/null 2>&1
+rc=$?
+assert_rc "TC-PAEM-130 rc=0 for HUMAN_ESCALATION_LOGIN/DEV_BOT_LOGIN inline project" 0 "$rc"
+record=$(cat "$RECORD")
+assert_contains "TC-PAEM-130 HUMAN_ESCALATION_LOGIN propagated" "HUMAN_ESCALATION_LOGIN=maintainer1" "$record"
+assert_contains "TC-PAEM-130 DEV_BOT_LOGIN propagated" "DEV_BOT_LOGIN=my-org-ci-bot" "$record"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-PAEM-131: project without HUMAN_ESCALATION_LOGIN/DEV_BOT_LOGIN stays unset (byte-identical default) ==="
+# ---------------------------------------------------------------------------
+CONF="$TMPROOT/disp-paem-131.conf"
+RECORD="$TMPROOT/record-paem-131"
+: > "$RECORD"
+cat > "$CONF" <<'EOF'
+PROJECTS=()
+PROJECTS+=( '
+PROJECT_ID=projNoEscalation
+REPO=myorg/projNoEscalation
+EXECUTION_BACKEND=remote-aws-ssm
+SSM_INSTANCE_ID=i-noesc
+SSM_REMOTE_PROJECT_DIR=/data/git/projNoEscalation
+SSM_REMOTE_PROJECT_ID=projNoEscalation
+' )
+EOF
+DISPATCHER_CONF="$CONF" TICK_RECORD_FILE="$RECORD" \
+  bash "$SANDBOX/dispatcher-multi-tick.sh" >/dev/null 2>&1
+rc=$?
+assert_rc "TC-PAEM-131 rc=0 for project without HUMAN_ESCALATION_LOGIN/DEV_BOT_LOGIN" 0 "$rc"
+record=$(cat "$RECORD")
+assert_contains "TC-PAEM-131 HUMAN_ESCALATION_LOGIN stays unset" "HUMAN_ESCALATION_LOGIN=<unset>" "$record"
+assert_contains "TC-PAEM-131 DEV_BOT_LOGIN stays unset" "DEV_BOT_LOGIN=<unset>" "$record"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-PAEM-132: ambient HUMAN_ESCALATION_LOGIN/DEV_BOT_LOGIN does NOT leak into an inline project that omits both (review round 2) ==="
+# ---------------------------------------------------------------------------
+# Mirrors TC-IFILT-124's threat model exactly: a stale value exported into the
+# process that launches dispatcher-multi-tick.sh (a cron environment, a
+# dispatcher.conf-level top-level assignment sourced directly into THIS
+# process, or a leftover operator shell export) must NOT leak into an inline
+# project whose own block omits both keys — otherwise that project silently
+# mentions the wrong maintainer / misclassifies a login as the dev bot on
+# someone else's PR, exactly the class of bug #495 exists to eliminate.
+CONF="$TMPROOT/disp-paem-132.conf"
+RECORD="$TMPROOT/record-paem-132"
+: > "$RECORD"
+cat > "$CONF" <<'EOF'
+PROJECTS=()
+PROJECTS+=( '
+PROJECT_ID=projNoEscalationAttr
+REPO=myorg/projNoEscalationAttr
+EXECUTION_BACKEND=remote-aws-ssm
+SSM_INSTANCE_ID=i-noescattr
+SSM_REMOTE_PROJECT_DIR=/data/git/projNoEscalationAttr
+SSM_REMOTE_PROJECT_ID=projNoEscalationAttr
+' )
+EOF
+HUMAN_ESCALATION_LOGIN="stale-ambient-maintainer" DEV_BOT_LOGIN="stale-ambient-bot" \
+  DISPATCHER_CONF="$CONF" TICK_RECORD_FILE="$RECORD" \
+  bash "$SANDBOX/dispatcher-multi-tick.sh" >/dev/null 2>&1
+rc=$?
+assert_rc "TC-PAEM-132 rc=0 despite ambient HUMAN_ESCALATION_LOGIN/DEV_BOT_LOGIN" 0 "$rc"
+record=$(cat "$RECORD")
+assert_contains "TC-PAEM-132 ambient HUMAN_ESCALATION_LOGIN does NOT leak into omitting project" "HUMAN_ESCALATION_LOGIN=<unset>" "$record"
+assert_contains "TC-PAEM-132 ambient DEV_BOT_LOGIN does NOT leak into omitting project" "DEV_BOT_LOGIN=<unset>" "$record"
+assert_not_contains "TC-PAEM-132 stale ambient maintainer login absent from record" "stale-ambient-maintainer" "$record"
+assert_not_contains "TC-PAEM-132 stale ambient bot login absent from record" "stale-ambient-bot" "$record"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-PAEM-133: ambient HUMAN_ESCALATION_LOGIN/DEV_BOT_LOGIN does NOT leak into a LOCAL path-entry project that omits both (review round 3) ==="
+# ---------------------------------------------------------------------------
+# TC-PAEM-132's inline-project mirror, but for the OTHER branch of the
+# per-project tick loop (is_path_entry — PR-8 local projects). Round-3 codex
+# finding: the round-2 fix only unset both vars inside tick_inline_project,
+# so a local project's autonomous.conf that omits both keys still inherited
+# whatever dispatcher-multi-tick.sh's own process (cron env / dispatcher.conf
+# top-level assignment) had exported — the identical ambient-pollution class
+# TC-PAEM-132 exists to prevent, just on the local-path branch instead of the
+# inline branch.
+LOCAL_CONF_NOESC="$TMPROOT/local-autoconf-noesc.conf"
+cat > "$LOCAL_CONF_NOESC" <<'EOF'
+REPO=myorg/local-proj-noesc
+REPO_OWNER=myorg
+REPO_NAME=local-proj-noesc
+PROJECT_ID=local-proj-noesc
+PROJECT_DIR=/tmp/local-proj-noesc
+EOF
+CONF="$TMPROOT/disp-paem-133.conf"
+RECORD="$TMPROOT/record-paem-133"
+: > "$RECORD"
+{
+  echo 'PROJECTS=()'
+  printf 'PROJECTS+=( %q )\n' "$LOCAL_CONF_NOESC"
+} > "$CONF"
+HUMAN_ESCALATION_LOGIN="stale-ambient-maintainer" DEV_BOT_LOGIN="stale-ambient-bot" \
+  DISPATCHER_CONF="$CONF" TICK_RECORD_FILE="$RECORD" \
+  bash "$SANDBOX/dispatcher-multi-tick.sh" >/dev/null 2>&1
+rc=$?
+assert_rc "TC-PAEM-133 rc=0 despite ambient HUMAN_ESCALATION_LOGIN/DEV_BOT_LOGIN" 0 "$rc"
+record=$(cat "$RECORD")
+assert_contains "TC-PAEM-133 ambient HUMAN_ESCALATION_LOGIN does NOT leak into omitting local project" "HUMAN_ESCALATION_LOGIN=<unset>" "$record"
+assert_contains "TC-PAEM-133 ambient DEV_BOT_LOGIN does NOT leak into omitting local project" "DEV_BOT_LOGIN=<unset>" "$record"
+assert_not_contains "TC-PAEM-133 stale ambient maintainer login absent from record" "stale-ambient-maintainer" "$record"
+assert_not_contains "TC-PAEM-133 stale ambient bot login absent from record" "stale-ambient-bot" "$record"
 
 # ---------------------------------------------------------------------------
 echo ""

@@ -144,6 +144,143 @@ It also **prunes stale per-lib symlinks** a pre-#227 install left behind (harmle
 
 **Operator responsibility**: the pipeline assumes the configured base branch carries the SAME protections `main` has here (PR-only, required status checks) — this is documented in the conf comment block, not verified at runtime. GitLab default-branch auto-detection is unaffected/out of scope: `chp_gitlab_create_pr` still probes `GET /projects/:id` for `default_branch` when `BASE_BRANCH` is unset (pre-#478 behavior, unchanged); an explicit `BASE_BRANCH` simply skips that probe and targets the configured branch directly.
 
+## Escalation-comment mention-target policy (issue #495)
+
+Human-in-the-loop escalation comments no longer unconditionally `@`-mention
+`${REPO_OWNER}`. On GitHub, `REPO_OWNER` is usually an individual account, so
+the pre-#495 blast was benign; on GitLab, `REPO_OWNER` is the project's
+*group* namespace, so the same blast notified every group member on every
+stall. Three mention-target classes now apply, split by whether the comment
+is genuinely PR-scoped:
+
+1. **PR-scoped stall/escalation reports** (a PR is normally already resolved
+   by the time these fire — Step 4's completed-session router
+   `handle_completed_session_routing`, the `_same_head_verdict_aware_recovery`
+   helper, and the [INV-105] convergence circuit-breaker report) call the
+   shared resolver
+   `resolve_pr_author_mention <PR_NUMBER>`
+   (`lib-review-resolve-author.sh`, sourced by both `lib-dispatch.sh` and
+   `autonomous-review.sh` so the dispatcher and the review wrapper resolve
+   the SAME target identically). The resolver reads the PR's author via
+   `chp_pr_view <pr> author` (provider-spec.md §3.2.1's pr_view-only 15th
+   vocabulary member) and mentions that human — **unless** the author is a
+   bot: an autonomous PR's author is normally the dev-agent bot itself
+   (`app/…` on GitHub, a `project_N_bot_…`/`group_N_bot_…` service account on
+   GitLab, the wrapper's own resolved `BOT_LOGIN`, or the operator-configured
+   `DEV_BOT_LOGIN`), so mentioning it would notify nobody. On any bot author,
+   null/empty author, non-numeric PR arg, or `chp_pr_view` failure, the
+   resolver falls back to `@${HUMAN_ESCALATION_LOGIN:-$REPO_OWNER}`. The
+   resolver ALWAYS exits 0 and emits exactly one `@<token>` — it never aborts
+   a `set -euo pipefail` caller. **Malformed `.author` shape hardening (#495
+   review round 3, extended round 5):** the resolver only accepts a
+   single-token JSON *string* author; a non-string shape (e.g. a stray
+   `{"login":"…"}` object surviving a provider-leaf regression) or a string
+   that fails `_rpam_malformed_mention_token` — embedded whitespace/newline,
+   OR an embedded `@` (e.g. a provider projection like `"alice@evil"`, round 5
+   finding) — falls back rather than being echoed verbatim into the mention;
+   otherwise the posted comment body itself could become multiline/
+   multi-token or carry a second `@`-token. The same
+   `_rpam_malformed_mention_token` check validates the CONFIGURED
+   `HUMAN_ESCALATION_LOGIN` fallback token itself (#495 review round 3,
+   finding #2): a value containing whitespace or an embedded `@` (e.g. an
+   operator pasting `@maintainer` verbatim, or a typo like `alice@evil`) is
+   treated as absent and falls through to `REPO_OWNER` instead of being
+   echoed verbatim — otherwise a misconfigured conf value could itself break
+   the exactly-one-token contract.
+
+   **`DEV_BOT_LOGIN`** (`autonomous.conf.example`, optional, defaults empty —
+   #495 review finding #1): the dispatcher-side counterpart to `BOT_LOGIN`.
+   `BOT_LOGIN` is resolved only inside `autonomous-review.sh`'s own process
+   (its `gh api user` call at wrapper startup) and is **never** set in
+   `lib-dispatch.sh`'s process — several verdict-authentication invariants
+   depend on that being permanently true, so the resolver cannot simply
+   thread `BOT_LOGIN` into the dispatcher call path. The two structural bot
+   rules (`^app/`, `[bot]$`, the GitLab service-account pattern) miss a dev
+   agent whose login is a plain string with none of those shapes — e.g.
+   `GH_AUTH_MODE=token` where the dev agent's PRs are authored under the same
+   shared PAT identity the dispatcher runs as, under a login like
+   `my-org-ci-bot`. Setting `DEV_BOT_LOGIN` to that login closes the gap on
+   the dispatcher (`lib-dispatch.sh`) call sites; unset, this arm is a no-op
+   (byte-identical to pre-#495-finding-#1 behavior).
+2. **Maintainer-only sites** — the review wrapper's approval-failed fallback
+   and the `no-auto-close` "please review and merge" notice (`autonomous-
+   review.sh`, Step 4c equivalent on the review side) never call
+   `resolve_pr_author_mention`: a PR author cannot approve or merge their own
+   PR, so these call the sibling `resolve_operator_mention` (no args) instead.
+3. **Operator-only sites where no PR is guaranteed** — the MAX_RETRIES stall
+   above (Step 4a; can fire with zero PRs in flight), the non-substantive
+   flip-cap notice, the liveness bookkeeping-marker warning, the liveness
+   tier-1 notice (Step 6), and the class-level park backstop also call
+   `resolve_operator_mention` — no `resolve_pr_author_mention` call, since
+   there may be no PR to resolve an author from.
+
+   **`resolve_operator_mention` (#495 review round 4 finding #1):** these 8
+   sites (the 2 maintainer-only + 6 operator-only above) originally
+   interpolated `@${HUMAN_ESCALATION_LOGIN:-$REPO_OWNER}` directly — a plain
+   variable substitution that bypassed `_rpam_fallback`'s malformed-token
+   validation (the same whitespace/embedded-`@` guard the resolver's OWN
+   fallback path already applies to a misconfigured `HUMAN_ESCALATION_LOGIN`,
+   round 3 finding #2). `resolve_operator_mention` (`lib-review-resolve-
+   author.sh`, no args, same file as `resolve_pr_author_mention`) is a thin
+   public wrapper over the identical `_rpam_fallback` chain, so a malformed
+   configured value now falls back to `REPO_OWNER` at these 8 sites exactly
+   as it already did inside the resolver's own fallback path — closing the
+   validation gap without introducing a second fallback implementation.
+
+`HUMAN_ESCALATION_LOGIN` (`autonomous.conf.example`, new optional key near
+`REPO_OWNER`) is the fallback login for classes 1 and 3 when the PR-author
+resolution isn't possible or doesn't apply; it defaults to empty, in which
+case the fallback is `REPO_OWNER` (today's byte-identical behavior on an
+unset conf). Operators on GitLab should set it to an individual maintainer
+login to avoid group-wide notification fan-out.
+
+**Multi-project / remote-project propagation (#495 review finding #2)**: for
+a `remote-aws-ssm` project declared **inline** in `dispatcher.conf` (as
+opposed to a local path-entry `autonomous.conf`), `dispatcher-multi-tick.sh`'s
+`tick_inline_project` explicitly re-exports both `HUMAN_ESCALATION_LOGIN` and
+`DEV_BOT_LOGIN` into the per-project subshell when the inline block declares
+them (mirroring the existing `ISSUE_FILTER`/`ISSUE_SCAN_LIMIT` export
+pattern) — see `dispatcher.conf.example`. Without this, an inline project's
+`dispatcher-tick.sh` process never observes an operator-set value for either
+key (both variables are simply absent from that subshell's environment), so
+every dispatcher-side escalation fallback for that project silently reverts
+to `REPO_OWNER` regardless of conf intent. A LOCAL path-entry project sources
+its `autonomous.conf` directly, so this specific propagation gap (a
+declared-but-not-exported value) never applied to it — but see the
+ambient-leak guard below, which DOES apply to both branches.
+
+**Ambient-leak guard (review round 2, widened round 3)**:
+`tick_inline_project` also `unset`s `HUMAN_ESCALATION_LOGIN`/`DEV_BOT_LOGIN`
+(alongside the pre-existing `ISSUE_FILTER`/`ISSUE_SCAN_LIMIT` unset) in the
+per-project subshell BEFORE `eval`-ing the inline block. Without this, a
+value exported into the process that launches `dispatcher-multi-tick.sh` (an
+operator's cron environment, or a `dispatcher.conf` top-level assignment —
+that file is `source`d directly into `dispatcher-multi-tick.sh`'s own
+process) would leak into an inline project whose OWN block omits both keys,
+silently mentioning the wrong maintainer / misclassifying a login as the dev
+bot on a DIFFERENT project's PR — the exact ambient-pollution class
+`ISSUE_FILTER`'s own `TC-IFILT-124` regression test (issue #436) exists to
+prevent, now mirrored for these two vars by `TC-PAEM-132`.
+
+The round-2 fix only covered the inline branch. Round 3 found the SAME
+ambient-leak class on the OTHER branch of the per-project loop: a LOCAL
+path-entry project's subshell (`( AUTONOMOUS_CONF="$entry" bash
+dispatcher-tick.sh )`) had no `unset` at all, so a local project's
+`autonomous.conf` that omits both keys would still inherit whatever
+`dispatcher-multi-tick.sh`'s own process had ambient — the identical hazard,
+just on the local-path branch. Fixed by adding the same `unset
+HUMAN_ESCALATION_LOGIN DEV_BOT_LOGIN` immediately before that branch's
+`AUTONOMOUS_CONF=... bash dispatcher-tick.sh` invocation; the project's own
+`autonomous.conf`, sourced fresh inside the child, still opts back in
+normally. Regression-pinned by `TC-PAEM-133` (mirrors `TC-PAEM-132` on the
+local-path branch instead of the inline branch).
+
+**Byte-identical-default guarantee**: this is a pure targeting change — no
+label transition, gate, or comment WORDING changes. The `resolve_pr_author_
+mention` bot-detection rule is deliberately NOT a broad `*bot*` substring
+match (a human login containing "bot", e.g. `robert`/`abbot`, is never
+misclassified).
+
 ## Pre-step: opportunistic lane GC ([INV-117](invariants.md#inv-117-a-periodic-box-wide-gc-reclaims-dead-lane-process-residue-under-a-decision-table-that-fails-toward-leak-never-toward-false-kill--dry-run-by-default), #380)
 
 Before `kill_stale_wrapper` runs, `dispatch-local.sh` opportunistically invokes `adt-gc.sh --quick || true` — Pass 1 (registry-driven) only, flock-guarded (`flock -w 3`, never `-n`, so a quick call queues briefly behind a concurrent full run instead of starving), dry-run by default. This means a busy box self-cleans dead-lane process residue on every dispatch even when no periodic timer (`install-gc-timer.sh`) has been installed on the host. `|| true` — GC is best-effort; a missing/broken `adt-gc.sh` (stale skill tree) never blocks or delays a dispatch.

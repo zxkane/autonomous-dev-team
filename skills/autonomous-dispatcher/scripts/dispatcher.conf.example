@@ -88,6 +88,12 @@ PROJECTS+=( "/data/git/myrepo-local/scripts/autonomous.conf" )
 # per-slice note, and the ISSUE_SCAN_LIMIT filter-after-limit-truncation
 # guidance — see that file for the full writeup, not duplicated here).
 #
+# HUMAN_ESCALATION_LOGIN / DEV_BOT_LOGIN (issue #495) — resolve_pr_author_
+# mention's escalation mention-target fallback + dispatcher-side bot-login
+# override. Same semantics as autonomous.conf.example's entries. Optional;
+# an inline project that omits them behaves exactly as before (fallback to
+# REPO_OWNER, no dispatcher-side DEV_BOT_LOGIN classification).
+#
 # INLINE-BLOCK CHARSET RESTRICTION: unlike a per-project autonomous.conf
 # file (sourced directly, no restriction), an INLINE ISSUE_FILTER value in
 # THIS file is validated by `validate_inline_block` before it is eval'd —
@@ -116,6 +122,8 @@ MAX_CONCURRENT=5
 MAX_RETRIES=3
 ISSUE_FILTER=label:box-tokyo
 ISSUE_SCAN_LIMIT=100
+HUMAN_ESCALATION_LOGIN=maintainer-username
+DEV_BOT_LOGIN=my-org-ci-bot
 ' )
 
 # ---------------------------------------------------------------------------

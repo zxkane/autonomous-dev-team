@@ -218,6 +218,16 @@ dev_report_bot_unfixable() {
   return "$_MOCK_BOT_UNFIXABLE"
 }
 
+# [#495 review finding #3] chp_pr_view mock for the resolve_pr_author_mention
+# integration path exercised at the bottom of this file (INV-85 Branch B). The
+# real resolver (lib-review-resolve-author.sh) is sourced for real — only its
+# ONE PR-read primitive is stubbed, so the actual bot-detection + fallback
+# logic runs end-to-end against a converted PR-scoped stall comment.
+_MOCK_PR_AUTHOR='"alice"'
+chp_pr_view() {
+  printf '{"author": %s}' "$_MOCK_PR_AUTHOR"
+}
+
 # #281: handle_completed_session_routing's marker-presence idempotency checks
 # now fetch via `itp_list_comments | jq '[.[].body|select(contains(M))]|length'`
 # instead of routing the marker through the `gh issue view` argv. Override the
@@ -295,6 +305,8 @@ reset_mocks() {
   _MOCK_MATCHED_PATTERNS_HEAD=""
   _MOCK_NOTICE_SESSION=""   # #281: session id the synthesized INV-12/INV-35 marker carries
   _MOCK_PR_LOOKUP_FAILS="0" # [INV-123] (#461): simulate fetch_pr_for_issue transport failure
+  _MOCK_PR_AUTHOR='"alice"' # [#495 review finding #3] resolve_pr_author_mention integration mock
+  unset HUMAN_ESCALATION_LOGIN DEV_BOT_LOGIN BOT_LOGIN
   unset REVIEW_RETRY_LIMIT
   if [[ -n "$_MOCK_LOG_FILE" ]]; then
     chmod u+w "$_MOCK_LOG_FILE" 2>/dev/null || true
@@ -324,6 +336,19 @@ assert_contains() {
   else
     echo -e "  ${RED}FAIL${NC}: $desc"
     echo "      needle=[$needle]"
+    echo "      haystack=[$haystack]"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
+assert_not_contains() {
+  local desc="$1" needle="$2" haystack="$3"
+  if [[ "$haystack" != *"$needle"* ]]; then
+    echo -e "  ${GREEN}PASS${NC}: $desc"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${NC}: $desc"
+    echo "      should NOT contain: [$needle]"
     echo "      haystack=[$haystack]"
     FAIL=$((FAIL + 1))
   fi
@@ -800,6 +825,80 @@ else
   echo -e "  ${RED}FAIL${NC}: NOPROG-008 notice contains the grep token (would false-trigger branch B)"
   FAIL=$((FAIL + 1))
 fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== resolve_pr_author_mention integration on a converted stall path (#495 review finding #3) ==="
+# ---------------------------------------------------------------------------
+# The unit suite for #495 (test-pr-author-escalation-mention.sh) proves the
+# resolver's own logic AND that this call site's SOURCE TEXT invokes it, but
+# never actually RUNS handle_completed_session_routing through a REAL
+# resolve_pr_author_mention against a bot-authored PR and inspects the
+# resulting comment. This section closes that gap: it reuses the SAME INV-85
+# Branch B (no-progress) path NOPROG-001 exercises above, but with the real
+# lib-review-resolve-author.sh sourced (not mocked) so the emitted mention is
+# genuinely computed end-to-end.
+
+# TC-PAEM-RT-001: PR author is a human (`alice`) → the stall comment mentions
+# the human author, not the group/operator fallback.
+reset_mocks
+_MOCK_VERDICT="failed-substantive"
+_MOCK_PR_HEAD="deadbeef"
+_MOCK_LAST_REVIEWED_HEAD="deadbeef"
+_MOCK_NOPROG_ATTEMPT_PRESENT="1"   # a dev-new already ran for deadbeef (Branch B)
+_MOCK_PR_AUTHOR='"alice"'
+REPO_OWNER="the-owner"
+prepare_log 100
+assert_returns "TC-PAEM-RT-001 returns 0" 0 \
+  handle_completed_session_routing 100 "sid-paem001" "2026-05-21T03:18:00Z"
+assert_contains "TC-PAEM-RT-001 stall comment mentions the human PR author" \
+  "@alice" "$_MOCK_LAST_COMMENT_BODY"
+assert_not_contains "TC-PAEM-RT-001 stall comment does NOT mention REPO_OWNER" \
+  "@the-owner" "$_MOCK_LAST_COMMENT_BODY"
+
+# TC-PAEM-RT-002: PR author is the dev-agent BOT (`my-claw[bot]`) — this is
+# the pre-fix-red regression: before #495, this stall comment mentioned
+# @REPO_OWNER unconditionally, which is what a naive "always REPO_OWNER"
+# implementation would still do. Post-fix, the bot author is detected and the
+# comment falls back through HUMAN_ESCALATION_LOGIN (unset here) to
+# REPO_OWNER — same end target as before for THIS row, but via the resolver's
+# bot-detection path, not a hardcoded literal. TC-PAEM-RT-003 below proves the
+# fallback is actually HUMAN_ESCALATION_LOGIN-aware (the part a hardcoded
+# @REPO_OWNER literal could never satisfy).
+reset_mocks
+_MOCK_VERDICT="failed-substantive"
+_MOCK_PR_HEAD="deadbeef"
+_MOCK_LAST_REVIEWED_HEAD="deadbeef"
+_MOCK_NOPROG_ATTEMPT_PRESENT="1"
+_MOCK_PR_AUTHOR='"my-claw[bot]"'
+REPO_OWNER="the-owner"
+prepare_log 100
+assert_returns "TC-PAEM-RT-002 returns 0" 0 \
+  handle_completed_session_routing 100 "sid-paem002" "2026-05-21T03:18:00Z"
+assert_contains "TC-PAEM-RT-002 bot-authored PR falls back to REPO_OWNER (never the bot login)" \
+  "@the-owner" "$_MOCK_LAST_COMMENT_BODY"
+assert_not_contains "TC-PAEM-RT-002 stall comment never mentions the bot login" \
+  "@my-claw[bot]" "$_MOCK_LAST_COMMENT_BODY"
+
+# TC-PAEM-RT-003: same bot-authored PR, but HUMAN_ESCALATION_LOGIN is set —
+# the fallback must prefer it over REPO_OWNER (proves the fallback chain is
+# genuinely live on this call site, not a hardcoded @REPO_OWNER string).
+reset_mocks
+_MOCK_VERDICT="failed-substantive"
+_MOCK_PR_HEAD="deadbeef"
+_MOCK_LAST_REVIEWED_HEAD="deadbeef"
+_MOCK_NOPROG_ATTEMPT_PRESENT="1"
+_MOCK_PR_AUTHOR='"my-claw[bot]"'
+REPO_OWNER="the-owner"
+HUMAN_ESCALATION_LOGIN="maintainer1"
+prepare_log 100
+assert_returns "TC-PAEM-RT-003 returns 0" 0 \
+  handle_completed_session_routing 100 "sid-paem003" "2026-05-21T03:18:00Z"
+assert_contains "TC-PAEM-RT-003 bot-authored PR falls back to HUMAN_ESCALATION_LOGIN over REPO_OWNER" \
+  "@maintainer1" "$_MOCK_LAST_COMMENT_BODY"
+assert_not_contains "TC-PAEM-RT-003 stall comment does not fall through to REPO_OWNER" \
+  "@the-owner" "$_MOCK_LAST_COMMENT_BODY"
+unset HUMAN_ESCALATION_LOGIN
 
 # ---------------------------------------------------------------------------
 echo ""

@@ -969,6 +969,23 @@ _run_pr_view_assert() {
     return
   fi
 
+  # issue #495: `author` is a 15th, pr_view-ONLY vocabulary member. Drive it
+  # in a SEPARATE invocation (it is intentionally excluded from the FIELDS_CSV
+  # exact-key check above, which pins the pre-#495 14-member contract
+  # unchanged) and assert the raw `{login/username:"eve"}` object flattens to
+  # the bare string `"eve"` — the same author-flattening idiom `comments[]`/
+  # `reviews[]` already use.
+  local author_out author_rc
+  author_out="$(_invoke _PCF_GH_MODE="ok" _PCF_GH_PAYLOAD="$payload" _PCF_ARGV_FILE="$argv_file" "chp_pr_view 42 'author'" 2>&1)"; author_rc=$?
+  if [[ "$author_rc" != "0" ]]; then
+    emit FAIL "$verb" "author field rejected on pr_view (rc=$author_rc, output: ${author_out:0:200}) — issue #495 requires pr_view to ACCEPT author"
+    return
+  fi
+  if ! jq -e '.author == "eve"' >/dev/null 2>&1 <<<"$author_out"; then
+    emit FAIL "$verb" "author not flattened to bare string 'eve' (got: ${author_out:0:200})"
+    return
+  fi
+
   # Fail-CLOSED: stub gh failing → verb rc≠0 with no partial stdout.
   out="$(_invoke _PCF_GH_MODE="fail" _PCF_ARGV_FILE="$argv_file" "$invoke" 2>&1)"; rc=$?
   if [[ "$rc" == "0" ]]; then
@@ -1265,6 +1282,15 @@ _run_findpr_assert() {
     emit FAIL "$verb" "rc-0-on-error (stub gh failed but verb still returned 0, W1c1 fail-CLOSED contract)"
     return
   fi
+
+  # issue #495 parity pin: `author` is pr_view-ONLY — this list-walk verb
+  # MUST keep rejecting it (rc 2, no gh dispatch), same as any other
+  # unsupported field.
+  out="$(_invoke _PCF_GH_MODE="ok" _PCF_GH_PAYLOAD="$PAYLOADS/pr-list-valid.json" _PCF_ARGV_FILE="$argv_file" 'chp_find_pr_for_issue 42 "author" 2>/dev/null' 2>&1)"; rc=$?
+  if [[ "$rc" == "0" ]]; then
+    emit FAIL "$verb" "author accepted on chp_find_pr_for_issue (issue #495 requires pr_view-only support — must reject rc≠0)"
+    return
+  fi
   emit PASS "$verb"
 }
 
@@ -1335,6 +1361,15 @@ _run_prlist_assert() {
   out="$(_invoke _PCF_GH_MODE="fail" _PCF_ARGV_FILE="$argv_file" 'chp_pr_list open "body,number" 2>/dev/null' 2>&1)"; rc=$?
   if [[ "$rc" == "0" ]]; then
     emit FAIL "$verb" "rc-0-on-error (stub gh failed but verb still returned 0)"
+    return
+  fi
+
+  # issue #495 parity pin: `author` is pr_view-ONLY — this list-walk verb
+  # MUST keep rejecting it (rc 2, no gh dispatch), same as any other
+  # unsupported field.
+  out="$(_invoke _PCF_GH_MODE="ok" _PCF_GH_PAYLOAD="$PAYLOADS/pr-list-valid.json" _PCF_ARGV_FILE="$argv_file" 'chp_pr_list open "author" 2>/dev/null' 2>&1)"; rc=$?
+  if [[ "$rc" == "0" ]]; then
+    emit FAIL "$verb" "author accepted on chp_pr_list (issue #495 requires pr_view-only support — must reject rc≠0)"
     return
   fi
   emit PASS "$verb"
