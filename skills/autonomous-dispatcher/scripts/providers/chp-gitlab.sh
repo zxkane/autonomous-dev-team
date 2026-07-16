@@ -63,6 +63,10 @@ fi
 #     chp_gitlab_find_pr_for_issue    chp_gitlab_list_inline_comments
 #     chp_gitlab_review_threads
 #
+#   Reviewed-HEAD CI-rollup gate read (#489, [INV-134]):
+#     chp_gitlab_ci_rollup — sibling of chp_gitlab_ci_status, not a
+#     replacement; see that leaf's own header for the split rationale.
+#
 #   WRITES + remaining verbs (P3-4, #419):
 #     chp_gitlab_create_pr            chp_gitlab_approve
 #     chp_gitlab_merge                chp_gitlab_pr_comment
@@ -276,6 +280,76 @@ chp_gitlab_ci_status() {
     "")                   printf 'none' ;;  # defensive: null status with non-null head_pipeline
     *)                    printf 'pending' ;;  # unrecognized future token
   esac
+}
+
+# ---------------------------------------------------------------------------
+# chp_gitlab_ci_rollup PR — reviewed-HEAD CI-rollup gate leaf (issue #489,
+# [INV-134]). SIBLING of chp_gitlab_ci_status, NOT a replacement — mirrors
+# the chp_github_ci_rollup / chp_github_ci_status split verbatim on the
+# GitLab axis: chp_gitlab_ci_status's skipped→`pending` mapping stays
+# byte-unchanged for green-corroboration use; this leaf answers "does any
+# job block approval?", where a skipped job is non-blocking.
+#
+# Stdout: one JSON object `{"token":"<green|pending|failed|none>",
+# "failed_checks":["<name>",...]}`. rc≠0 on transport/parse failure with
+# EMPTY stdout (fail-closed).
+#
+# Endpoints: GET /projects/:id/merge_requests/:iid for `.head_pipeline`;
+# when non-null, GET /projects/:id/pipelines/:pipeline_id/jobs (paginated)
+# for the per-job {name,status} multiset — the GitLab analog of GitHub's
+# per-check {name,state} array (issue #489 D1's "per-check state multiset").
+#
+# Decision order over the per-job multiset (mirrors chp_github_ci_rollup):
+#   (1) any job status ∈ {failed, canceled} → `failed` (failed_checks lists
+#       those jobs' names)
+#   (2) else any job status NOT ∈ {success, skipped} (created, pending,
+#       running, waiting_for_resource, manual, scheduled, or any
+#       unrecognized future status) → `pending`
+#   (3) else zero jobs (pipeline exists but reports none) → `none`
+#   (4) else → `green` (success/skipped are both non-blocking)
+# A null head_pipeline (no CI configured on this MR) → `none` directly, no
+# jobs fetch (fetch-cost gate — mirrors chp_gitlab_pr_view's pattern).
+chp_gitlab_ci_rollup() {
+  local pr="${1:-}"
+  [[ "$pr" =~ ^[0-9]+$ ]] || {
+    echo "ERROR: chp_gitlab_ci_rollup requires PR (1st arg, non-empty numeric): got '${pr}'" >&2
+    return 2
+  }
+  _chp_gitlab_require_project ci_rollup || return 1
+  local raw
+  raw="$(_gl_api "/projects/${GITLAB_PROJECT:-}/merge_requests/${pr}" 2>/dev/null)" || return 1
+  [ -n "$raw" ] || return 1
+  jq -e 'type == "object"' >/dev/null 2>&1 <<<"$raw" || return 1
+  jq -e 'has("head_pipeline")' >/dev/null 2>&1 <<<"$raw" || return 1
+  local head_pipe
+  head_pipe="$(jq -r '.head_pipeline // "null"' <<<"$raw" 2>/dev/null)" || return 1
+  if [ "$head_pipe" = "null" ]; then
+    printf '{"token":"none","failed_checks":[]}'
+    return 0
+  fi
+  local pipeline_id
+  pipeline_id="$(jq -r '.head_pipeline.id // ""' <<<"$raw" 2>/dev/null)" || return 1
+  [[ "$pipeline_id" =~ ^[0-9]+$ ]] || return 1
+  local jobs_raw
+  jobs_raw="$(_gl_api --paginate "/projects/${GITLAB_PROJECT:-}/pipelines/${pipeline_id}/jobs" 2>/dev/null)" || return 1
+  [ -n "$jobs_raw" ] || return 1
+  jq -e 'type == "array"' >/dev/null 2>&1 <<<"$jobs_raw" || return 1
+  local token
+  token="$(jq -c '
+    def is_failed: . == "failed" or . == "canceled";
+    def is_nonblocking: . == "success" or . == "skipped";
+    if any(.[]; .status | is_failed) then
+      {token: "failed", failed_checks: [.[] | select(.status | is_failed) | .name]}
+    elif any(.[]; .status | is_nonblocking | not) then
+      {token: "pending", failed_checks: []}
+    elif length == 0 then
+      {token: "none", failed_checks: []}
+    else
+      {token: "green", failed_checks: []}
+    end
+  ' <<<"$jobs_raw" 2>/dev/null)" || return 1
+  [[ -n "$token" ]] || return 1
+  printf '%s' "$token"
 }
 
 # ---------------------------------------------------------------------------

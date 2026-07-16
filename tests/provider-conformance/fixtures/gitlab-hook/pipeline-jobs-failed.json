@@ -1,0 +1,4 @@
+[
+  {"name": "check-a", "status": "success"},
+  {"name": "check-b", "status": "failed"}
+]

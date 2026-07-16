@@ -692,6 +692,8 @@ if E2E_ACTIVE:
 
 After the PR-open guard ([INV-54](invariants.md#inv-54-the-pr-still-open-guard-gates-all-pass-chain-exits-not-just-pass)) confirms the PR is OPEN, and **before** the wrapper acts on the PASS, a wrapper-enforced gate re-checks the PR's `mergeable` status — so a CONFLICTING PR can never reach `approved`, regardless of whether the review agent ran its Step-0 pre-review rebase prompt ([INV-44](invariants.md#inv-44-mergeable-hard-gate--a-conflicting-pr-can-never-reach-approved)). This is the mechanical counterpart to the agent's best-effort Step 0; the prompt step still rebases clean conflicts up-front, the gate is the safety net for when it is skipped.
 
+**This is a merge-conflict gate, not a CI-status gate.** `mergeable` reflects structural mergeability with the base branch — it says nothing about whether the PR's CI checks are green. The CI-status counterpart is the sibling [CI-rollup hard gate (INV-134)](#ci-rollup-hard-gate-inv-134), which runs immediately after this gate proceeds.
+
 ```
 if PASSED_VERDICT == true:
   # (PR-open guard already ran here — see § PR-open guard (INV-54))
@@ -753,11 +755,62 @@ if PASSED_VERDICT == true:           # PR-open guard already passed; mergeable g
 - **Unscoped / PAT mode — gate is SKIPPED.** The whole gate is guarded by `[[ -n "${AGENT_GH_TOKEN_FILE:-}" ]]` (scoped mode only). When scoping is NOT armed the agent posts the bot triggers directly (in-run) via `gh-as-user.sh` and polls for the bot review *during* the run, so its OWN verdict already covers a missing bot review — there is nothing for the wrapper to wait on, and `missing_bot_reviews` does not run. The wrapper-owned wait exists solely because the scoped scrub defers the trigger to cleanup (post-verdict).
 - **Skipped on FAIL.** The gate lives inside the `PASSED_VERDICT == true` chain only — a FAIL/block verdict never reaches it (the dev side will produce a new HEAD anyway, re-arming bot review).
 
+## CI-rollup hard gate (INV-134)
+
+After the mergeable gate ([INV-44](invariants.md#inv-44-mergeable-hard-gate--a-conflicting-pr-can-never-reach-approved)) proceeds, and **before** the wrapper emits the `passed` trailer / calls `chp_approve`, a wrapper-enforced gate reads the reviewed HEAD's CI check rollup — so a red API-visible check can never reach `approved`, regardless of the fan-out agents' verdict ([INV-134](invariants.md#inv-134-a-reviewed-head-ci-rollup-hard-gate-blocks-approval-on-any-red-api-visible-check--chp_ci_status-s-skippedpending-mapping-stays-untouched-the-new-chp_ci_rollup-verb-treats-skippedneutral-as-non-blocking-green)). This closes a gap the E2E gate ([INV-46](invariants.md#inv-46-e2e-runs-once-in-a-dedicated-lane-before-the-review-fan-out--gated-not-per-agent)) does not cover — that gate only fetches the dedicated E2E job's own evidence, not the overall check rollup — and the mergeable gate above does not cover either (it reads `mergeable`, a merge-conflict signal, never CI status).
+
+**Order in the PASS chain:** PR-open guard (INV-54) → mandatory-bot-review gate (INV-79) → mergeable gate (INV-44) → **this CI-rollup gate** → PASS path (`passed` trailer → `chp_approve`).
+
+```
+if PASSED_VERDICT == true:                 # mergeable gate already proceeded (gate=proceed)
+  if ! _cir_head_matches "$PR_HEAD_SHA":    # chp_pr_view headRefOid vs the reviewed head, BEFORE the call
+    issue comment "Review held: PR's HEAD changed since this review round started ..."
+    emit_verdict_trailer failed-non-substantive cause=head-changed
+    −reviewing +pending-review ; exit 0     # never calls chp_ci_rollup/chp_approve on a stale HEAD
+
+  ROLLUP = chp_ci_rollup "$PR_NUMBER"       # {"token": "<green|pending|failed|none>", "failed_checks": [...]}
+
+  if ! _cir_head_matches "$PR_HEAD_SHA":    # re-confirmed AFTER the call too
+    issue comment "Review held: PR's HEAD changed ..." (same as above)
+    emit_verdict_trailer failed-non-substantive cause=head-changed
+    −reviewing +pending-review ; exit 0     # never calls chp_approve even though chp_ci_rollup already ran
+
+  gate = _classify_ci_rollup_gate "$ROLLUP.token"   # lib-review-ci-rollup.sh
+    green | none → proceed → fall through to the PASS path below (UNCHANGED)
+    failed → block-substantive:
+        issue comment "Review findings: ... [BLOCKING] CI check(s) failed on the reviewed HEAD: <failed_checks> ..."
+        emit_verdict_trailer failed-substantive dev-actionable=true
+        submit_request_changes <PR> "<CI-check-failure body>"   # INV-52 (substantive)
+        −reviewing +pending-dev ; exit 0    # chp_approve is NEVER reached
+    pending | empty (leaf rc≠0) | other → block-nonsubstantive:
+        _wait_marker = "<!-- ci-rollup-wait: issue=$ISSUE_NUMBER head=$PR_HEAD_SHA -->"
+        _wait_count  = count of prior ci-rollup-wait markers for THIS HEAD sha
+        if _wait_count < CI_ROLLUP_WAIT_MAX (3):
+          issue comment "Review held — ... CI checks have not completed yet / status unavailable ...
+                         (No approve/merge this tick — INV-134.)" + the SHA-bound _wait_marker
+          emit_verdict_trailer failed-non-substantive cause=awaiting-ci|ci-status-unavailable
+          −reviewing +pending-review ; exit 0   # next tick re-evaluates once CI resolves
+        else:                                    # stuck/misconfigured check
+          issue comment "Review findings: ... [BLOCKING] CI checks still not clear after N wait(s) ..."
+          emit_verdict_trailer failed-substantive dev-actionable=true
+          submit_request_changes <PR>            # INV-52 (substantive)
+          −reviewing +pending-dev ; exit 0
+```
+
+- **`chp_ci_rollup` is a SIBLING of `chp_ci_status`, not a replacement.** `chp_ci_status`'s SKIPPED→`pending` mapping (used elsewhere for green-corroboration, e.g. `_e2e_ci_green_precheck`) stays byte-unchanged; `chp_ci_rollup` treats SKIPPED/NEUTRAL as non-blocking `green` instead — a repo with a permanently-SKIPPED label-gated check must not be permanently blocked from approval.
+- **`none` (zero checks) proceeds, `failed`/`pending` do not.** A repo legitimately running no CI must not be punished; but once ANY check exists, its state is honored. This matters on free-plan private repos with no branch protection — the wrapper's approval is the ONLY gate standing between a PR and merge.
+- **Head-pinning is checked twice** — once before dispatching `chp_ci_rollup` (which reads the PR's CURRENT head, not necessarily the reviewed one) and once after (in case the head advanced mid-call). Either mismatch requeues without ever approving.
+- **Bounded wait mirrors the INV-79 bot-review-wait mechanics exactly** — a SHA-bound marker, a configurable cap (`CI_ROLLUP_WAIT_MAX`, default 3), below-cap routes to `pending-review` (not `pending-dev` — no new commits exist, so `pending-dev`'s stale-verdict guard would stall), at-cap gives up as a substantive dev-actionable FAIL.
+- **Additive only.** INV-46 (E2E hard gate) and INV-64 (agent-smoke) are unmodified by this gate — this gate double-covering the E2E job's own check is intentional defense-in-depth (an incident where the E2E job was green while a different check was red).
+- **Provider-neutral.** The wrapper calls only `chp_ci_rollup` / `chp_pr_view` — no raw `gh` call was added. Both `chp_github_ci_rollup` and `chp_gitlab_ci_rollup` implement the contract.
+
 ## Verdict = PASS path
 
 ```
 1. (PR-open guard already ran at the top of the gate chain — INV-54.
-    The PR is guaranteed OPEN here; no re-query.)
+    The PR is guaranteed OPEN here; no re-query. The CI-rollup gate — INV-134 —
+    already proceeded too: `chp_ci_rollup` read `green`/`none` on the
+    reviewed HEAD, confirmed twice against PR_HEAD_SHA.)
 2. refresh_token_env (token may have expired during the review)
 3. gh pr review --approve --body "All acceptance criteria verified. ..."
    (INV-52: a fresh APPROVE on the current HEAD supersedes any prior

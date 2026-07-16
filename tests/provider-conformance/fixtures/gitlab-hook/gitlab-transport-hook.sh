@@ -288,10 +288,28 @@ _gl_http() {
         ci-status-object-payload.json)
           _hook_headers "$headers_out" "200"
           printf '[]' ;;
+        # chp_ci_rollup (#489, [INV-134]) cues — SIBLING of chp_ci_status,
+        # reusing its all-success/mixed-failure/empty fixtures (same
+        # head_pipeline ids, routed to a pipeline-jobs fixture below) plus
+        # two rollup-only cues (all-SKIPPED, PENDING) that prove the
+        # deliberate divergence from chp_ci_status's bucket table.
+        ci-rollup-all-skipped.json)   _hook_serve "$headers_out" "mr-ci-rollup-skipped.json" ;;
+        ci-rollup-pending.json)       _hook_serve "$headers_out" "mr-ci-rollup-pending.json" ;;
         mergeable-token.json)         _hook_serve "$headers_out" "mr-mergeable.json" ;;
         pr-view-valid.json)           _hook_serve "$headers_out" "mr-pr-view.json" ;;
         *)                            _hook_serve "$headers_out" "mr-pr-view.json" ;;
       esac ;;
+    # chp_ci_rollup (#489, [INV-134]) jobs fetch — GET /pipelines/:id/jobs.
+    # Pipeline ids are keyed to the MR fixtures above (900042=success,
+    # 900043=failed, 900044=all-skipped, 900045=pending).
+    "GET "*/pipelines/900042/jobs)
+      _hook_serve "$headers_out" "pipeline-jobs-success.json" ;;
+    "GET "*/pipelines/900043/jobs)
+      _hook_serve "$headers_out" "pipeline-jobs-failed.json" ;;
+    "GET "*/pipelines/900044/jobs)
+      _hook_serve "$headers_out" "pipeline-jobs-skipped.json" ;;
+    "GET "*/pipelines/900045/jobs)
+      _hook_serve "$headers_out" "pipeline-jobs-pending.json" ;;
 
     # ===== CHP WRITE endpoints (P3-4, #419) =====
     "POST "*/merge_requests)

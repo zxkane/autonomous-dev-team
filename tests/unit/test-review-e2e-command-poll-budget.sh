@@ -241,10 +241,10 @@ assert_grep "TC-RPB-REG-03 _aggregate_review_verdicts call unchanged (no INV-40 
 # [Lane-GC PR-3 / INV-112] The crash-trap call site (inside cleanup()) is now
 # wrapped as `_teardown_call emit_verdict_trailer …` (bounded network call) —
 # the regex tolerates an optional `_teardown_call ` prefix so the call-SITE
-# count stays semantically 13 even though one site's literal text changed.
+# count stays semantically 17 even though one site's literal text changed.
 EMIT_COUNT=$(grep -cE '^\s*(_teardown_call )?emit_verdict_trailer ' "$WRAPPER")
-assert_eq "TC-RPB-REG-04 emit_verdict_trailer call count is 13 (6 legacy + 2 INV-44 gate + 2 INV-46 E2E gate + 1 INV-64 smoke abort + 2 INV-79 bot-review gate)" \
-  "13" "$EMIT_COUNT"
+assert_eq "TC-RPB-REG-04 emit_verdict_trailer call count is 17 (6 legacy + 2 INV-44 gate + 2 INV-46 E2E gate + 1 INV-64 smoke abort + 2 INV-79 bot-review gate + 4 INV-134 CI-rollup gate)" \
+  "17" "$EMIT_COUNT"
 
 # ---------------------------------------------------------------------------
 echo ""
