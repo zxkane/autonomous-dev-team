@@ -29,6 +29,10 @@
 #   chp_github_resolve_thread      chp_github_trigger_bot
 #   chp_github_close_keyword
 # (chp_caps reads the .caps manifest in the dispatcher, not a function here.)
+#
+# Plus the reviewed-HEAD CI-rollup gate read (#489, [INV-134]):
+#   chp_github_ci_rollup — sibling of chp_github_ci_status, not a
+#   replacement; see that leaf's own header for the split rationale.
 
 # TRANSPORT-LIB SELF-SOURCE: `gh_version_ok` (the `--slurp` capability check
 # some leaves below preflight on) lives in `lib-github-transport.sh` (a
@@ -415,6 +419,84 @@ chp_github_ci_status() {
   ' <<<"$states" 2>/dev/null)" || return 1
   # Belt-and-suspenders: an empty token would slip past the "" gate under an
   # unforeseen jq quirk. Empty token = fail-closed, rc≠0.
+  [[ -n "$token" ]] || return 1
+  printf '%s' "$token"
+}
+
+# chp_github_ci_rollup PR — reviewed-HEAD CI-rollup gate leaf (issue #489,
+# [INV-134]). SIBLING of chp_github_ci_status, NOT a replacement — that
+# leaf's SKIPPED→`pending` mapping is deliberately kept for green-
+# corroboration use (`_e2e_ci_green_precheck`) and stays byte-unchanged.
+# This leaf answers a DIFFERENT question — "does any check block approval?"
+# — where SKIPPED/NEUTRAL are non-blocking (a permanently-SKIPPED
+# label-gated check must never permanently block approval).
+#
+# Stdout: one JSON object `{"token":"<green|pending|failed|none>",
+# "failed_checks":["<name>",...]}`. rc≠0 on transport/parse failure with
+# EMPTY stdout (fail-closed, mirrors chp_github_ci_status's empty-stdout and
+# non-array payload guards verbatim) — EXCEPT the one well-known case below.
+#
+# gh no-checks quirk: on a PR with ZERO checks configured, `gh pr checks`
+# prints "no checks reported on the '<branch>' branch" to STDERR, empty
+# STDOUT, and exits non-zero — indistinguishable from a transport failure by
+# stdout alone. Unlike chp_github_ci_status (whose consumer's SKIPPED→
+# `pending` mapping never needs to special-case this), THIS leaf's contract
+# requires `none` to reach `proceed` (D3: "a repo with zero checks must not
+# block approval") — so a raw empty-stdout→rc≠0 read here would permanently
+# route every zero-checks repo through the bounded-wait/give-up path instead.
+# Detect gh's specific message on stderr and map it to `none`; anything else
+# on an empty-stdout failure stays fail-closed exactly as before.
+#
+# Decision order over the per-check {name,state} multiset (issue #489 D1):
+#   (1) any ∈ {FAILURE,ERROR,CANCELLED,TIMED_OUT} → `failed`
+#       (failed_checks lists exactly those checks' names)
+#   (2) else any ∈ {PENDING,QUEUED,IN_PROGRESS,EXPECTED} or any state not
+#       otherwise listed → `pending` (failed_checks lists those still-
+#       unresolved checks' names — D3's wait-cap give-up finding needs them)
+#   (3) else zero checks → `none`
+#   (4) else → `green` (SUCCESS, SKIPPED, NEUTRAL are all non-blocking; an
+#       all-SKIPPED set is `green`, not `none`)
+# Rule 1 beats rule 2 (a FAILURE+PENDING set is `failed`).
+chp_github_ci_rollup() {
+  local pr="$1"
+  local raw gh_err token
+  gh_err="$(mktemp)"
+  # Same capture-then-check discipline as chp_github_ci_status: gh's rc-quirk
+  # noise on stderr is discarded on a parseable payload, forwarded on a
+  # genuine transport failure. `|| true` here only survives gh's non-zero
+  # rc long enough for the empty-stdout check below to classify it.
+  raw="$(gh pr checks "$pr" --repo "$REPO" --json name,state 2>"$gh_err" || true)"
+  if [[ -z "$raw" ]]; then
+    if grep -qi 'no checks reported' "$gh_err" 2>/dev/null; then
+      rm -f "$gh_err"
+      printf '%s' '{"token":"none","failed_checks":[]}'
+      return 0
+    fi
+    [ -s "$gh_err" ] && cat "$gh_err" >&2
+    rm -f "$gh_err"
+    return 1
+  fi
+  # Payload-type gate (mirrors chp_github_ci_status): reject anything that
+  # is not a JSON array BEFORE deriving the token.
+  jq -e 'type == "array"' >/dev/null 2>&1 <<<"$raw" || {
+    [ -s "$gh_err" ] && cat "$gh_err" >&2
+    rm -f "$gh_err"
+    return 1
+  }
+  rm -f "$gh_err"
+  token="$(jq -c '
+    def is_failed: . == "FAILURE" or . == "ERROR" or . == "CANCELLED" or . == "TIMED_OUT";
+    def is_nonblocking: . == "SUCCESS" or . == "SKIPPED" or . == "NEUTRAL";
+    if any(.[]; .state | is_failed) then
+      {token: "failed", failed_checks: [.[] | select(.state | is_failed) | .name]}
+    elif any(.[]; .state | is_nonblocking | not) then
+      {token: "pending", failed_checks: [.[] | select(.state | is_nonblocking | not) | .name]}
+    elif length == 0 then
+      {token: "none", failed_checks: []}
+    else
+      {token: "green", failed_checks: []}
+    end
+  ' <<<"$raw" 2>/dev/null)" || return 1
   [[ -n "$token" ]] || return 1
   printf '%s' "$token"
 }

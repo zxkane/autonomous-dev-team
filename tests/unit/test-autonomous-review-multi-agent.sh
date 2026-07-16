@@ -355,16 +355,19 @@ echo "=== TC-MAR-SRC-12: exactly one aggregated verdict trailer (none in collect
 # substantive + E2E-evidence-missing non-substantive) PLUS the one INV-64
 # Phase-A.5 smoke-FAIL abort path (#224: failed-non-substantive smoke-config-error)
 # PLUS the two INV-79 mandatory-bot-review gate paths (#234: awaiting-bot-review
-# wait non-substantive + the max-waits substantive FAIL),
-# all of which sit OUTSIDE the collection loop = 13.
+# wait non-substantive + the max-waits substantive FAIL) PLUS the four INV-134
+# CI-rollup gate paths (issue #489: head-changed non-substantive + failed-check
+# substantive + awaiting-ci/unavailable wait non-substantive + wait-max
+# substantive give-up),
+# all of which sit OUTSIDE the collection loop = 17.
 #
 # [Lane-GC PR-3 / INV-112] The crash-trap call site (inside cleanup()) is now
 # wrapped as `_teardown_call emit_verdict_trailer …` (bounded network call) —
 # the regex tolerates an optional `_teardown_call ` prefix so the call-SITE
-# count stays semantically 13 even though one site's literal text changed.
+# count stays semantically 17 even though one site's literal text changed.
 EMIT_COUNT=$(grep -cE '^\s*(_teardown_call )?emit_verdict_trailer ' "$WRAPPER")
-assert_eq "TC-MAR-SRC-12 emit_verdict_trailer call count is 13 (6 legacy + 2 INV-44 gate + 2 INV-46 E2E gate + 1 INV-64 smoke abort + 2 INV-79 bot-review gate, none in collection loop)" \
-  "13" "$EMIT_COUNT"
+assert_eq "TC-MAR-SRC-12 emit_verdict_trailer call count is 17 (6 legacy + 2 INV-44 gate + 2 INV-46 E2E gate + 1 INV-64 smoke abort + 2 INV-79 bot-review gate + 4 INV-134 CI-rollup gate, none in collection loop)" \
+  "17" "$EMIT_COUNT"
 
 # ---------------------------------------------------------------------------
 # TC-MAR-SRC-METRICS (#228 round-8 finding 2): review-side token_usage. The

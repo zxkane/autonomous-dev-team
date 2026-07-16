@@ -156,6 +156,43 @@ chp_degraded_mergeable() {
   esac
 }
 
+# chp_degraded_ci_rollup PR — mirrors chp_github_ci_rollup's reviewed-HEAD
+# CI-rollup gate contract (#489, [INV-134]). Structurally identical to the
+# GitHub leaf so the conformance runner has a genuine body to assert against
+# on `--chp degraded` runs.
+chp_degraded_ci_rollup() {
+  local pr="$1"
+  local raw gh_err token
+  gh_err="$(mktemp)"
+  raw="$(gh pr checks "$pr" --repo "$REPO" --json name,state 2>"$gh_err" || true)"
+  if [[ -z "$raw" ]]; then
+    [ -s "$gh_err" ] && cat "$gh_err" >&2
+    rm -f "$gh_err"
+    return 1
+  fi
+  jq -e 'type == "array"' >/dev/null 2>&1 <<<"$raw" || {
+    [ -s "$gh_err" ] && cat "$gh_err" >&2
+    rm -f "$gh_err"
+    return 1
+  }
+  rm -f "$gh_err"
+  token="$(jq -c '
+    def is_failed: . == "FAILURE" or . == "ERROR" or . == "CANCELLED" or . == "TIMED_OUT";
+    def is_nonblocking: . == "SUCCESS" or . == "SKIPPED" or . == "NEUTRAL";
+    if any(.[]; .state | is_failed) then
+      {token: "failed", failed_checks: [.[] | select(.state | is_failed) | .name]}
+    elif any(.[]; .state | is_nonblocking | not) then
+      {token: "pending", failed_checks: [.[] | select(.state | is_nonblocking | not) | .name]}
+    elif length == 0 then
+      {token: "none", failed_checks: []}
+    else
+      {token: "green", failed_checks: []}
+    end
+  ' <<<"$raw" 2>/dev/null)" || return 1
+  [[ -n "$token" ]] || return 1
+  printf '%s' "$token"
+}
+
 # chp_degraded_reply_review_comment PR COMMENT_ID BODY — mirrors
 # chp_github_reply_review_comment.
 chp_degraded_reply_review_comment() {

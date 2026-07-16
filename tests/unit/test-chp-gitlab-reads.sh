@@ -238,6 +238,120 @@ assert_rc_nz "TC-P33-016 non-object payload → leaf rc≠0" "$rc"
 assert_empty "TC-P33-016 no partial stdout" "$out"
 
 # ============================================================================
+# R2b — chp_gitlab_ci_rollup (issue #489, [INV-134])
+#
+# SIBLING of chp_gitlab_ci_status, NOT a replacement — see the leaf's own
+# header for the split rationale. Two-call leaf: base MR view (for
+# .head_pipeline.id) then a paginated jobs fetch. _GL_API_PAYLOAD_SEQ drives
+# the two calls in order: [0]=MR view, [1]=jobs array.
+# ============================================================================
+echo "=== R2b: chp_gitlab_ci_rollup (issue #489, [INV-134]) ==="
+
+# TC-P33-300 — null head_pipeline → none, {"token":"none","failed_checks":[]},
+# NO jobs fetch (fetch-cost gate — only one _gl_api call).
+_reset_stub
+export _GL_API_PAYLOAD; _GL_API_PAYLOAD="$(_write_json "$RUNDIR/mr-null.json" "$(_mr_json '.head_pipeline = null')")"
+out=$(chp_gitlab_ci_rollup 42); rc=$?
+assert_eq "TC-P33-300 rc=0" "0" "$rc"
+assert_jq_true "TC-P33-300 head_pipeline=null → {token:none,failed_checks:[]}" \
+  '. == {"token":"none","failed_checks":[]}' "$out"
+_calls=$(wc -l < "$_GL_API_CALL_LOG" | tr -d ' ')
+assert_eq "TC-P33-300 exactly ONE _gl_api call (no jobs fetch — fetch-cost gate)" "1" "$_calls"
+
+# _rollup_case <id> <jobs_fixture> <expected_token> <expected_failed_checks_json>
+# Drives the two-call sequence: MR view with a non-null head_pipeline.id, then
+# the jobs fixture.
+_rollup_case() {
+  local id="$1" jobs_fixture="$2" expected_token="$3" expected_fc="$4"
+  _reset_stub
+  local mr_file jobs_file
+  mr_file="$(_write_json "$RUNDIR/mr-rollup-${id}.json" "$(_mr_json '.head_pipeline = {"id": 900042, "status": "success"}')")"
+  jobs_file="$RUNDIR/jobs-${id}.json"
+  cp "$PCONF_HOOK_DIR/${jobs_fixture}" "$jobs_file"
+  export _GL_API_PAYLOAD_SEQ="${mr_file}:${jobs_file}"
+  local out rc
+  out=$(chp_gitlab_ci_rollup 42); rc=$?
+  assert_eq "$id rc=0" "0" "$rc"
+  assert_jq_true "$id token=$expected_token" ".token == \"$expected_token\"" "$out"
+  assert_jq_true "$id failed_checks == $expected_fc" ".failed_checks == $expected_fc" "$out"
+}
+PCONF_HOOK_DIR="$PROJECT_ROOT/tests/provider-conformance/fixtures/gitlab-hook"
+_rollup_case "TC-P33-301" "pipeline-jobs-success.json" "green" "[]"
+_rollup_case "TC-P33-302" "pipeline-jobs-failed.json" "failed" '["check-b"]'
+_rollup_case "TC-P33-303" "pipeline-jobs-skipped.json" "green" "[]"
+_rollup_case "TC-P33-304" "pipeline-jobs-pending.json" "pending" '["check-b"]'
+
+# TC-P33-305 — empty jobs array (pipeline exists, zero jobs reported) → none.
+_reset_stub
+_mr_file="$(_write_json "$RUNDIR/mr-rollup-305.json" "$(_mr_json '.head_pipeline = {"id": 900042, "status": "success"}')")"
+_jobs_file="$(_write_json "$RUNDIR/jobs-305.json" '[]')"
+export _GL_API_PAYLOAD_SEQ="${_mr_file}:${_jobs_file}"
+out=$(chp_gitlab_ci_rollup 42); rc=$?
+assert_eq "TC-P33-305 rc=0" "0" "$rc"
+assert_jq_true "TC-P33-305 empty jobs array → {token:none,failed_checks:[]}" \
+  '. == {"token":"none","failed_checks":[]}' "$out"
+
+# TC-P33-306 — first _gl_api call (MR view) fails → leaf rc≠0, empty stdout.
+_reset_stub
+_GL_API_FAIL_AT=1
+out=$(chp_gitlab_ci_rollup 42 2>/dev/null); rc=$?
+assert_rc_nz "TC-P33-306 MR-view _gl_api rc≠0 → leaf rc≠0" "$rc"
+assert_empty "TC-P33-306 no partial stdout" "$out"
+
+# TC-P33-307 — second _gl_api call (jobs fetch) fails → leaf rc≠0, empty stdout.
+_reset_stub
+_GL_API_FAIL_AT=2
+_mr_file="$(_write_json "$RUNDIR/mr-rollup-307.json" "$(_mr_json '.head_pipeline = {"id": 900042, "status": "success"}')")"
+export _GL_API_PAYLOAD; _GL_API_PAYLOAD="$_mr_file"
+out=$(chp_gitlab_ci_rollup 42 2>/dev/null); rc=$?
+assert_rc_nz "TC-P33-307 jobs-fetch _gl_api rc≠0 → leaf rc≠0" "$rc"
+assert_empty "TC-P33-307 no partial stdout" "$out"
+
+# TC-P33-308 — rc-0 payload missing head_pipeline key → rc≠0 (mirrors TC-P33-015).
+_reset_stub
+export _GL_API_PAYLOAD; _GL_API_PAYLOAD="$(_write_json "$RUNDIR/mr-rollup-nohp.json" '{"iid":42,"state":"opened"}')"
+out=$(chp_gitlab_ci_rollup 42 2>/dev/null); rc=$?
+assert_rc_nz "TC-P33-308 missing head_pipeline key → leaf rc≠0" "$rc"
+assert_empty "TC-P33-308 no partial stdout" "$out"
+
+# TC-P33-309 — non-array jobs payload ({}) → rc≠0 (payload-type gate).
+_reset_stub
+_mr_file="$(_write_json "$RUNDIR/mr-rollup-309.json" "$(_mr_json '.head_pipeline = {"id": 900042, "status": "success"}')")"
+_jobs_file="$(_write_json "$RUNDIR/jobs-309.json" '{}')"
+export _GL_API_PAYLOAD_SEQ="${_mr_file}:${_jobs_file}"
+out=$(chp_gitlab_ci_rollup 42 2>/dev/null); rc=$?
+assert_rc_nz "TC-P33-309 non-array jobs payload → leaf rc≠0" "$rc"
+assert_empty "TC-P33-309 no partial stdout" "$out"
+
+# TC-P33-310 — non-numeric head_pipeline.id → rc≠0 (defensive; never dispatches
+# a jobs fetch with a garbage id).
+_reset_stub
+export _GL_API_PAYLOAD; _GL_API_PAYLOAD="$(_write_json "$RUNDIR/mr-rollup-badid.json" "$(_mr_json '.head_pipeline = {"id": "not-a-number", "status": "success"}')")"
+out=$(chp_gitlab_ci_rollup 42 2>/dev/null); rc=$?
+assert_rc_nz "TC-P33-310 non-numeric head_pipeline.id → leaf rc≠0" "$rc"
+assert_empty "TC-P33-310 no partial stdout" "$out"
+_calls=$(wc -l < "$_GL_API_CALL_LOG" | tr -d ' ')
+assert_eq "TC-P33-310 exactly ONE _gl_api call (never dispatches jobs fetch with a bad id)" "1" "$_calls"
+
+# TC-P33-311 — failure beats pending (FAILURE-beats-PENDING parity with GitHub).
+_rollup_case_mixed() {
+  _reset_stub
+  local mr_file jobs_file
+  mr_file="$(_write_json "$RUNDIR/mr-rollup-311.json" "$(_mr_json '.head_pipeline = {"id": 900042, "status": "success"}')")"
+  jobs_file="$(_write_json "$RUNDIR/jobs-311.json" '[{"name":"check-a","status":"running"},{"name":"check-b","status":"failed"}]')"
+  export _GL_API_PAYLOAD_SEQ="${mr_file}:${jobs_file}"
+  out=$(chp_gitlab_ci_rollup 42); rc=$?
+  assert_eq "TC-P33-311 rc=0" "0" "$rc"
+  assert_jq_true "TC-P33-311 FAILURE beats PENDING → failed" '.token == "failed"' "$out"
+  assert_jq_true "TC-P33-311 failed_checks names only the failed job" '.failed_checks == ["check-b"]' "$out"
+}
+_rollup_case_mixed
+
+# TC-P33-312/313 (positional validation: empty/non-numeric PR → rc 2, ZERO
+# _gl_api calls) are registered further below, alongside the other
+# _pos_reject calls, once the helper is defined.
+
+# ============================================================================
 # R3 — chp_gitlab_mergeable bucket table
 # ============================================================================
 echo "=== R3: chp_gitlab_mergeable bucket table ==="
@@ -853,6 +967,8 @@ _pos_reject() {
 }
 _pos_reject "TC-P33-160" 'chp_gitlab_ci_status ""'
 _pos_reject "TC-P33-161" 'chp_gitlab_ci_status abc'
+_pos_reject "TC-P33-312" 'chp_gitlab_ci_rollup ""'
+_pos_reject "TC-P33-313" 'chp_gitlab_ci_rollup abc'
 _pos_reject "TC-P33-162a" 'chp_gitlab_mergeable ""'
 _pos_reject "TC-P33-162b" 'chp_gitlab_mergeable abc'
 _pos_reject "TC-P33-163a" 'chp_gitlab_review_threads ""'

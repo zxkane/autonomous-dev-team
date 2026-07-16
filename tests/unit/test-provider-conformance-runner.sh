@@ -46,8 +46,8 @@ gh_pass_count="$(grep -c '^CONFORMANCE-PCONF github/github .* PASS$' <<<"$gh_out
 # separately from the shape assertion).
 # Post-#400 pending=0 (every CHP verb landed through the asserted set).
 # Trust the runner output — VERIFY with `bash tests/provider-conformance/run-provider-conformance.sh`.
-assert_eq "AC1: 39 PASS lines on github/github (26 asserted verbs + #393 list_comments field + W1c2/W1d extra + #401 completeness + #419 chp_file_url + #419-r4 chp_pr_comment/commit_file/count_reviews_by_login/trigger_bot + #435 3 assignees assertions on itp_list_by_state/itp_list_forbidden_combos)" "39" "$gh_pass_count"
-assert_contains "AC1: CONFORMANCE-SUMMARY line present with fail=0 and pending=0" "CONFORMANCE-SUMMARY total=39 pass=39 fail=0 skip=0 pending=0" "$gh_out"
+assert_eq "AC1: 45 PASS lines on github/github (26 asserted verbs + #393 list_comments field + W1c2/W1d extra + #401 completeness + #419 chp_file_url + #419-r4 chp_pr_comment/commit_file/count_reviews_by_login/trigger_bot + #435 3 assignees assertions on itp_list_by_state/itp_list_forbidden_combos + #489 6 chp_ci_rollup assertions)" "45" "$gh_pass_count"
+assert_contains "AC1: CONFORMANCE-SUMMARY line present with fail=0 and pending=0" "CONFORMANCE-SUMMARY total=45 pass=45 fail=0 skip=0 pending=0" "$gh_out"
 assert_contains "TC-PCONF-043: itp_read_task (github) PASSes the object-shape/fields-subset/fail-closed assertion" \
   "CONFORMANCE-PCONF github/github itp_read_task PASS" "$gh_out"
 # #401: multi-page completeness assertion emitted its own PASS line.
@@ -94,7 +94,7 @@ assert_contains "TC-PCONF-024d: chp_review_threads FAILs positional-reject (empt
 # 5 W1d incl. payload-type gate) + 0 new (the 3 W1e verbs are the newly-FAILing
 # targets, not new PASSes on the broken fixture) = 22 unchanged.
 broken_pass_count="$(grep -c '^CONFORMANCE-PCONF broken/broken .* PASS$' <<<"$broken_out")"
-assert_eq "AC2: 23 non-targeted PASS lines (12 pre-W1a + read_task + 2 W1c1 + 2 W1c2 + 5 W1d + #419 chp_file_url; #419-r4 verbs go into the FAIL count on broken, not PASS)" "23" "$broken_pass_count"
+assert_eq "AC2: 29 non-targeted PASS lines (12 pre-W1a + read_task + 2 W1c1 + 2 W1c2 + 5 W1d + #419 chp_file_url + #489 6 chp_ci_rollup; #419-r4 verbs go into the FAIL count on broken, not PASS)" "29" "$broken_pass_count"
 
 # ===========================================================================
 echo ""
@@ -120,7 +120,7 @@ deg_pass_count="$(grep -c '^CONFORMANCE-PCONF degraded/degraded .* PASS$' <<<"$d
 # [#400 W1e] +3: the degraded provider now defines chp_degraded_{create_pr,approve,
 # merge} leaves (R4), each mirroring its GitHub counterpart's argv shape so the
 # runner's write-assert passes against the degraded axis too.
-assert_eq "TC-PCONF-033: 31 PASS lines on degraded (asserted verbs minus 4 caps-SKIPs, + #393 list_comments + W1c2/W1d extra + W1e write + #419 chp_file_url + #419-r4 3 new leaves (pr_comment/commit_file/count_reviews_by_login); trigger_bot cap-SKIPs)" "31" "$deg_pass_count"
+assert_eq "TC-PCONF-033: 37 PASS lines on degraded (asserted verbs minus 4 caps-SKIPs, + #393 list_comments + W1c2/W1d extra + W1e write + #419 chp_file_url + #419-r4 3 new leaves (pr_comment/commit_file/count_reviews_by_login) + #489 6 chp_ci_rollup; trigger_bot cap-SKIPs)" "37" "$deg_pass_count"
 
 # ===========================================================================
 echo ""
@@ -418,7 +418,7 @@ EOF
 th_out=$(bash "$RUNNER" --transport-hook "$noop_hook" --itp github --chp github 2>&1); th_rc=$?
 assert_eq "TC-RGH-011: --transport-hook + github/github → rc 0" "0" "$th_rc"
 th_pass_count="$(grep -c '^CONFORMANCE-PCONF github/github .* PASS$' <<<"$th_out")"
-assert_eq "TC-RGH-011: --transport-hook + github/github → still 39 PASS lines (byte-identical; +5 for #419 chp_file_url + #419-r4 4 verbs; +3 for #435 assignees assertions)" "39" "$th_pass_count"
+assert_eq "TC-RGH-011: --transport-hook + github/github → still 45 PASS lines (byte-identical; +5 for #419 chp_file_url + #419-r4 4 verbs; +3 for #435 assignees assertions; +6 for #489 chp_ci_rollup)" "45" "$th_pass_count"
 
 # TC-RGH-012 (byte-identical no-op with --transport-hook) — already covered
 # by TC-RGH-011's pass count assertion.
@@ -435,7 +435,7 @@ _scratch_bin="$(mktemp -d)"
 th_out=$(bash "$RUNNER" --transport-path-add "$_scratch_bin" --itp github --chp github 2>&1); th_rc=$?
 assert_eq "TC-RGH-020: --transport-path-add + github/github → rc 0" "0" "$th_rc"
 th_pass_count="$(grep -c '^CONFORMANCE-PCONF github/github .* PASS$' <<<"$th_out")"
-assert_eq "TC-RGH-020: --transport-path-add + github/github → still 39 PASS lines (+5 for #419 chp_file_url + #419-r4 4 verbs; +3 for #435 assignees assertions)" "39" "$th_pass_count"
+assert_eq "TC-RGH-020: --transport-path-add + github/github → still 45 PASS lines (+5 for #419 chp_file_url + #419-r4 4 verbs; +3 for #435 assignees assertions; +6 for #489 chp_ci_rollup)" "45" "$th_pass_count"
 
 # TC-RGH-021: multiple --transport-path-add accumulate (both accepted, rc 0).
 _scratch_bin2="$(mktemp -d)"
@@ -572,7 +572,7 @@ echo ""
 echo "=== TC-RGH-050: github/github parity (byte-identical) — 31 PASS still holds ==="
 # ===========================================================================
 th_pass_count="$(grep -c '^CONFORMANCE-PCONF github/github .* PASS$' <<<"$gh_out")"
-assert_eq "TC-RGH-050: github/github byte-identical (39 PASS lines; +5 for #419 chp_file_url + #419-r4 4 verbs; +3 for #435 assignees assertions)" "39" "$th_pass_count"
+assert_eq "TC-RGH-050: github/github byte-identical (45 PASS lines; +5 for #419 chp_file_url + #419-r4 4 verbs; +3 for #435 assignees assertions; +6 for #489 chp_ci_rollup)" "45" "$th_pass_count"
 
 # ===========================================================================
 echo ""
@@ -597,7 +597,7 @@ assert_contains "TC-RGH-060: gitlab/gitlab + hook → chp_request_changes SKIP b
 assert_contains "TC-RGH-060: gitlab/gitlab + hook → chp_trigger_bot SKIP by cap (#419-r4)" \
   "chp_trigger_bot SKIP (cap: review_bots)" "$gl_hook_out"
 assert_contains "TC-RGH-060: gitlab/gitlab + hook → CONFORMANCE-SUMMARY line" \
-  "CONFORMANCE-SUMMARY total=38 pass=36 fail=0 skip=2 pending=0" "$gl_hook_out"
+  "CONFORMANCE-SUMMARY total=44 pass=42 fail=0 skip=2 pending=0" "$gl_hook_out"
 
 # ===========================================================================
 echo ""

@@ -72,6 +72,16 @@ source "${LIB_DIR}/lib-review-poll.sh"
 # rebase prompt. _classify_mergeable_gate is the pure decision half (the
 # chp_mergeable verb call + UNKNOWN-retry loop stays in the wrapper). Inert on FAIL.
 source "${LIB_DIR}/lib-review-mergeable.sh"
+# shellcheck source=lib-review-ci-rollup.sh
+# INV-134 (#489): reviewed-HEAD CI-rollup hard gate. Runs immediately after
+# the INV-44 mergeable gate, before the `passed` trailer / chp_approve — a
+# red API-visible check on the reviewed HEAD can never reach `approved`.
+# SIBLING of the E2E (INV-46) and mergeable (INV-44) gates, NOT a
+# replacement for either: chp_ci_status's SKIPPED→pending mapping (used for
+# green-corroboration elsewhere) stays untouched. _classify_ci_rollup_gate
+# is the pure decision half; the chp_ci_rollup verb call + head-pinning +
+# bounded-wait loop stay in the wrapper.
+source "${LIB_DIR}/lib-review-ci-rollup.sh"
 # shellcheck source=lib-code-host.sh
 # [INV-87] (#282): Code-Host Provider dispatch. The mergeable / approve / merge
 # leaves below — and submit_request_changes (lib-review-request-changes.sh) — route
@@ -4045,6 +4055,11 @@ fi
 # enforcement of "mergeable != MERGEABLE → blocking finding → FAIL"; the agent's
 # Step-0 prompt is best-effort, this gate is mechanical.
 #
+# This gate reads the `mergeable` field — a MERGE-CONFLICT signal (byte-
+# unchanged by issue #489), NOT a CI-status signal. It is deliberately blind
+# to red checks; the sibling CI-rollup hard gate (INV-134, immediately below
+# this block) is the CI-status counterpart that runs after this gate proceeds.
+#
 # Runs ONLY when the aggregate was PASS — a FAIL / all-unavailable aggregate
 # already routes to pending-dev below, so re-checking mergeable there would be
 # redundant work and an extra gh call on the failure path.
@@ -4202,7 +4217,7 @@ Findings->Decision Gate: 1 blocking finding(s) -- FAIL.
 
 Findings->Decision Gate: 1 blocking finding(s) -- FAIL.
 
-1. **[BLOCKING] Merge conflict with ${BASE_BRANCH}** — PR #${PR_NUMBER} (\`${PR_BRANCH:-the PR branch}\`) is \`CONFLICTING\` with the base branch and cannot be merged. The review agent's PASS verdict is overridden by the wrapper-enforced mergeable gate (INV-44).
+1. **[BLOCKING] Merge conflict with ${BASE_BRANCH}** — PR #${PR_NUMBER} (\`${PR_BRANCH:-the PR branch}\`) is \`CONFLICTING\` with the base branch and cannot be merged. The review agent's PASS verdict is overridden by the wrapper-enforced mergeable gate (INV-44, a merge-conflict gate — not a CI-status gate; see INV-134 for the CI-rollup counterpart).
    - Dev agent must rebase before re-review:
      1. \`git fetch origin ${BASE_BRANCH}\`
      2. \`git rebase origin/${BASE_BRANCH}\`
@@ -4215,7 +4230,7 @@ Findings->Decision Gate: 1 blocking finding(s) -- FAIL.
     # gives the conflict a deterministic owner (the next dev session) instead
     # of letting it fall through the cracks.
     chp_pr_comment "$PR_NUMBER" \
-      --body "Auto-merge failed: PR is CONFLICTING with ${BASE_BRANCH} (mergeable gate, INV-44). Re-dispatching dev agent to rebase onto ${BASE_BRANCH}.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
+      --body "Auto-merge failed: PR is CONFLICTING with ${BASE_BRANCH} (mergeable gate, INV-44 — merge-conflict, not CI). Re-dispatching dev agent to rebase onto ${BASE_BRANCH}.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
 
     # INV-35: a merge conflict is a real, dev-actionable finding — substantive.
     # INV-92 (#298): a rebase is exactly what the dev agent does — dev-actionable.
@@ -4256,7 +4271,192 @@ Findings->Decision Gate: 1 blocking finding(s) -- FAIL.
     RESULT_PARSED=true
     exit 0
   fi
-  # gate == proceed → fall through to the existing PASS branch unchanged.
+  # gate == proceed → fall through to the CI-rollup gate below.
+fi
+
+# ---------------------------------------------------------------------------
+# CI-rollup hard gate (INV-134, issue #489)
+# ---------------------------------------------------------------------------
+# A red API-visible check on the reviewed HEAD can never reach `approved`.
+# Runs ONLY when the aggregate was PASS AND the mergeable gate above
+# proceeded — the FAIL / mergeable-block paths already routed to
+# pending-dev/pending-review and exited, so re-checking here would be
+# redundant work on the failure path. Order in the PASS chain: PR-open
+# guard (INV-54) → mandatory-bot-review gate (INV-79) → mergeable hard gate
+# (INV-44) → this CI-rollup gate → `passed` trailer → chp_approve.
+#
+# Head-pinning (D2): `chp_ci_rollup` (like `gh pr checks`) reads the PR's
+# CURRENT head, but the gate must judge the REVIEWED head (PR_HEAD_SHA).
+# _cir_head_matches confirms chp_pr_view's headRefOid == PR_HEAD_SHA both
+# BEFORE and AFTER the chp_ci_rollup call; either mismatch (including an
+# empty PR_HEAD_SHA, which can never truthfully match) routes to
+# failed-non-substantive cause head-changed, never approves.
+if [[ "$PASSED_VERDICT" == "true" ]]; then
+  _cir_head_matches() {
+    local reviewed="${1:-}"
+    [[ -n "$reviewed" ]] || return 1
+    local current
+    # A failed/empty query → current="" → never matches "$reviewed" below
+    # (fail-closed: an unreadable current head is treated as drift, never approve).
+    current=$(chp_pr_view "$PR_NUMBER" "headRefOid" 2>/dev/null | jq -r '.headRefOid' 2>/dev/null || true)
+    [[ -n "$current" && "$current" == "$reviewed" ]]
+  }
+
+  _cir_head_changed() {
+    log "CI-rollup hard gate: HEAD drift detected on PR #${PR_NUMBER} (reviewed ${PR_HEAD_SHA:-<empty>}) — requeuing without approval, never calling chp_ci_rollup/chp_approve on a stale HEAD."
+    itp_post_comment "$ISSUE_NUMBER" \
+      "Review held: PR #${PR_NUMBER}'s HEAD changed since this review round started (reviewed \`${PR_HEAD_SHA:-<empty>}\`). Per the CI-rollup hard gate (INV-134) the PR is NOT auto-approved against a stale HEAD; it will be re-reviewed on the next dispatch tick.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
+    # Best-effort comment: a failed post never blocks the head-changed re-queue below.
+    emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-non-substantive" "head-changed" 2>/dev/null || true
+    # [INV-129 [P3]] round=0 second reset channel (see the R3 comment near the AGGREGATE=="pass" branch).
+    itp_post_comment "$ISSUE_NUMBER" "$(_review_round_marker "$ISSUE_NUMBER" "$PR_HEAD_SHA" 0)" 2>/dev/null || true
+    itp_transition_state "$ISSUE_NUMBER" "reviewing" "pending-review" 2>/dev/null \
+      || log "WARNING: itp_transition_state reviewing→pending-review failed for issue #${ISSUE_NUMBER} (CI-rollup gate, head-changed) — label may not reflect the posted verdict."
+    RESULT_PARSED=true
+    exit 0
+  }
+
+  if ! _cir_head_matches "${PR_HEAD_SHA:-}"; then
+    _cir_head_changed
+  fi
+
+  # [INV-87]/[D1] chp_ci_rollup owns the FULL check-run query AND the
+  # per-check → {token,failed_checks} projection — no gh flags, no jq
+  # programs cross the seam (D5: provider-neutral, GitHub/GitLab both
+  # implement it). Leaf rc≠0 (transport/parse failure) → empty stdout,
+  # handled as CI_ROLLUP_TOKEN="" below (never treated as none/green).
+  CI_ROLLUP_RAW=$(chp_ci_rollup "$PR_NUMBER" 2>/dev/null || true)
+  CI_ROLLUP_TOKEN=""
+  CI_ROLLUP_FAILED_CHECKS="[]"
+  # (.failed_checks | type) == "array" is required too — a provider leaf that
+  # returns the right keys but the wrong .failed_checks TYPE (e.g. a bare
+  # string) must degrade to block-nonsubstantive here, not crash the
+  # CI_ROLLUP_NAMES join below under `set -e`.
+  if [[ -n "$CI_ROLLUP_RAW" ]] && jq -e 'type == "object" and has("token") and has("failed_checks") and (.failed_checks | type) == "array"' >/dev/null 2>&1 <<<"$CI_ROLLUP_RAW"; then
+    CI_ROLLUP_TOKEN=$(jq -r '.token' <<<"$CI_ROLLUP_RAW" 2>/dev/null)
+    CI_ROLLUP_FAILED_CHECKS=$(jq -c '.failed_checks' <<<"$CI_ROLLUP_RAW" 2>/dev/null)
+  fi
+
+  if ! _cir_head_matches "${PR_HEAD_SHA:-}"; then
+    _cir_head_changed
+  fi
+
+  CI_ROLLUP_GATE=$(_classify_ci_rollup_gate "$CI_ROLLUP_TOKEN")
+  log "CI-rollup hard gate: PR #${PR_NUMBER} token='${CI_ROLLUP_TOKEN:-<empty>}' → gate=${CI_ROLLUP_GATE}"
+
+  if [[ "$CI_ROLLUP_GATE" == "block-substantive" ]]; then
+    # `failed` — a real, dev-actionable finding naming every failed check.
+    # A re-push re-triggers CI (mirrors the bot-gate give-up rationale) —
+    # never infer protected-path ownership from check names.
+    CI_ROLLUP_NAMES=$(jq -r 'if length > 0 then map(. // "(unnamed)") | join(", ") else "(unnamed)" end' <<<"$CI_ROLLUP_FAILED_CHECKS" 2>/dev/null)
+    log "BLOCKING: PR #${PR_NUMBER} has failed CI check(s) [${CI_ROLLUP_NAMES}] — overriding PASS verdict, routing to pending-dev."
+
+    itp_post_comment "$ISSUE_NUMBER" \
+      "Review findings:
+
+Findings->Decision Gate: 1 blocking finding(s) -- FAIL.
+
+1. **[BLOCKING] CI check(s) failed on the reviewed HEAD of PR #${PR_NUMBER}: ${CI_ROLLUP_NAMES}** — the review agent's PASS verdict is overridden by the wrapper-enforced CI-rollup hard gate (INV-134). A red check on the PR blocks approval regardless of the fan-out agents' verdict. Fix the failing check(s) and push — a new commit re-triggers CI.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
+
+    # INV-92 (#298): a re-push re-triggers CI — dev-actionable.
+    emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-substantive" "" "true" 2>/dev/null || true
+
+    # INV-52: a red check is a blocking finding — assert it on the PR's
+    # GitHub-native state too (reviewDecision → CHANGES_REQUESTED).
+    submit_request_changes "$PR_NUMBER" \
+      "CI check(s) failed on the reviewed HEAD: ${CI_ROLLUP_NAMES} (CI-rollup hard gate, INV-134). Fix the failing check(s) before re-review — see the \`Review findings:\` comment on issue #${ISSUE_NUMBER}." \
+      || log "WARNING: submit_request_changes returned non-zero (best-effort); continuing the FAIL route."
+
+    # Best-effort label flip: the FAIL verdict trailer above already recorded
+    # the decision; a failed transition here is non-fatal but IS logged below.
+    itp_transition_state "$ISSUE_NUMBER" "reviewing" "pending-dev" 2>/dev/null \
+      || log "WARNING: itp_transition_state reviewing→pending-dev failed for issue #${ISSUE_NUMBER} (CI-rollup gate, failed check) — label may not reflect the posted verdict."
+
+    log "Issue #${ISSUE_NUMBER} moved to pending-dev (failed CI check — dev must fix and push)."
+    RESULT_PARSED=true
+    exit 0
+  elif [[ "$CI_ROLLUP_GATE" == "block-nonsubstantive" ]]; then
+    # `pending`, empty (leaf rc≠0), or any unrecognized token. Bounded
+    # SHA-scoped wait — mirrors the INV-79 bot-review-wait mechanics
+    # exactly: a new head resets the count by construction (markers are
+    # SHA-bound). Below the cap: non-substantive re-queue to
+    # pending-review (NOT pending-dev — no new commits exist yet, so
+    # pending-dev's stale-verdict guard would stall). At the cap: give up
+    # as a substantive dev-actionable FAIL.
+    if [[ -z "$CI_ROLLUP_TOKEN" ]]; then
+      CI_ROLLUP_CAUSE="ci-status-unavailable"
+      CI_ROLLUP_REASON="the wrapper could not read the CI-rollup status for PR #${PR_NUMBER} (transport/parse failure)"
+    else
+      CI_ROLLUP_CAUSE="awaiting-ci"
+      # D3: the wait-cap give-up finding must name the still-pending checks
+      # (mirrors the `failed` branch's CI_ROLLUP_NAMES) — the leaf populates
+      # failed_checks for `pending` too (the still-unresolved check names),
+      # not only for `failed`.
+      CI_ROLLUP_PENDING_NAMES=$(jq -r 'if length > 0 then map(. // "(unnamed)") | join(", ") else "(unnamed)" end' <<<"$CI_ROLLUP_FAILED_CHECKS" 2>/dev/null)
+      CI_ROLLUP_REASON="CI checks on PR #${PR_NUMBER} have not completed yet (token=\`${CI_ROLLUP_TOKEN}\`, pending: ${CI_ROLLUP_PENDING_NAMES})"
+    fi
+
+    CI_ROLLUP_WAIT_MARKER=$(_ci_rollup_wait_marker "$ISSUE_NUMBER" "${PR_HEAD_SHA:-unknown}")
+    CI_ROLLUP_WAIT_MAX_VAL=$(_ci_rollup_wait_max)
+    # [INV-87]/[W1c2] normalized-shape (#398): mirrors the bot-review-wait
+    # count read verbatim (chp_pr_view <PR> "comments" + jq contains()).
+    # `.body` is chp_pr_view's own null→"" normalization (never null), so no
+    # separate `type == "string"` guard is needed here.
+    #
+    # A read failure here (chp_pr_view or jq) is NOT the same thing as a
+    # true zero-prior-waits count: this counter is the ONLY state the
+    # bounded-wait cap has across ticks (no persistent storage outside PR
+    # comments), so defaulting a read failure to 0 would let a SUSTAINED
+    # chp_pr_view outage reset the clock every tick and loop pending-review
+    # forever — the exact failure mode the cap exists to bound. Fail closed:
+    # treat an unreadable count as already-at-cap, not as "zero waits so far".
+    if CI_ROLLUP_WAIT_RAW=$(chp_pr_view "$PR_NUMBER" "comments" 2>/dev/null) \
+        && CI_ROLLUP_WAIT_COUNT=$(jq -r "[.comments[] | select(.body | contains(\"ci-rollup-wait: issue=${ISSUE_NUMBER} head=${PR_HEAD_SHA:-unknown}\"))] | length" <<<"$CI_ROLLUP_WAIT_RAW" 2>/dev/null) \
+        && [[ "$CI_ROLLUP_WAIT_COUNT" =~ ^[0-9]+$ ]]; then
+      :
+    else
+      log "WARNING: CI-rollup hard gate could not read prior wait markers for issue #${ISSUE_NUMBER} — treating as already at the wait cap (fail-closed) rather than resetting to 0."
+      CI_ROLLUP_WAIT_COUNT="$CI_ROLLUP_WAIT_MAX_VAL"
+    fi
+
+    if [[ "$CI_ROLLUP_WAIT_COUNT" -ge "$CI_ROLLUP_WAIT_MAX_VAL" ]]; then
+      log "CI-rollup hard gate: ${CI_ROLLUP_REASON} — still not clear after ${CI_ROLLUP_WAIT_COUNT} wait(s) on HEAD ${PR_HEAD_SHA:0:7} — giving up, routing to pending-dev (substantive)."
+      # Best-effort comment: the give-up decision itself is recorded via the
+      # trailer/transition below regardless of whether the post lands.
+      itp_post_comment "$ISSUE_NUMBER" \
+        "Review findings:
+
+Findings->Decision Gate: 1 blocking finding(s) -- FAIL.
+
+1. **[BLOCKING] ${CI_ROLLUP_REASON^}** after ${CI_ROLLUP_WAIT_COUNT} wait(s) on this HEAD (CI-rollup hard gate, INV-134). Investigate the PR's Checks tab — a stuck/misconfigured check must be fixed or the workflow re-triggered before this PR can be approved.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
+      # Best-effort trailer emit — a failed post never blocks the pending-dev exit below.
+      emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-substantive" "" "true" 2>/dev/null || true
+      submit_request_changes "$PR_NUMBER" \
+        "${CI_ROLLUP_REASON^} after ${CI_ROLLUP_WAIT_COUNT} wait(s) (CI-rollup hard gate, INV-134). reviewDecision is CHANGES_REQUESTED until CI resolves." \
+        || log "WARNING: submit_request_changes returned non-zero (best-effort); continuing the FAIL route."
+      # Best-effort label flip: the FAIL verdict trailer above already recorded
+      # the decision; a failed transition here is non-fatal but IS logged below.
+      itp_transition_state "$ISSUE_NUMBER" "reviewing" "pending-dev" 2>/dev/null \
+        || log "WARNING: itp_transition_state reviewing→pending-dev failed for issue #${ISSUE_NUMBER} (CI-rollup gate, wait-cap give-up) — label may not reflect the posted verdict."
+      RESULT_PARSED=true
+      exit 0
+    fi
+
+    log "CI-rollup hard gate: ${CI_ROLLUP_REASON} (wait ${CI_ROLLUP_WAIT_COUNT}/${CI_ROLLUP_WAIT_MAX_VAL}) — re-queuing for re-review (no approve/merge this tick)."
+    # Best-effort comment: the wait/re-queue decision itself is recorded via
+    # the trailer/transition below regardless of whether the post lands.
+    itp_post_comment "$ISSUE_NUMBER" \
+      "Review held — the agent verdict is PASS, but ${CI_ROLLUP_REASON}. The next review tick will evaluate the PR once CI resolves. (No approve/merge this tick — [INV-134].) ${CI_ROLLUP_WAIT_MARKER}$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
+    # Best-effort trailer emit — a failed post never blocks the pending-review re-queue below.
+    emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-non-substantive" "$CI_ROLLUP_CAUSE" 2>/dev/null || true
+    # [INV-129 [P3]] round=0 second reset channel (see the R3 comment near the AGGREGATE=="pass" branch).
+    itp_post_comment "$ISSUE_NUMBER" "$(_review_round_marker "$ISSUE_NUMBER" "$PR_HEAD_SHA" 0)" 2>/dev/null || true
+    itp_transition_state "$ISSUE_NUMBER" "reviewing" "pending-review" 2>/dev/null \
+      || log "WARNING: itp_transition_state reviewing→pending-review failed for issue #${ISSUE_NUMBER} (CI-rollup gate, bounded wait) — label may not reflect the posted verdict."
+    RESULT_PARSED=true
+    exit 0
+  fi
+  # gate == proceed (green/none) → fall through to the existing PASS branch unchanged.
 fi
 
 # PASSED_VERDICT was set by the unanimous-PASS aggregation above (INV-40).

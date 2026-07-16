@@ -144,6 +144,42 @@ chp_broken_mergeable() {
     *) return 1 ;;
   esac
 }
+# Correct chp_broken_ci_rollup (#489, [INV-134]) — kept correct for the same
+# reason as chp_broken_ci_status above: only the fixture's PRE-EXISTING
+# violations must surface as FAILs; this newly-asserted verb must not
+# spuriously extend the broken-fixture's FAIL count.
+chp_broken_ci_rollup() {
+  local pr="$1"
+  local raw gh_err token
+  gh_err="$(mktemp)"
+  raw="$(gh pr checks "$pr" --repo "$REPO" --json name,state 2>"$gh_err" || true)"
+  if [[ -z "$raw" ]]; then
+    [ -s "$gh_err" ] && cat "$gh_err" >&2
+    rm -f "$gh_err"
+    return 1
+  fi
+  jq -e 'type == "array"' >/dev/null 2>&1 <<<"$raw" || {
+    [ -s "$gh_err" ] && cat "$gh_err" >&2
+    rm -f "$gh_err"
+    return 1
+  }
+  rm -f "$gh_err"
+  token="$(jq -c '
+    def is_failed: . == "FAILURE" or . == "ERROR" or . == "CANCELLED" or . == "TIMED_OUT";
+    def is_nonblocking: . == "SUCCESS" or . == "SKIPPED" or . == "NEUTRAL";
+    if any(.[]; .state | is_failed) then
+      {token: "failed", failed_checks: [.[] | select(.state | is_failed) | .name]}
+    elif any(.[]; .state | is_nonblocking | not) then
+      {token: "pending", failed_checks: [.[] | select(.state | is_nonblocking | not) | .name]}
+    elif length == 0 then
+      {token: "none", failed_checks: []}
+    else
+      {token: "green", failed_checks: []}
+    end
+  ' <<<"$raw" 2>/dev/null)" || return 1
+  [[ -n "$token" ]] || return 1
+  printf '%s' "$token"
+}
 # chp_broken_close_keyword is deliberately OMITTED: the runner's
 # chp_close_keyword assertion never dispatches through a leaf (it evals
 # _render_close_keyword directly against a stubbed chp_caps — see
