@@ -417,6 +417,57 @@ else
 fi
 assert_eq "TC-LEASE-009 run-id file still names run-B after run-A's stale cleanup" "run-B" "$(cat "$RUNID_FILE" 2>/dev/null)"
 
+# TC-LEASE-022: round-2 review finding — genuine INTERLEAVING (not just
+# sequential ordering, which TC-LEASE-009/010 above already cover) between a
+# stale run-A cleanup and a fresh run-B init. Without the
+# _agent_progress_lock_acquire mutex, run-A's cleanup could read the run-id
+# file's content (still "run-A") and THEN — before its own `rm` executes —
+# let run-B's init overwrite BOTH sidecars; the late `rm` deletes the run-id
+# file unconditionally (unlink doesn't re-check content), leaving the
+# run-id file GONE while progress.json still names run-B. That split state
+# does NOT self-heal (only _agent_progress_init ever rewrites the run-id
+# file), unlike the documented compare-then-unlink residual.
+#
+# Forces the interleaving deterministically with the test-only
+# _AGENT_PROGRESS_CLEANUP_TEST_DELAY_SECONDS hook: start run-A's cleanup
+# first (it wins the lock and sleeps mid-critical-section), then fire run-B's
+# init while the lock is held. If the lock works, run-B's init blocks until
+# run-A's cleanup fully releases, so the two sidecars can never end up
+# naming different runs.
+rm -f "$PROGRESS_FILE" "$RUNID_FILE"
+run_in_sandbox '
+  export AGENT_PID_FILE="'"$PIDFILE"'"
+  export AGENT_PROGRESS_FILE="'"$PROGRESS_FILE"'"
+  export AGENT_PROGRESS_RUNID_FILE="'"$RUNID_FILE"'"
+  export RUN_ID="run-A"
+  _agent_progress_init
+'
+run_in_sandbox '
+  export AGENT_PROGRESS_FILE="'"$PROGRESS_FILE"'"
+  export AGENT_PROGRESS_RUNID_FILE="'"$RUNID_FILE"'"
+  export RUN_ID="run-A"
+  export _AGENT_PROGRESS_CLEANUP_TEST_DELAY_SECONDS=1
+  _agent_progress_cleanup
+' &
+STALE_CLEANUP_PID=$!
+sleep 0.3
+run_in_sandbox '
+  export AGENT_PID_FILE="'"$PIDFILE"'"
+  export AGENT_PROGRESS_FILE="'"$PROGRESS_FILE"'"
+  export AGENT_PROGRESS_RUNID_FILE="'"$RUNID_FILE"'"
+  export RUN_ID="run-B"
+  _agent_progress_init
+'
+wait "$STALE_CLEANUP_PID"
+
+runid_after="$(cat "$RUNID_FILE" 2>/dev/null || echo MISSING)"
+assert_eq "TC-LEASE-022 run-id file names run-B after the interleaved race resolves (not deleted, not split)" "run-B" "$runid_after"
+if [[ -f "$PROGRESS_FILE" ]]; then
+  ok "TC-LEASE-022 progress.json survives the interleaved race"
+else
+  bad "TC-LEASE-022 progress.json was deleted by the interleaved race"
+fi
+
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== TC-LEASE-018: launch event writes a lease before any CLI output (R2 case 1) ==="
@@ -702,6 +753,54 @@ else
   bad "TC-LEASE-020 gemini line-framing path never refreshed the lease"
 fi
 
+# TC-LEASE-020b: round-2 review finding — the EQUALS-JOINED single-token form
+# `--output-format=stream-json` must ALSO select json framing (not just the
+# two-token `--output-format stream-json` TC-LEASE-020 above already covers).
+# Proven with a truncated/malformed final record: under the correct json
+# framing the malformed line must NOT refresh the lease (R2's complete-record
+# rule), so the refresh count must be exactly 1 (the launch event) + 1 (the
+# one well-formed record) = 2, NOT 3 — if the equals form fell through to
+# line framing, the truncated third line would count as a plain nonempty
+# line and wrongly refresh, yielding 3.
+cat > "$BIN/gemini" <<'EOF'
+#!/bin/bash
+cat >/dev/null
+echo '{"type":"init","sessionId":"g-eq"}'
+echo '{unterminated'
+EOF
+chmod +x "$BIN/gemini"
+
+GEM_EQ_PROGRESS="$TMPROOT/gem-eq.progress.json"
+GEM_EQ_REFRESH_COUNT="$TMPROOT/gem-eq.refreshes"
+rm -f "$GEM_EQ_PROGRESS" "$GEM_EQ_REFRESH_COUNT"
+: > "$GEM_EQ_REFRESH_COUNT"
+(
+  env -u AUTONOMOUS_CONF_DIR \
+  PATH="$BIN:$PATH" \
+  AUTONOMOUS_PID_DIR="$PID_DIR" \
+  PROJECT_ID="testproj" \
+  PROJECT_DIR="$TMPROOT" \
+  AGENT_CMD=gemini \
+  AGENT_PID_FILE="$TMPROOT/gem-eq.pid" \
+  AGENT_PROGRESS_FILE="$GEM_EQ_PROGRESS" \
+  RUN_ID="run-gem-eq" \
+  AGENT_DEV_EXTRA_ARGS="--approval-mode=yolo --output-format=stream-json" \
+  REFRESH_COUNT_FILE="$GEM_EQ_REFRESH_COUNT" \
+  bash -c '
+    unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV
+    source "'"$LIB"'"
+    eval "$(declare -f _agent_progress_refresh | sed "1s/_agent_progress_refresh/_agent_progress_refresh_real/")"
+    _agent_progress_refresh() {
+      echo x >> "$REFRESH_COUNT_FILE"
+      _agent_progress_refresh_real
+    }
+    run_agent "gem-eq-session" "hello" "" "" >/dev/null 2>&1
+  '
+)
+gem_eq_got=$(wc -l < "$GEM_EQ_REFRESH_COUNT" 2>/dev/null || echo 0)
+assert_eq "TC-LEASE-020b gemini --output-format=stream-json (equals form) selects json framing: truncated final record does NOT refresh (1 launch + 1 complete record, not 3)" \
+  "2" "$gem_eq_got"
+
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== TC-LEASE-021: refresh COUNT (not just presence) asserted through all seven launch paths ==="
@@ -976,6 +1075,55 @@ STUBEOF
 else
   bad "TC-LEASE-013 session-log-probe-remote-aws-ssm.sh not found at expected path"
 fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-LEASE-023: lock unavailability degrades gracefully under set -e (round-2 review finding) ==="
+# ---------------------------------------------------------------------------
+# The wrapper's real caller (autonomous-dev.sh) sources this file and calls
+# _agent_progress_init/_agent_progress_cleanup BARE under `set -euo
+# pipefail` — unlike run_in_sandbox above, which deliberately omits `-e` so
+# it could exercise lock CORRECTNESS without also masking this exact bug.
+# _agent_progress_lock_acquire returns 1 on every "couldn't lock" path (no
+# flock binary, symlinked lock path, or a flock -w timeout); a bare call to
+# it under real `set -e` aborts the WHOLE caller before the run-id/lease is
+# ever written — the opposite of the documented "best-effort, degrades to
+# unlocked" contract. Reproduces with a symlink farm that omits `flock`
+# (same technique as TC-LGC4-093 in test-lane-gc-p4-gc.sh), never a real bin
+# dir that would still resolve the system flock and defeat the fixture.
+NOFLOCK_BIN=$(mktemp -d)
+for _b in bash cat date mkdir mktemp stat sh dirname readlink pwd printf tr grep sed ps sleep kill cp basename wc chmod mv rm head timeout setsid; do
+  _bp="$(command -v "$_b" 2>/dev/null)" || continue
+  ln -sf "$_bp" "$NOFLOCK_BIN/$_b"
+done
+
+NOFLOCK_RUNID="$TMPROOT/noflock.run-id"
+NOFLOCK_PROGRESS="$TMPROOT/noflock.progress.json"
+NOFLOCK_PIDFILE="$TMPROOT/noflock.pid"
+rm -f "$NOFLOCK_RUNID" "$NOFLOCK_PROGRESS"
+echo 4242 > "$NOFLOCK_PIDFILE"
+
+noflock_out=$(
+  PATH="$NOFLOCK_BIN" \
+  AGENT_PID_FILE="$NOFLOCK_PIDFILE" \
+  AGENT_PROGRESS_FILE="$NOFLOCK_PROGRESS" \
+  AGENT_PROGRESS_RUNID_FILE="$NOFLOCK_RUNID" \
+  RUN_ID="run-noflock" \
+  bash -c '
+    set -euo pipefail
+    source "'"$LIB"'"
+    _agent_progress_init
+    echo "INIT_SURVIVED"
+    _agent_progress_cleanup
+    echo "CLEANUP_SURVIVED"
+  ' 2>&1
+)
+noflock_rc=$?
+rm -rf "$NOFLOCK_BIN"
+
+assert_eq "TC-LEASE-023 init+cleanup survive set -e with flock unavailable (rc=0, not aborted)" "0" "$noflock_rc"
+assert_contains "TC-LEASE-023 _agent_progress_init completes under set -e without flock" "INIT_SURVIVED" "$noflock_out"
+assert_contains "TC-LEASE-023 _agent_progress_cleanup completes under set -e without flock" "CLEANUP_SURVIVED" "$noflock_out"
 
 echo ""
 echo "=== Summary ==="

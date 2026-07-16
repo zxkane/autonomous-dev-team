@@ -67,6 +67,12 @@ fixture-driven; no real sleeps.
 **When** a stale/late cleanup for `RUN_A` executes
 **Then** neither file is removed (run_id mismatch skips the unlink).
 
+## TC-LEASE-022: a stale cleanup INTERLEAVED with a fresh init cannot split the two sidecars (round-2 regression)
+
+**Given** `RUN_A`'s stale cleanup has already read `issue-N.run-id` (observing `RUN_A`, matching its own `RUN_ID`) but has not yet unlinked it
+**When** `RUN_B`'s init fires for the same issue WHILE that window is open, overwriting both sidecars to `RUN_B`
+**Then** `RUN_A`'s cleanup — which resumes only after `RUN_B`'s init fully completes, serialized by a shared `flock` around both functions' read-decide-act section — no longer unlinks the now-`RUN_B` run-id file; `issue-N.run-id` and `issue-N.progress.json` both still name `RUN_B` afterward. Without the lock, `RUN_A`'s cleanup would delete the run-id file unconditionally (its `rm` doesn't re-check content after the read), leaving `run-id` GONE while `progress.json` still names `RUN_B` — a split state that, unlike the TC-LEASE-009 compare-then-unlink residual, never self-heals.
+
 ## TC-LEASE-010: prior-run lease cannot satisfy the current run
 
 **Given** `RUN_A`'s lease/run-id files exist with fresh `updated_at_epoch`
@@ -136,15 +142,27 @@ fixture-driven; no real sleeps.
 **When** gemini's adapter composes the recorder
 **Then** it uses line framing.
 
+## TC-LEASE-020b: gemini framing selection also recognizes the equals-joined form (round-2 regression)
+
+**Given** `AGENT_DEV_EXTRA_ARGS` includes the equals-joined single-token `--output-format=stream-json` (not the two-token form TC-LEASE-020 covers) AND the CLI emits a truncated/malformed final record
+**When** gemini's adapter composes the recorder
+**Then** it uses JSON framing — proven by the truncated final record NOT refreshing the lease (refresh count is 1 launch event + 1 complete record, never 3). Before the fix, the equals form was invisible to the adapter's scan, so this configuration fell through to line framing and the truncated record would have wrongly refreshed as a plain nonempty line.
+
 ## TC-LEASE-021: refresh COUNT (not just presence) through all seven launch paths
 
 **Given** each of the seven dev launch paths (claude, codex, opencode, agy, kiro, gemini, and the unknown-CLI fallback) driven through the real `run_agent` dispatch with a stub CLI binary emitting a known number N of complete records, and a counting wrapper around `_agent_progress_refresh`
 **When** the run completes
 **Then** the counted refresh total is exactly N+1 (one launch event plus one per record) for every path — proving the recorder is actually wired into claude/codex/opencode/agy/kiro (not just the fallback and gemini, the only two paths a bare "lease file exists" check had exercised) and that it refreshes once per record, not once per command.
 
+## TC-LEASE-023: lock unavailability degrades gracefully under `set -e` (round-2 regression, caught on re-review)
+
+**Given** `lib-agent.sh` sourced under the wrapper's REAL `set -euo pipefail` (not the test harness's deliberately-relaxed `set -uo pipefail`) with `flock` absent from `PATH` (a symlink farm omitting only `flock`, never a real bin dir that would still resolve the system binary)
+**When** `_agent_progress_init` then `_agent_progress_cleanup` run
+**Then** both complete (rc=0, run-id/lease still written unlocked) instead of the caller aborting — proving the `_agent_progress_lock_acquire _lock_fd || true` guard at both call sites is load-bearing: a bare (unguarded) call trips `set -e` on the helper's documented "return 1 when locking is unavailable" contract and aborts the whole wrapper before the agent is ever launched, the opposite of the "best-effort, degrades to unlocked" promise TC-LEASE-022's fix was supposed to preserve.
+
 ## Acceptance mapping
 
-- R1 → TC-LEASE-001, 004-010, 018
+- R1 → TC-LEASE-001, 004-010, 018, 022, 023
 - R2 → TC-LEASE-001, 003, 018
-- R3 → TC-LEASE-011, 016, 017, 019, 020, 021
+- R3 → TC-LEASE-011, 016, 017, 019, 020, 020b, 021
 - R4 → TC-LEASE-011, 012, 013, 014, 015

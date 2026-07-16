@@ -1178,6 +1178,53 @@ _agent_progress_refresh() {
   return 0
 }
 
+# _agent_progress_lock_acquire <out_fd_varname> — best-effort mutual
+# exclusion between _agent_progress_init and _agent_progress_cleanup
+# (round-2 review finding). Without this, init (run B) and cleanup (a stale
+# run A) can interleave: cleanup reads the run-id file's content while it
+# still names run A, then — before cleanup's own `rm` executes — init
+# overwrites BOTH sidecars for run B; cleanup's late `rm` then deletes the
+# run-id file regardless of its now-current content (unlink doesn't
+# re-check), leaving run-id GONE while progress.json still names run B.
+# Unlike the documented compare-then-unlink residual (INV-135 #1), this does
+# NOT self-heal: only _agent_progress_init ever rewrites the run-id file, so
+# a reader sees "missing run-id" for the rest of run B's lifetime, not just
+# a transient window.
+#
+# Locking the read-decide-act section in BOTH functions on the same fd
+# closes this: whichever of {a stale cleanup, a fresh init} acquires the
+# lock first runs its entire critical section to completion before the
+# other can observe or mutate either sidecar, so the two files can never end
+# up naming different runs. Best-effort (mirrors lib-metrics.sh's
+# flock-optional posture, not acquire_pid_guard's hard requirement) — a box
+# missing `flock` degrades to the pre-fix unlocked behavior rather than
+# aborting the wrapper.
+#
+# Takes the OUT fd by nameref (like _run_with_timeout's PID passing) rather
+# than echoing it from a `$(...)` call — `{fd}>>` opens the fd in the
+# CURRENT shell; a command-substitution subshell would close it (and drop
+# the flock) the instant the subshell exits, before the caller's critical
+# section ever ran. Sets the nameref to "" and returns 1 when locking is
+# unavailable/skipped, in which case the caller proceeds unlocked.
+_agent_progress_lock_acquire() {
+  local -n _out_fd="$1"
+  _out_fd=""
+  local lock_file="${AGENT_PROGRESS_RUNID_FILE:-${AGENT_PROGRESS_FILE:-}}"
+  [[ -n "$lock_file" ]] || return 1
+  lock_file="${lock_file}.lock"
+  [[ -L "$lock_file" ]] && return 1
+  [[ -e "$lock_file" && ! -f "$lock_file" ]] && return 1
+  command -v flock >/dev/null 2>&1 || return 1
+  local fd
+  exec {fd}>>"$lock_file" 2>/dev/null || return 1
+  if ! flock -w "${AGENT_PROGRESS_LOCK_WAIT_SECONDS:-5}" "$fd" 2>/dev/null; then
+    exec {fd}>&-
+    return 1
+  fi
+  _out_fd="$fd"
+  return 0
+}
+
 # _agent_progress_init — write the current run's run-id sidecar and an
 # initial lease BEFORE the agent process is launched. This is the R1
 # guarantee that a new run's files exist before its first agent output can
@@ -1189,9 +1236,23 @@ _agent_progress_init() {
   [[ -n "${AGENT_PROGRESS_RUNID_FILE:-}" ]] || return 0
   [[ -L "$AGENT_PROGRESS_RUNID_FILE" ]] && return 0
 
+  local _lock_fd=""
+  # `|| true`: _agent_progress_lock_acquire returns 1 on every "couldn't
+  # lock" path (no flock binary, symlinked/non-regular lock path, or a
+  # flock -w timeout under contention) — a bare non-zero return here would
+  # trip the caller's `set -e` (autonomous-dev.sh runs this un-guarded,
+  # before the run_agent/resume_agent `set +e` region) and abort the WHOLE
+  # wrapper before the agent is ever launched, the exact opposite of the
+  # documented best-effort degrade (round-2 review finding — reproduced:
+  # a missing flock binary or a lock held past the wait aborted the wrapper
+  # outright instead of proceeding unlocked). The nameref already defaults
+  # to "" on every failure path, so `|| true` alone is sufficient to restore
+  # the intended degrade.
+  _agent_progress_lock_acquire _lock_fd || true
+
   local dir tmp
   dir="$(dirname "$AGENT_PROGRESS_RUNID_FILE")"
-  tmp="$(mktemp "${dir}/.runid.XXXXXX" 2>/dev/null)" || return 0
+  tmp="$(mktemp "${dir}/.runid.XXXXXX" 2>/dev/null)" || { [[ -n "$_lock_fd" ]] && exec {_lock_fd}>&-; return 0; }
   if printf '%s\n' "${RUN_ID:-}" > "$tmp" 2>/dev/null; then
     chmod 600 "$tmp" 2>/dev/null || true  # best-effort perms; a chmod failure still leaves a valid (if looser-mode) run-id file, never blocks the write
     mv -f "$tmp" "$AGENT_PROGRESS_RUNID_FILE" 2>/dev/null || rm -f "$tmp" 2>/dev/null
@@ -1199,19 +1260,36 @@ _agent_progress_init() {
     rm -f "$tmp" 2>/dev/null
   fi
   _agent_progress_refresh
+  [[ -n "$_lock_fd" ]] && exec {_lock_fd}>&-
   return 0
 }
 
 # _agent_progress_cleanup — remove THIS run's progress lease + run-id
 # sidecar, but ONLY when the on-disk run_id matches this run's own RUN_ID
 # (compare-then-unlink). A newer run's files (different run_id — e.g. a
-# fresh dispatch that raced a stale wrapper's teardown) survive. Called from
+# fresh dispatch that raced a stale wrapper's teardown) survive — see
+# _agent_progress_lock_acquire above for why the read-decide-act section is
+# now lock-guarded against a concurrent _agent_progress_init. Called from
 # the wrapper's cleanup() trap alongside the existing PID-file removal.
 # No-op when the relevant env var is unset. Always returns 0.
 _agent_progress_cleanup() {
+  local _lock_fd=""
+  # `|| true` — see the matching comment in _agent_progress_init: a bare
+  # non-zero return here would trip `set -e` in the wrapper's exit trap
+  # (cleanup() is not itself set +e-guarded) and abort teardown, e.g.
+  # leaving the PID file behind. Same best-effort degrade contract.
+  _agent_progress_lock_acquire _lock_fd || true
+
   if [[ -n "${AGENT_PROGRESS_RUNID_FILE:-}" && -f "${AGENT_PROGRESS_RUNID_FILE}" && ! -L "${AGENT_PROGRESS_RUNID_FILE}" ]]; then
     local rid
     rid="$(head -n1 "${AGENT_PROGRESS_RUNID_FILE}" 2>/dev/null)"
+    # Test-only hook (round-2 regression coverage): widen the window BETWEEN
+    # the read above and the unlink below — the exact TOCTOU a concurrent
+    # _agent_progress_init could otherwise land in — so a concurrent-init
+    # test can force the interleaving described above and assert the LOCK
+    # (held since function entry, above) — not scheduling luck — is what
+    # prevents it. No-op (unset) in every real dispatch.
+    [[ -n "${_AGENT_PROGRESS_CLEANUP_TEST_DELAY_SECONDS:-}" ]] && sleep "$_AGENT_PROGRESS_CLEANUP_TEST_DELAY_SECONDS"
     [[ "$rid" == "${RUN_ID:-}" ]] && rm -f "${AGENT_PROGRESS_RUNID_FILE}" 2>/dev/null
   fi
   if [[ -n "${AGENT_PROGRESS_FILE:-}" && -f "${AGENT_PROGRESS_FILE}" && ! -L "${AGENT_PROGRESS_FILE}" ]]; then
@@ -1223,6 +1301,7 @@ _agent_progress_cleanup() {
     fi
     [[ "$rid2" == "${RUN_ID:-}" ]] && rm -f "${AGENT_PROGRESS_FILE}" 2>/dev/null
   fi
+  [[ -n "$_lock_fd" ]] && exec {_lock_fd}>&-
   return 0
 }
 
