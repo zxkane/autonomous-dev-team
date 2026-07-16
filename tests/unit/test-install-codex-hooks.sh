@@ -902,6 +902,49 @@ else
   bad "losing capture leaves ownership with the concurrent installer"
 fi
 
+echo "=== TC-CDCR-019P: capture rejects a concurrent symlink replacement ==="
+repo=$(new_repo capture_symlink_replacement)
+mkdir -p "$repo/.codex" "$repo/fakebin"
+cat > "$repo/.codex/config.toml" <<'EOF'
+[features]
+codex_hooks = true
+EOF
+printf '{"sentinel":true}\n' > "$repo/.codex/hooks.json"
+printf 'operator target\n' > "$repo/operator-target.json"
+cp "$repo/.codex/config.toml" "$repo/config.before"
+cat > "$repo/fakebin/python3" <<'EOF'
+#!/bin/bash
+if [[ "${CODEX_ATOMIC_PLACE:-}" == "1" &&
+      "${2:-}" == "$CAPTURE_SOURCE" &&
+      "${3:-}" == "$CAPTURE_SOURCE".bak.* &&
+      ! -e "$CAPTURE_STATE" ]]; then
+  : > "$CAPTURE_STATE"
+  "$REAL_MV" "$2" "$OPERATOR_HELD"
+  ln -s "$OPERATOR_TARGET" "$2"
+fi
+exec "$REAL_PYTHON" "$@"
+EOF
+chmod +x "$repo/fakebin/python3"
+if (
+  cd "$repo" &&
+    REAL_MV="$real_mv" REAL_PYTHON="$real_python" \
+      CAPTURE_SOURCE="hooks.json" CAPTURE_STATE="$repo/capture-fired" \
+      OPERATOR_HELD="$repo/operator-held-hooks.json" \
+      OPERATOR_TARGET="$repo/operator-target.json" \
+      PATH="$repo/fakebin:$PATH" \
+      bash "$INSTALLER" --no-git-hook >/dev/null 2>"$repo/install.err"
+); then
+  bad "concurrent symlink replacement must abort installation"
+elif [[ -L "$repo/.codex/hooks.json" ]] &&
+     [[ "$(readlink "$repo/.codex/hooks.json")" == "$repo/operator-target.json" ]] &&
+     grep -q 'operator target' "$repo/operator-target.json" &&
+     grep -q '"sentinel":true' "$repo/operator-held-hooks.json" &&
+     cmp -s "$repo/.codex/config.toml" "$repo/config.before"; then
+  ok "capture rejects and preserves the concurrent symlink replacement"
+else
+  bad "capture rejects and preserves the concurrent symlink replacement"
+fi
+
 echo "=== TC-CDCR-019H: ambiguous capture failure reconciles its postcondition ==="
 repo=$(new_repo ambiguous_capture)
 mkdir -p "$repo/.codex" "$repo/fakebin"

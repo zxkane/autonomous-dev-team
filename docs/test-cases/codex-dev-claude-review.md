@@ -42,6 +42,7 @@
 | TC-CDCR-019M | Project `.codex` is replaced by an external symlink after final placement | Anchored rollback restores the original physical directory and writes nothing externally |
 | TC-CDCR-019N | Canonical rollback source disappears while an unrelated scratch object appears | Inode ownership check leaves both unowned objects untouched |
 | TC-CDCR-019O | Kiro/Windsurf translation deduplicates hooks that converge on one matcher/event | Duplicate commands are removed without changing canonical command order |
+| TC-CDCR-019P | An existing destination is replaced by a symlink after the shell snapshot but before atomic capture | Capture rejects the changed source type and leaves the concurrent symlink at the canonical path |
 
 ## Hook payload normalization and behavior
 

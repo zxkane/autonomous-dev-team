@@ -353,25 +353,40 @@ _CODEX_TARGET_DIR_ID=""
 _CODEX_TARGET_DIR_PATH=""
 
 _place_codex_path_no_clobber() {
-  local source="$1" destination="$2"
+  local source="$1" destination="$2" expected_identity="${3:-}"
 
   # link(2) and symlink(2) address the exact destination and fail if any path
   # already exists there. Unlike `mv -n`, they never reinterpret a concurrent
-  # directory as a container for the source.
-  CODEX_ATOMIC_PLACE=1 python3 - "$source" "$destination" <<'PY'
+  # directory as a container for the source. Capture callers also pass the
+  # inode observed before entering this helper so a raced symlink or file is
+  # rejected before it can be linked and unlinked.
+  CODEX_ATOMIC_PLACE=1 python3 - \
+    "$source" "$destination" "$expected_identity" <<'PY'
 import os
 import stat
 import sys
 
-source, destination = sys.argv[1:]
+source, destination, expected_identity = sys.argv[1:]
 try:
-    mode = os.lstat(source).st_mode
+    source_stat = os.lstat(source)
+    mode = source_stat.st_mode
+    if expected_identity:
+        actual_identity = f"{source_stat.st_dev}:{source_stat.st_ino}"
+        if actual_identity != expected_identity or not stat.S_ISREG(mode):
+            raise OSError("source changed before capture")
     if stat.S_ISREG(mode):
         os.link(source, destination, follow_symlinks=False)
     elif stat.S_ISLNK(mode):
         os.symlink(os.readlink(source), destination)
     else:
         raise OSError("unsupported source type")
+    if expected_identity:
+        linked_stat = os.lstat(destination)
+        active_stat = os.lstat(source)
+        linked_identity = f"{linked_stat.st_dev}:{linked_stat.st_ino}"
+        active_identity = f"{active_stat.st_dev}:{active_stat.st_ino}"
+        if linked_identity != expected_identity or active_identity != expected_identity:
+            raise OSError("source changed during capture")
     os.unlink(source)
 except OSError:
     raise SystemExit(1)
@@ -383,7 +398,7 @@ _capture_codex_destination() {
   local source_identity
 
   source_identity=$(_file_identity "$path") || return 1
-  if _place_codex_path_no_clobber "$path" "$backup"; then
+  if _place_codex_path_no_clobber "$path" "$backup" "$source_identity"; then
     :
   else
     # The helper status is intentionally reconciled from inode postconditions.
