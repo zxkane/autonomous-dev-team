@@ -371,7 +371,7 @@ assert_eq "jq still REJECTS an unknown finding key (additionalProperties:false i
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== INV-134 (#488) D1: capability-aware DEFAULT derivation ==="
+echo "=== INV-135 (#488) D1: capability-aware DEFAULT derivation ==="
 # ---------------------------------------------------------------------------
 # unset REVIEW_PROTECTED_PATHS in every case below. Re-source in a subshell per
 # case so the top-of-file default assignment re-evaluates against the case's env.
@@ -592,7 +592,7 @@ rm -f /tmp/d1-13-$$.out
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== INV-134 (#488) D2: prompt/derivation consistency ==="
+echo "=== INV-135 (#488) D2: prompt/derivation consistency ==="
 # ---------------------------------------------------------------------------
 
 # TC-INV134-D2-01/03: App + scope present ⇒ prompt glob list omits workflows,
@@ -659,7 +659,7 @@ esac
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== INV-134 (#488) D3: anti-forge preservation across capability outcomes ==="
+echo "=== INV-135 (#488) D3: anti-forge preservation across capability outcomes ==="
 # ---------------------------------------------------------------------------
 
 # TC-INV134-D3-01: App + scope present ⇒ workflows is NOT in the default
@@ -718,7 +718,7 @@ rm -f /tmp/d3-04-$$.out
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== INV-134 (#488) D4: review_classify_artifact_matched_patterns ==="
+echo "=== INV-135 (#488) D4: review_classify_artifact_matched_patterns ==="
 # ---------------------------------------------------------------------------
 ( unset REVIEW_PROTECTED_PATHS AGENT_TOKEN_PERMISSIONS GH_AUTH_MODE
   source "$CLASSIFY_LIB"

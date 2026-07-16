@@ -195,7 +195,7 @@ _MOCK_NOPROG_NOTICE_PRESENT="0"
 _MOCK_NONACT_NOTICE_PRESENT="0"  # INV-92 (#298) Branch B′ notice already posted?
 _MOCK_ATTEMPT_WRITE_FAILS="0"    # 1 = reject attempt-marker writes (finding 2)
 _MOCK_ATTEMPT_WRITE_TRIES=0
-_MOCK_MATCHED_PATTERNS_MARKER=""  # INV-134 (#488) D4: when non-empty, itp_list_comments
+_MOCK_MATCHED_PATTERNS_MARKER=""  # INV-135 (#488) D4: when non-empty, itp_list_comments
                                    # emits a comment carrying `<!-- inv92-matched-patterns: … -->`
 _MOCK_MATCHED_PATTERNS_HEAD=""    # (codex review round-2, PR #498) head= field the synthesized
                                    # marker carries; defaults to _MOCK_PR_HEAD (the SAME head as
@@ -239,7 +239,7 @@ itp_list_comments() {
   if [[ "${_MOCK_NONACT_NOTICE_PRESENT:-0}" != "0" ]]; then
     _bodies+=("non-actionable-finding:${_MOCK_PR_HEAD:-none} prior notice")
   fi
-  # INV-134 (#488) D4: when the test declares a matched-patterns marker, emit a
+  # INV-135 (#488) D4: when the test declares a matched-patterns marker, emit a
   # review-wrapper-style comment carrying it so `_inv92_matched_patterns` (the
   # dispatcher-side reader) has something to find. (codex review round-2, PR
   # #498): the marker is head-bound — defaults to `_MOCK_PR_HEAD` (the same
@@ -914,7 +914,7 @@ assert_contains "INV92-RT-006 notice keys non-actionable-finding:none" "non-acti
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== INV-134 (#488) D4: stall notice surfaces the matched-patterns marker ==="
+echo "=== INV-135 (#488) D4: stall notice surfaces the matched-patterns marker ==="
 # ---------------------------------------------------------------------------
 
 # TC-INV134-D4-08: Branch B′ fires with an `inv92-matched-patterns:` marker

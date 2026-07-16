@@ -1,0 +1,4 @@
+[
+  {"state": "SUCCESS", "name": "check-a"},
+  {"state": "PENDING", "name": "check-b"}
+]

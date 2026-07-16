@@ -42,6 +42,10 @@
     "review-smoke-config-error":             {"file": "autonomous-review.sh", "anchor": "_classify_smoke_gate"},
     "review-bot-missing-requeue":            {"file": "autonomous-review.sh", "anchor": "documented as a reviewing→pending-review edge"},
     "review-bot-missing-fail":               {"file": "autonomous-review.sh", "anchor": "reviewDecision is CHANGES_REQUESTED until the bot review is present"},
+    "review-ci-rollup-head-changed":          {"file": "autonomous-review.sh", "anchor": "HEAD drift detected on PR"},
+    "review-ci-rollup-failed":                {"file": "autonomous-review.sh", "anchor": "failed CI check — dev must fix and push"},
+    "review-ci-rollup-wait-exceeded":         {"file": "autonomous-review.sh", "anchor": "stuck/misconfigured check must be fixed"},
+    "review-ci-rollup-wait-below-max":        {"file": "autonomous-review.sh", "anchor": "No approve/merge this tick — [INV-134]"},
     "liveness-watchdog-stall-pending-dev":    {"file": "lib-dispatch.sh",     "anchor": "liveness-watchdog-stall-pending-dev [INV-128]"},
     "liveness-watchdog-stall-pending-review": {"file": "lib-dispatch.sh",     "anchor": "liveness-watchdog-stall-pending-review [INV-128]"}
   },
@@ -85,6 +89,10 @@
     {"file": "autonomous-review.sh", "movement": "reviewing|pending-dev",                                 "anchor": "Review reached a blocking FAIL verdict"},
     {"file": "autonomous-review.sh", "movement": "reviewing|pending-dev",                                 "anchor": "reviewDecision is CHANGES_REQUESTED until the bot review is present"},
     {"file": "autonomous-review.sh", "movement": "reviewing|pending-review",                              "anchor": "awaiting-bot-review"},
+    {"file": "autonomous-review.sh", "movement": "reviewing|pending-review",                              "anchor": "HEAD drift detected on PR"},
+    {"file": "autonomous-review.sh", "movement": "reviewing|pending-dev",                                 "anchor": "failed CI check — dev must fix and push"},
+    {"file": "autonomous-review.sh", "movement": "reviewing|pending-dev",                                 "anchor": "stuck/misconfigured check must be fixed"},
+    {"file": "autonomous-review.sh", "movement": "reviewing|pending-review",                              "anchor": "No approve/merge this tick — [INV-134]"},
     {"file": "lib-dispatch.sh",      "movement": "pending-dev|stalled",                                    "anchor": "liveness-watchdog-stall-pending-dev [INV-128]"},
     {"file": "lib-dispatch.sh",      "movement": "pending-review|stalled",                                 "anchor": "liveness-watchdog-stall-pending-review [INV-128]"}
   ],

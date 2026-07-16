@@ -219,18 +219,21 @@ fi
 
 # TC-RC-SRC-04: the NON-substantive routes must NOT submit REQUEST_CHANGES —
 # they are transient re-queues / transport failures, not dev-actionable code
-# defects. Pin the helper call count at EXACTLY 4 (the four substantive routes:
-# agent-findings FAIL, CONFLICTING mergeable block, E2E hard-gate fail, and the
+# defects. Pin the helper call count at EXACTLY 6 (the six substantive routes:
+# agent-findings FAIL, CONFLICTING mergeable block, E2E hard-gate fail, the
 # INV-79 mandatory-bot-review MAX-waits FAIL — a bot misconfigured/down after
-# BOT_REVIEW_WAIT_MAX is a dev/maintainer-actionable blocking finding). The INV-79
-# WAIT branch (awaiting-bot-review, pending-review) is NON-substantive and must
-# NOT call the helper. Any further call would mean a non-substantive route
-# (mergeable-UNKNOWN, E2E-evidence-missing, agent-crash-no-verdict, or the INV-79
-# wait re-queue) wrongly wired it in.
-if [[ "$_calls" -eq 4 ]]; then
-  echo -e "  ${GREEN}PASS${NC}: TC-RC-SRC-04 helper called on EXACTLY the 4 substantive routes (non-substantive routes excluded)"; PASS=$((PASS + 1))
+# BOT_REVIEW_WAIT_MAX is a dev/maintainer-actionable blocking finding — and the
+# INV-134 CI-rollup gate's two substantive routes: a red check (failed) and the
+# CI_ROLLUP_WAIT_MAX-waits give-up). The INV-79/INV-134 WAIT branches
+# (awaiting-bot-review / awaiting-ci / ci-status-unavailable, all
+# pending-review) are NON-substantive and must NOT call the helper. Any
+# further call would mean a non-substantive route (mergeable-UNKNOWN,
+# E2E-evidence-missing, agent-crash-no-verdict, an INV-79/INV-134 wait
+# re-queue, or CI-rollup head-changed) wrongly wired it in.
+if [[ "$_calls" -eq 6 ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-RC-SRC-04 helper called on EXACTLY the 6 substantive routes (non-substantive routes excluded)"; PASS=$((PASS + 1))
 else
-  echo -e "  ${RED}FAIL${NC}: TC-RC-SRC-04 expected exactly 4 helper calls (non-substantive routes must NOT request changes), found $_calls"; FAIL=$((FAIL + 1))
+  echo -e "  ${RED}FAIL${NC}: TC-RC-SRC-04 expected exactly 6 helper calls (non-substantive routes must NOT request changes), found $_calls"; FAIL=$((FAIL + 1))
 fi
 
 # TC-RC-SRC-04b: the E2E hard-gate FAIL route (the `failed-substantive` +

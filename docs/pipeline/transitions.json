@@ -556,6 +556,58 @@
       "note": "INV-79 scoped mode: the configured REVIEW_BOTS never reviewed after BOT_REVIEW_WAIT_MAX brokered trigger attempts on this HEAD — the bot is misconfigured/rate-limited/down. Substantive FAIL: gh pr review --request-changes + pending-dev. A maintainer re-triggers once the bot is healthy, or drops it from REVIEW_BOTS."
     },
     {
+      "id": "review-ci-rollup-head-changed",
+      "from": "reviewing",
+      "to": "pending_review",
+      "event": "review-pass-but-ci-rollup-head-changed",
+      "actor": "review-wrapper",
+      "guards": ["verdict-pass", "pr-still-open", "ci-rollup-head-changed"],
+      "actions": ["remove-label:reviewing", "add-label:pending-review", "comment:review-held-head-changed"],
+      "code_site": "autonomous-review.sh CI-rollup gate: _cir_head_matches mismatch (checked before AND after chp_ci_rollup) → --remove-label reviewing --add-label pending-review (non-substantive re-queue, never approves)",
+      "mermaid": "reviewing --> pending_review: CI-rollup gate — reviewed HEAD changed mid-round, never approve a stale HEAD (INV-134)",
+      "inv_refs": ["INV-134", "INV-129"],
+      "note": "The PR's HEAD advanced (a new dev push) between when this review round started and when the CI-rollup gate ran — chp_ci_rollup and chp_approve are both skipped. autonomous retained → dispatcher re-reviews against the new head. Posts the INV-129 round=0 reset marker."
+    },
+    {
+      "id": "review-ci-rollup-failed",
+      "from": "reviewing",
+      "to": "pending_dev",
+      "event": "review-pass-but-ci-rollup-failed",
+      "actor": "review-wrapper",
+      "guards": ["verdict-pass", "pr-still-open", "ci-rollup-failed"],
+      "actions": ["remove-label:reviewing", "add-label:pending-dev", "request-changes", "comment:review-findings"],
+      "code_site": "autonomous-review.sh CI-rollup gate: _classify_ci_rollup_gate → block-substantive (token=failed) → request-changes + --remove-label reviewing --add-label pending-dev",
+      "mermaid": "reviewing --> pending_dev: Review wrapper PASS but a red check on the reviewed HEAD (CI-rollup gate, INV-134)",
+      "inv_refs": ["INV-134", "INV-52", "INV-54"],
+      "note": "_classify_ci_rollup_gate → block-substantive. Finding names every entry in failed_checks. A re-push re-triggers CI. chp_approve is never reached."
+    },
+    {
+      "id": "review-ci-rollup-wait-below-max",
+      "from": "reviewing",
+      "to": "pending_review",
+      "event": "review-pass-but-ci-rollup-pending",
+      "actor": "review-wrapper",
+      "guards": ["verdict-pass", "pr-still-open", "ci-rollup-pending-below-max"],
+      "actions": ["remove-label:reviewing", "add-label:pending-review", "comment:review-held-awaiting-ci"],
+      "code_site": "autonomous-review.sh CI-rollup gate: token=pending or leaf rc≠0, SHA-bound wait count < CI_ROLLUP_WAIT_MAX → --remove-label reviewing --add-label pending-review (non-substantive re-queue)",
+      "mermaid": "reviewing --> pending_review: PASS but CI checks still pending / status unavailable — re-queue for re-review (INV-134, bounded by CI_ROLLUP_WAIT_MAX)",
+      "inv_refs": ["INV-134"],
+      "note": "No new commits exist yet, so pending-dev's stale-verdict guard would stall the hold — pending-review re-queues a clean re-review on the next tick. Bounded by the SHA-bound ci-rollup-wait marker count vs CI_ROLLUP_WAIT_MAX (default 3), mirrors INV-79's bot-review-wait mechanics."
+    },
+    {
+      "id": "review-ci-rollup-wait-exceeded",
+      "from": "reviewing",
+      "to": "pending_dev",
+      "event": "review-pass-but-ci-rollup-pending-at-max",
+      "actor": "review-wrapper",
+      "guards": ["verdict-pass", "pr-still-open", "ci-rollup-pending-exceeded"],
+      "actions": ["remove-label:reviewing", "add-label:pending-dev", "request-changes", "comment:review-findings"],
+      "code_site": "autonomous-review.sh CI-rollup gate: wait count ≥ CI_ROLLUP_WAIT_MAX → request-changes + --remove-label reviewing --add-label pending-dev (substantive FAIL)",
+      "mermaid": "reviewing --> pending_dev: CI checks still not clear after CI_ROLLUP_WAIT_MAX waits — substantive FAIL (INV-134)",
+      "inv_refs": ["INV-134"],
+      "note": "The check never resolved (stuck/misconfigured) after CI_ROLLUP_WAIT_MAX brokered waits on this HEAD. Substantive FAIL: gh pr review --request-changes + pending-dev, mirrors the INV-79 bot-gate give-up."
+    },
+    {
       "id": "hygiene-strip-residue-approved",
       "from": "approved",
       "to": "approved",

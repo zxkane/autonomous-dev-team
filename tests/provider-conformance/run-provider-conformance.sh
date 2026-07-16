@@ -1120,6 +1120,46 @@ _run_token_assert() {
   emit PASS "$verb"
 }
 
+# _run_json_token_assert <verb> <invoke_snippet> <payload_file> <expected_token>
+# <expected_failed_checks_json> — parallel of _run_token_assert for
+# chp_ci_rollup (#489, [INV-134]), whose stdout is a JSON OBJECT
+# `{"token":...,"failed_checks":[...]}` rather than a bare token. Asserts
+# object shape, exact token, and exact failed_checks array; then the same
+# strict fail-closed stub-failure probe as _run_token_assert.
+_run_json_token_assert() {
+  local verb="$1" invoke_snippet="$2" payload_file="$3" expected_token="$4" expected_failed_checks="$5"
+  local argv_file="$work_root/.argv-$verb.json"
+  local out rc
+
+  out="$(_invoke _PCF_GH_MODE="ok" _PCF_GH_PAYLOAD="$payload_file" _PCF_ARGV_FILE="$argv_file" "$invoke_snippet" 2>&1)"; rc=$?
+  if [[ "$rc" != "0" ]]; then
+    emit FAIL "$verb" "unexpected non-zero rc on valid payload: $rc (output: ${out:0:200})"
+    return
+  fi
+  if ! jq -e 'type == "object" and has("token") and has("failed_checks")' >/dev/null 2>&1 <<<"$out"; then
+    emit FAIL "$verb" "wrong-shape (expected {token,failed_checks} object, got: ${out:0:200})"
+    return
+  fi
+  local got_token
+  got_token="$(jq -r '.token' <<<"$out" 2>/dev/null)"
+  if [[ "$got_token" != "$expected_token" ]]; then
+    emit FAIL "$verb" "token mismatch (expected '$expected_token', got '$got_token')"
+    return
+  fi
+  if ! jq -e --argjson exp "$expected_failed_checks" '.failed_checks == $exp' >/dev/null 2>&1 <<<"$out"; then
+    emit FAIL "$verb" "failed_checks mismatch (expected $expected_failed_checks, got: ${out:0:200})"
+    return
+  fi
+
+  # Fail-closed (strict): same discipline as _run_token_assert.
+  out="$(_invoke _PCF_GH_MODE="fail" _PCF_ARGV_FILE="$argv_file" "$invoke_snippet" 2>/dev/null)"; rc=$?
+  if [[ "$rc" == "0" ]]; then
+    emit FAIL "$verb" "fail-closed violation: rc 0 on stub-failure (stdout: '${out:0:120}') — leaf must return rc≠0 on genuine transport failure"
+    return
+  fi
+  emit PASS "$verb"
+}
+
 # _run_close_keyword_assert — render-only assertion (no gh call, no leaf
 # dispatch — see provider-spec.md §4.4 / docs/designs/provider-conformance-runner.md).
 _run_close_keyword_assert() {
@@ -2139,6 +2179,36 @@ _assert_verb() {
       # tests, not this focused verb check).
       _run_token_assert "$verb" 'chp_mergeable 42' \
         "$PAYLOADS/mergeable-token.json" "MERGEABLE"
+      ;;
+    chp_ci_rollup)
+      # Issue #489 ([INV-134]): reviewed-HEAD CI-rollup gate leaf. SIBLING of
+      # chp_ci_status — drives the SAME all-success/mixed-failure/empty
+      # fixtures PLUS an all-SKIPPED fixture that proves the deliberate
+      # divergence (chp_ci_status would bucket all-SKIPPED as `pending`;
+      # chp_ci_rollup buckets it as `green`). Output is a JSON object, not a
+      # bare token — _run_json_token_assert asserts {token,failed_checks}.
+      _run_json_token_assert "$verb" 'chp_ci_rollup 42' \
+        "$PAYLOADS/ci-status-all-success.json" "green" "[]"
+      _run_json_token_assert "$verb" 'chp_ci_rollup 42' \
+        "$PAYLOADS/ci-status-mixed-failure.json" "failed" '["check-b"]'
+      _run_json_token_assert "$verb" 'chp_ci_rollup 42' \
+        "$PAYLOADS/ci-status-empty.json" "none" "[]"
+      _run_json_token_assert "$verb" 'chp_ci_rollup 42' \
+        "$PAYLOADS/ci-rollup-all-skipped.json" "green" "[]"
+      # D3 (#489): failed_checks names the still-unresolved check for
+      # `pending` too, not only for `failed` — the wait-cap give-up finding
+      # needs those names.
+      _run_json_token_assert "$verb" 'chp_ci_rollup 42' \
+        "$PAYLOADS/ci-rollup-pending.json" "pending" '["check-b"]'
+      # Payload-type gate (mirrors chp_ci_status): a rc-0 JSON OBJECT payload
+      # `{}` must be REJECTED, not misread as "no checks configured".
+      _argv_file="$work_root/.argv-ci-rollup-obj.json"
+      _out_obj="$(_invoke _PCF_GH_MODE="ok" _PCF_GH_PAYLOAD="$PAYLOADS/ci-status-object-payload.json" _PCF_ARGV_FILE="$_argv_file" 'chp_ci_rollup 42' 2>/dev/null)"; _rc_obj=$?
+      if [[ "$_rc_obj" == "0" ]]; then
+        emit FAIL "$verb" "payload-type gate missing: rc-0 object payload {} accepted (out: '${_out_obj:0:120}') — must reject non-array"
+      else
+        emit PASS "$verb"
+      fi
       ;;
     *)
       emit FAIL "$verb" "no assertion wired for this verb (runner bug)"

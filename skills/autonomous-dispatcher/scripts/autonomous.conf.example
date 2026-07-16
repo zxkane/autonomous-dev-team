@@ -637,7 +637,7 @@ DISPATCHER_APP_PEM=""
 # requests a subset. PAT mode ignores this (a PAT cannot be down-scoped) and
 # logs a one-time WARN. See docs/github-app-setup.md "Two-token split".
 #
-# INV-134 (#488): adding "workflows":"write" here (App mode, App INSTALLATION
+# INV-135 (#488): adding "workflows":"write" here (App mode, App INSTALLATION
 # must ALSO grant `workflows: write` or the mint fails) is the SANCTIONED way
 # to unlock workflow-file dev-actionability — see the REVIEW_PROTECTED_PATHS
 # comment above for the full explanation.
@@ -967,7 +967,7 @@ REVIEW_BOTS=""
 # reason=non_actionable_finding) instead of re-dispatching a dev session that
 # could never satisfy the finding.
 #
-# Default (when unset) is CAPABILITY-AWARE as of INV-134 (#488):
+# Default (when unset) is CAPABILITY-AWARE as of INV-135 (#488):
 #   - ".github/workflows/** CODEOWNERS .github/CODEOWNERS" — the conservative
 #     default, applied UNLESS CODE_HOST is unset or "github" AND GH_AUTH_MODE=app
 #     AND AGENT_TOKEN_PERMISSIONS includes "workflows":"write" (see below) — in
@@ -986,7 +986,7 @@ REVIEW_BOTS=""
 #                                    protected in EVERY configuration (the
 #                                    capability check never touches these two).
 #
-# SANCTIONED UNLOCK (GitHub App mode only, INV-134): if your dev-agent GitHub
+# SANCTIONED UNLOCK (GitHub App mode only, INV-135): if your dev-agent GitHub
 # App is granted `workflows: write` and you want the autonomous dev agent to be
 # able to push workflow-file fixes, add `"workflows":"write"` to
 # AGENT_TOKEN_PERMISSIONS below (GH_AUTH_MODE=app AND CODE_HOST unset/"github"
@@ -1012,7 +1012,7 @@ REVIEW_BOTS=""
 # project-specific protected paths (e.g. a release-config or infra dir a human
 # owns). Set to "" to disable protected-path classification entirely (every
 # finding is then treated as dev-actionable — the pre-#298 behavior). ANY
-# explicit value here (including "") is honored VERBATIM — the INV-134
+# explicit value here (including "") is honored VERBATIM — the INV-135
 # capability check only ever supplies the default when this var is unset.
 # REVIEW_PROTECTED_PATHS=".github/workflows/** CODEOWNERS .github/CODEOWNERS"
 

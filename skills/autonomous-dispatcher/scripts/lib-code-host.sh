@@ -13,14 +13,16 @@
 # normative; this header's verb list is a convenience index, not a second
 # source of truth):
 #   CODE_HOST ∈ { github (default), gitlab }  (spec §2)
-#   20 CHP verbs (19 §3.2 table rows — one row names both chp_review_threads
+#   21 CHP verbs (20 §3.2 table rows — one row names both chp_review_threads
 #   and chp_resolve_thread), each forwarding to chp_${CODE_HOST}_<verb> "$@":
-#     chp_find_pr_for_issue chp_ci_status chp_mergeable chp_create_pr
-#     chp_approve chp_request_changes chp_merge chp_review_threads
-#     chp_resolve_thread chp_trigger_bot chp_close_keyword
+#     chp_find_pr_for_issue chp_ci_status chp_ci_rollup chp_mergeable
+#     chp_create_pr chp_approve chp_request_changes chp_merge
+#     chp_review_threads chp_resolve_thread chp_trigger_bot chp_close_keyword
 #     chp_reply_review_comment chp_pr_view chp_pr_list chp_pr_comment
 #     chp_list_inline_comments chp_count_reviews_by_login chp_commit_file
 #     chp_pr_diffstat chp_caps
+#   chp_ci_rollup (#489, [INV-134]) is a NET-NEW verb, sibling of chp_ci_status
+#   — see providers/chp-github.sh::chp_github_ci_rollup for the split rationale.
 #   chp_has_leaf is a caller-side guard helper, NOT a verb (no `.caps` entry,
 #   never forwards "$@" to a leaf) — see spec §3.2 "What this section owns".
 #
@@ -106,6 +108,12 @@ fi
 # on transport error or page-cap hit (§3.5 COMPLETE-set contract).
 chp_find_pr_for_issue() { chp_${CODE_HOST}_find_pr_for_issue "$@"; }
 chp_ci_status()         { chp_${CODE_HOST}_ci_status "$@"; }
+# chp_ci_rollup PR — reviewed-HEAD CI-rollup gate verb (issue #489, [INV-134]).
+# SIBLING of chp_ci_status, NOT a replacement — see chp_github_ci_rollup's
+# header (providers/chp-github.sh) for the split rationale. Ungated (no
+# `.caps` entry), bare one-line shim — same posture as chp_ci_status /
+# chp_mergeable, since every CHP provider MUST implement it.
+chp_ci_rollup()         { chp_${CODE_HOST}_ci_rollup "$@"; }
 chp_mergeable()         { chp_${CODE_HOST}_mergeable "$@"; }
 chp_create_pr()         { chp_${CODE_HOST}_create_pr "$@"; }
 chp_approve()           { chp_${CODE_HOST}_approve "$@"; }
