@@ -73,7 +73,8 @@ adapter_invoke_agy() {
 
   # [#493 R3] line framing (agy has no JSON event stream — see the adapter
   # comparison table in docs/pipeline/agy-cli-support.md). Recorder is
-  # appended AFTER _run_with_timeout so PIPESTATUS[0] still holds agy's rc.
+  # appended AFTER _run_with_timeout so PIPESTATUS[1] still holds agy's rc
+  # (index 0 is the leading printf, always 0).
   printf '%s' "$prompt" \
     | _run_with_timeout "$AGENT_CMD" \
         "${conv_flag[@]}" \

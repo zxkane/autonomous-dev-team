@@ -426,6 +426,33 @@ else
   bad "TC-LEASE-011 recorder never refreshed the lease"
 fi
 
+# TC-LEASE-011b: a final line with NO trailing newline must survive byte-for-
+# byte — including under `set -e`, where the loop's own `read` returning
+# non-zero at EOF must not abort the pipeline stage before that line's own
+# printf runs (the production call sites wrap run_agent/resume_agent in
+# `set +e`, but the recorder itself must not rely on the caller's set -e
+# posture to avoid dropping the final line).
+NO_NEWLINE_PROGRESS="$TMPROOT/no-newline.progress.json"
+rm -f "$NO_NEWLINE_PROGRESS"
+no_newline_out=$(
+  run_in_sandbox '
+    set -e
+    export AGENT_PID_FILE="'"$PIDFILE"'"
+    export AGENT_PROGRESS_FILE="'"$NO_NEWLINE_PROGRESS"'"
+    export RUN_ID="run-no-newline"
+    printf "line one\nline two, no trailing newline" | _agent_progress_recorder line
+  '
+)
+printf 'line one\nline two, no trailing newline' > "$TMPROOT/expected-no-newline.txt"
+expected_no_newline=$(cat "$TMPROOT/expected-no-newline.txt")
+assert_eq "TC-LEASE-011b final no-trailing-newline line survives byte-for-byte under set -e" \
+  "$expected_no_newline" "$no_newline_out"
+if [[ -f "$NO_NEWLINE_PROGRESS" ]]; then
+  ok "TC-LEASE-011b lease still refreshed for the no-trailing-newline final record"
+else
+  bad "TC-LEASE-011b lease was not refreshed for the no-trailing-newline final record"
+fi
+
 # TC-LEASE-016: exit status propagation through the recorder for 0/124/137/143.
 for code in 0 124 137 143; do
   rc=$(

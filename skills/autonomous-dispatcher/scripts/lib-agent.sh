@@ -1261,8 +1261,16 @@ _agent_progress_recorder() {
   fi
   local line rc
   while :; do
-    IFS= read -r line
-    rc=$?
+    # `|| rc=$?` (not a bare `read`) so a non-zero `read` at EOF — the
+    # expected way this loop learns "no trailing newline on the final
+    # line" — never trips `set -e` in a caller that sources this file
+    # without the wrapper's `set +e` guard around run_agent/resume_agent.
+    # A bare `read` as the last statement of an iteration would abort the
+    # pipeline stage under `set -e` BEFORE the final line's own `printf`
+    # below runs, silently dropping it — defeating the byte-identical
+    # passthrough guarantee this function exists to provide.
+    rc=0
+    IFS= read -r line || rc=$?
     if [[ $rc -ne 0 && -z "$line" ]]; then
       break
     fi
