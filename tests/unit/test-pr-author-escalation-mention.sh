@@ -258,6 +258,14 @@ out=$(_RPAM_MODE=ok _RPAM_AUTHOR='"evil\nactor"' _run_resolver resolve_pr_author
 assert_rc_eq "TC-PAEM-019e newline-containing string author rc" "0" "$rc"
 assert_eq "TC-PAEM-019e newline-containing string author falls back (not a multiline mention)" "@the-owner" "$out"
 
+# TC-PAEM-019f (#495 review round 5): an author string containing an
+# embedded `@` (e.g. `alice@evil`) must fall back rather than being echoed
+# verbatim — `@alice@evil` is a second/malformed mention token, violating the
+# exactly-one-token contract just like the whitespace cases above.
+out=$(_RPAM_MODE=ok _RPAM_AUTHOR='"alice@evil"' _run_resolver resolve_pr_author_mention 42 2>/dev/null); rc=$?
+assert_rc_eq "TC-PAEM-019f at-sign-containing string author rc" "0" "$rc"
+assert_eq "TC-PAEM-019f at-sign-containing string author falls back (not a multi-token mention)" "@the-owner" "$out"
+
 out=$(_run_resolver resolve_pr_author_mention "abc" 2>/dev/null); rc=$?
 assert_rc_eq "TC-PAEM-020 non-numeric PR arg rc" "0" "$rc"
 assert_eq "TC-PAEM-020 non-numeric PR arg falls back" "@the-owner" "$out"

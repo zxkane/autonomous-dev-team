@@ -162,8 +162,10 @@ resolve_operator_mention() {
 # non-string `.author` shape (e.g. `{"login":"evil"}` — a malformed
 # provider-leaf projection would otherwise be echoed verbatim into the
 # mention, producing a multiline/multi-token comment body — #495 review
-# round 3 finding), an author string containing whitespace (same
-# multi-token risk), non-numeric/empty PR arg, `chp_pr_view` failure, or
+# round 3 finding), an author string that fails `_rpam_malformed_mention_token`
+# (embedded whitespace/newline, or an embedded `@` — e.g. `alice@evil` would
+# otherwise render `@alice@evil`, a second/malformed mention token — #495
+# review round 5 finding), non-numeric/empty PR arg, `chp_pr_view` failure, or
 # malformed (non-JSON-object) output.
 resolve_pr_author_mention() {
   local pr="${1:-}"
@@ -192,13 +194,11 @@ resolve_pr_author_mention() {
     _rpam_fallback
     return 0
   fi
-  case "$login" in
-    *[[:space:]]*)
-      echo "WARN: resolve_pr_author_mention: PR #${pr} author '${login}' is not a single token — falling back to the operator target" >&2
-      _rpam_fallback
-      return 0
-      ;;
-  esac
+  if _rpam_malformed_mention_token "$login"; then
+    echo "WARN: resolve_pr_author_mention: PR #${pr} author '${login}' is not a valid single-token mention — falling back to the operator target" >&2
+    _rpam_fallback
+    return 0
+  fi
 
   if _rpam_is_bot_login "$login"; then
     echo "INFO: resolve_pr_author_mention: PR #${pr} author '${login}' classified as a bot — falling back to the operator target" >&2

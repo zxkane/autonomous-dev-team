@@ -172,18 +172,21 @@ is genuinely PR-scoped:
    resolver falls back to `@${HUMAN_ESCALATION_LOGIN:-$REPO_OWNER}`. The
    resolver ALWAYS exits 0 and emits exactly one `@<token>` — it never aborts
    a `set -euo pipefail` caller. **Malformed `.author` shape hardening (#495
-   review round 3):** the resolver only accepts a single-token JSON *string*
-   author; a non-string shape (e.g. a stray `{"login":"…"}` object surviving
-   a provider-leaf regression) or a whitespace/newline-containing string
-   falls back rather than being echoed verbatim into the mention — otherwise
-   the posted comment body itself could become multiline/multi-token. The
-   same shape-validation applies to the CONFIGURED `HUMAN_ESCALATION_LOGIN`
-   fallback token itself (#495 review round 3, finding #2): a value
-   containing whitespace or an embedded `@` (e.g. an operator pasting
-   `@maintainer` verbatim, or a typo like `alice@evil`) is treated as absent
-   and falls through to `REPO_OWNER` instead of being echoed verbatim —
-   otherwise a misconfigured conf value could itself break the
-   exactly-one-token contract.
+   review round 3, extended round 5):** the resolver only accepts a
+   single-token JSON *string* author; a non-string shape (e.g. a stray
+   `{"login":"…"}` object surviving a provider-leaf regression) or a string
+   that fails `_rpam_malformed_mention_token` — embedded whitespace/newline,
+   OR an embedded `@` (e.g. a provider projection like `"alice@evil"`, round 5
+   finding) — falls back rather than being echoed verbatim into the mention;
+   otherwise the posted comment body itself could become multiline/
+   multi-token or carry a second `@`-token. The same
+   `_rpam_malformed_mention_token` check validates the CONFIGURED
+   `HUMAN_ESCALATION_LOGIN` fallback token itself (#495 review round 3,
+   finding #2): a value containing whitespace or an embedded `@` (e.g. an
+   operator pasting `@maintainer` verbatim, or a typo like `alice@evil`) is
+   treated as absent and falls through to `REPO_OWNER` instead of being
+   echoed verbatim — otherwise a misconfigured conf value could itself break
+   the exactly-one-token contract.
 
    **`DEV_BOT_LOGIN`** (`autonomous.conf.example`, optional, defaults empty —
    #495 review finding #1): the dispatcher-side counterpart to `BOT_LOGIN`.

@@ -43,7 +43,7 @@ stdout; diagnostics only on stderr.
 | TC-PAEM-017 | Author is empty string | fallback token, rc 0 |
 | TC-PAEM-018 | `chp_pr_view` fails (non-zero rc) | fallback token, rc 0 |
 | TC-PAEM-019 | `chp_pr_view` returns malformed (non-JSON-object) output | fallback token, rc 0 |
-| TC-PAEM-019b–e | `.author` is a well-formed JSON object (e.g. `{"login":"evil"}`) / array / whitespace-containing string / newline-containing string, inside an otherwise well-formed `chp_pr_view` object (review round 3 finding) | fallback token, rc 0 — the malformed shape is NEVER echoed verbatim into the mention (would otherwise produce a multiline/multi-token comment body) |
+| TC-PAEM-019b–f | `.author` is a well-formed JSON object (e.g. `{"login":"evil"}`) / array / whitespace-containing string / newline-containing string / at-sign-containing string (e.g. `"alice@evil"`), inside an otherwise well-formed `chp_pr_view` object (review round 3 finding; `.019f` at-sign case is review round 5) | fallback token, rc 0 — the malformed shape is NEVER echoed verbatim into the mention (would otherwise produce a multiline/multi-token/malformed-mention comment body) |
 | TC-PAEM-020 | PR arg is non-numeric (e.g. `abc`) | fallback token, rc 0, NO `chp_pr_view` call |
 | TC-PAEM-021 | PR arg is empty | fallback token, rc 0, NO `chp_pr_view` call |
 | TC-PAEM-022 | `HUMAN_ESCALATION_LOGIN` set + bot author | `@$HUMAN_ESCALATION_LOGIN` (NOT `@$REPO_OWNER`) |
