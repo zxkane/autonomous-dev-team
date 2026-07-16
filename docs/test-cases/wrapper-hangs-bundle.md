@@ -1,6 +1,6 @@
 # Test Cases — Wrapper Hangs Bundle (PR-6)
 
-Covers tests for #59 (INV-12), #60 (INV-13), #67 (INV-15).
+Covers tests for #59 (INV-12), #60 (INV-13), #67 (INV-15), #500 (INV-15 rev 2).
 
 ## TC-WH-001: `_run_with_timeout` wraps when binary present
 
@@ -55,6 +55,44 @@ Covers tests for #59 (INV-12), #60 (INV-13), #67 (INV-15).
 **Given** wrapper exits cleanly without SIGTERM
 **When** cleanup runs
 **Then** existing PR-existence-check path is exercised unchanged (regression guard).
+
+## TC-500-01: SIGTERM path, first PR lookup FAILS, retry SUCCEEDS finding the PR
+
+**Given** `RECEIVED_SIGTERM=1` and a stubbed `chp_pr_list` that fails on call 1 (rc≠0, empty capture) and succeeds on call 2 with a body matching `#<issue>`
+**When** `cleanup()` runs
+**Then** exactly 2 `chp_pr_list` calls and exactly 1 intervening 2s sleep occur, and the label transition converges on `pending-review` (the 143→0 rewrite fires on attempt 2). Regression: fails before the fix (a failed read was coerced to "0 matches" on attempt 1, routing straight to `pending-dev`).
+
+## TC-500-02: SIGTERM path, BOTH lookup attempts fail → UNKNOWN-defer, no label write
+
+**Given** `RECEIVED_SIGTERM=1` and a stubbed `chp_pr_list` that fails on both call 1 and call 2
+**When** `cleanup()` runs
+**Then** exactly 2 `chp_pr_list` calls and exactly 1 sleep occur (bounded, not unbounded), a WARN is logged naming the failed read, NO wrapper label transition of any kind is written — neither `pending-review` nor `pending-dev` — and the bot-trigger broker (gated on `PR_EXISTS>0`, which is unknown here) is also skipped. Regression: fails before the fix (the failure branch always wrote `pending-dev`).
+
+## TC-500-03: jq parse failure on a successful transport read follows the same UNKNOWN path
+
+**Given** `RECEIVED_SIGTERM=1` and a stubbed `chp_pr_list` that returns rc 0 with non-JSON output on call 1 (jq parse failure) and a matching PR on call 2
+**When** `cleanup()` runs
+**Then** the parse failure is retried identically to a transport failure — exactly 2 calls, 1 sleep, converging on `pending-review` on the successful retry.
+
+## TC-500-04 (companion — guards over-correction): SIGTERM path, lookup SUCCEEDS with zero matches
+
+**Given** `RECEIVED_SIGTERM=1` and a stubbed `chp_pr_list` that succeeds on call 1 with a body matching no `#<issue>` reference
+**When** `cleanup()` runs
+**Then** exactly 1 `chp_pr_list` call occurs (no retry — a clean zero-match is not UNKNOWN), and the label transition takes the failure branch, unchanged (`pending-dev`).
+
+## TC-500-05: non-SIGTERM paths are byte-unchanged
+
+**Given** `RECEIVED_SIGTERM=0` and a stubbed `chp_pr_list` that fails on call 1
+**When** `cleanup()` runs
+**Then** exactly 1 `chp_pr_list` call occurs (no retry is introduced outside the SIGTERM branch) and the original single-attempt fail-soft-to-`"0"` contract is preserved.
+
+(TC-500-01 through TC-500-05 are covered by `tests/unit/test-sigterm-trap.sh`'s extraction-based harness, which runs the real `cleanup()` fragment against a stubbed `chp_pr_list` scripted per-call — see [`docs/pipeline/invariants.md` INV-15 rev 2](../pipeline/invariants.md#inv-15-step-5a-sigterm-race-is-non-deterministic).)
+
+## TC-CPC-006: non-SIGTERM exit-0 + successful zero-match read stays byte-unchanged
+
+**Given** `RECEIVED_SIGTERM=0`, `exit_code=0`, and a stubbed `chp_pr_list` that succeeds with a body matching no `#<issue>` reference
+**When** `cleanup()` runs
+**Then** exactly 1 `chp_pr_list` call occurs (no retry — this path never enters the SIGTERM-scoped retry loop), the "no PR was created" comment is posted, and the label transition flips `in-progress` → `pending-dev`, unchanged by #500's SIGTERM-scoped fix. Covered by `tests/unit/test-cleanup-pr-check.sh` (review round-1 [P3]: the required non-SIGTERM contract had only been pinned in `test-sigterm-trap.sh`'s TC-500-05, which exercises a failed lookup after exit 143 — not this exit-0/zero-match/pending-dev shape).
 
 ## TC-WH-010: Step 4 skips dispatch when session is completed
 

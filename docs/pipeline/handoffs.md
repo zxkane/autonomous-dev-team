@@ -93,10 +93,13 @@ flowchart LR
 
 **Race window**: Step 5a's SIGTERM path is the most concurrent case. Dispatcher and wrapper trap both edit labels in a ~few-second window. Both write `pending-review`, both post a comment. Worst case: 2 comments and 2 redundant label edits per ~1% of transitions — bounded and self-healing.
 
+**Exception ([INV-15 rev 2, #500](invariants.md#inv-15-step-5a-sigterm-race-is-non-deterministic))**: "both write `pending-review`" assumes the trap's own PR-existence read succeeds. If that read fails (and its bounded retry also fails), the trap writes **nothing** — Step 5a's `pending-review` edit stands alone (or, if Step 5a's edit also failed, the issue is left on whatever it was before, typically `in-progress`). This is a deliberate narrowing, not a new race: a failed read is UNKNOWN, not "confirmed zero matches", so the trap must not overwrite Step 5a's `pending-review` with `pending-dev` on a read it can't trust. See the failure-mode bullet below and [`dev-agent-flow.md`'s SIGTERM convergence section](dev-agent-flow.md#exit-trap-cleanup) for the retry/defer mechanics.
+
 **Failure modes**:
 
 - Wrapper trap fails to post Session Report (token expired, network) → next-tick dispatcher Step 4 cannot find a `Dev Session ID:` to resume from → falls back to new session via the wrapper's mode-normalization. Some context is lost but the pipeline progresses.
 - Wrapper trap fails to edit labels (token, perm) → issue stuck in `in-progress`, no PR-ready trailer to drive next decision → next-tick Step 5b probes PID, finds DEAD, sees the PR, routes to `pending-review` correctly. The wrapper's trap is a fast-path; Step 5b is the slow safety net.
+- Wrapper trap's PR-existence lookup fails twice (transport or parse error) on the SIGTERM path ([INV-15 rev 2, #500](invariants.md#inv-15-step-5a-sigterm-race-is-non-deterministic)) → trap performs no label write at all → **dispatcher Step 5b** (not [INV-25](invariants.md#inv-25-terminal-labels-approved-stalled-are-sticky-transitional-residue-is-healed-at-tick-start) hygiene, which only heals residue on issues that already carry a terminal label) is the reconciler on the next tick: it finds the wrapper's PID dead and resolves the PR via its own `chp_find_pr_for_issue`.
 
 ## H4: dispatcher → review
 

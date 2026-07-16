@@ -1076,17 +1076,73 @@ EOF
   # Look up PR-exists state once (used by SIGTERM rewrite and the success path).
   # [INV-87] (W1c1, #397) body-mention existence lookup → chp_pr_list abstract
   # contract. Body is normalized to a string so the `.body != null` guard is
-  # gone (the #148-class fix). Fail-soft (`|| echo "0"`): a transient read
-  # error keeps the success path routing conservative (no PR ⇒ retry dev).
-  local _pr_list_e
-  _pr_list_e=$(_teardown_call chp_pr_list open "body" 2>/dev/null) || _pr_list_e=""
+  # gone (the #148-class fix).
+  #
+  # [INV-15 rev 2, #500] A FAILED read (non-zero rc / empty capture, or a jq
+  # parse failure) is UNKNOWN, never "confirmed zero matches" — collapsing the
+  # two on the RECEIVED_SIGTERM=1 path reopens the #67/INV-15 two-writer race:
+  # Step 5a already wrote pending-review; a failed read here would make the
+  # 143→0 convergence below not fire, and the failure branch would overwrite
+  # it with pending-dev seconds later. On that path ONLY, retry the lookup
+  # once after a 2s sleep (mirrors the MERGEABLE_RETRIES bounded-read
+  # precedent in autonomous-review.sh) before giving up. Non-SIGTERM paths
+  # keep the original single-attempt fail-soft-to-"0" contract untouched
+  # (D2: PR_EXISTS stays a plain count for its other three consumers — the
+  # bot-trigger broker gate, exit-0 success routing, and the metrics gate —
+  # all byte-unchanged).
+  # [#402 review round-1 [P1], TC-STR-001] `local PR_EXISTS` stays a
+  # standalone declaration (not folded into the multi-variable line below) —
+  # the source-order test greps for this literal anchor to prove PR_EXISTS is
+  # declared after the session-report post.
   local PR_EXISTS
-  if [[ -n "$_pr_list_e" ]]; then
-    PR_EXISTS=$(jq -r "[.[] | select((.body | test(\"#${ISSUE_NUMBER}[^0-9]\")) or (.body | test(\"#${ISSUE_NUMBER}\$\")))] | length" <<<"$_pr_list_e" 2>/dev/null || echo "0")
-  else
-    PR_EXISTS="0"
-  fi
+  local _pr_list_e _pr_read_ok=0 _pr_attempt
+  for _pr_attempt in 1 2; do
+    _pr_list_e=$(_teardown_call chp_pr_list open "body" 2>/dev/null) || _pr_list_e=""
+    if [[ -n "$_pr_list_e" ]]; then
+      PR_EXISTS=$(jq -r "[.[] | select((.body | test(\"#${ISSUE_NUMBER}[^0-9]\")) or (.body | test(\"#${ISSUE_NUMBER}\$\")))] | length" <<<"$_pr_list_e" 2>/dev/null) || PR_EXISTS=""
+      if [[ "$PR_EXISTS" =~ ^[0-9]+$ ]]; then
+        _pr_read_ok=1
+        break
+      fi
+    fi
+    # Read failed (empty capture) or jq didn't return a valid integer (parse
+    # failure). Only retry when SIGTERM is in play and another attempt
+    # remains; the non-SIGTERM path falls straight to the fail-soft "0"
+    # below on the very first failure, unchanged from before this fix.
+    if [[ "$RECEIVED_SIGTERM" -eq 1 && "$_pr_attempt" -lt 2 ]]; then
+      log "WARN: SIGTERM-path PR lookup failed (attempt ${_pr_attempt}/2); retrying in 2s (INV-15 UNKNOWN-defer, #500)."
+      sleep 2
+      continue
+    fi
+    break
+  done
   unset _pr_list_e
+
+  if [[ "$RECEIVED_SIGTERM" -eq 1 && "$_pr_read_ok" -ne 1 ]]; then
+    # [INV-15 rev 2, #500] UNKNOWN after the bounded retry: perform NO
+    # wrapper label transition this run and defer to the next dispatcher
+    # tick's Step 5b DEAD-PID routing — it resolves the PR via
+    # chp_find_pr_for_issue and applies normal DEAD+PR routing. INV-25
+    # Step-0 hygiene does NOT heal a plain `in-progress` (it only strips
+    # residue on terminal issues), so Step 5b — not INV-25 — owns this.
+    log "WARN: SIGTERM-path PR lookup failed after retry; deferring — no label write this run (INV-15/#500). Next dispatcher tick (Step 5b) reconciles."
+    _emit_dev_end "$exit_code"
+    # [INV-81] Write the run end marker (rc + timing) to meta.json. Best-effort,
+    # observe-only — a failure here must not block the UNKNOWN-defer return.
+    if declare -F run_artifacts_finalize >/dev/null 2>&1; then
+      run_artifacts_finalize "${RUN_DIR:-}" "$exit_code" || true
+    fi
+    # [INV-109] STATE=clean-exit: this defer path is still a GRACEFUL wrapper
+    # exit (no wrapper label write, but cleanup() ran to completion) — a
+    # failure to record the marker must not block the return either.
+    if [[ -n "${ADT_LANE_DIR:-}" ]] && declare -F lane_set_state >/dev/null 2>&1; then
+      lane_set_state "$ADT_LANE_DIR" clean-exit || true
+    fi
+    cleanup_github_auth
+    return
+  fi
+  [[ "$_pr_read_ok" -eq 1 ]] || PR_EXISTS="0"
+  unset _pr_read_ok
 
   # [INV-79] Bot-trigger broker: if the scoped agent token is armed and the agent
   # wrote bot-trigger phrase(s) (it cannot post them itself — GH_USER_PAT is scrubbed
