@@ -212,14 +212,19 @@ transition. On poll-loop timeout the helper now (1) best-effort issues
 `AWS-RunShellScript` invocation this stops the remote script before an
 unreached `kill -TERM` line executes (it cannot retroactively undo a
 signal already sent; that residual race is accepted, same fail-safe
-posture as [INV-137]'s other documented residuals) — then (2) makes ONE
-more `get-command-invocation` check immediately after, so a command that
-in fact completed (`Success`) in the gap between the last poll and the
-cancel is still reported truthfully instead of being silently downgraded
-to indeterminate. Only after BOTH the cancel and the follow-up check fail
-to observe `Success` does the helper return `rc=2` — which the caller
-(`_remote_dev_progress_compare_and_signal`) still, correctly, treats
-identically to `ABORTED:remote-transport-failure`.
+posture as [INV-137]'s other documented residuals) — then (2) POLLS
+`get-command-invocation` for up to `REMOTE_POLL_TIMEOUT_RECOVER_SECONDS`
+(default 5) for a terminal status, rather than accepting one immediate
+check. `cancel-command` only REQUESTS the stop; it does not confirm it
+synchronously, so a single check taken right after issuing it can still
+observe a stale `InProgress`/`Pending` status even though the command is
+moments from a terminal state either way (`Cancelled` if the stop won the
+race, or `Success`/`Failed` if the command finished first) — a one-shot
+recheck would report indeterminate in exactly that gap, downgrading a
+command that in fact completed (or is about to). Only after the recovery
+window itself elapses with no terminal status observed does the helper
+return `rc=2` — which the caller (`_remote_dev_progress_compare_and_signal`)
+still, correctly, treats identically to `ABORTED:remote-transport-failure`.
 
 ## `pid_alive` switching contract
 
@@ -403,6 +408,7 @@ Common to all backends:
 | `REMOTE_LIVENESS_CHECK_DISABLE` | `false` | `true` falls back to legacy local-only `pid_alive` (operator escape hatch for transport-blocked deployments) |
 | `REMOTE_LIVENESS_CHECK_TIMEOUT_SECONDS` | `8` | Dispatcher-side bound on synchronous polling (`lib-ssm.sh::_ssm_run_remote_command` honors this) |
 | `SSM_COMMAND_TIMEOUT_SECONDS` | `30` | SSM-side cap (`aws ssm send-command --timeout-seconds`) so a hung remote shell can't tie up an SSM slot for the default 600s. 30 is AWS's hard API minimum for this flag (#369) |
+| `REMOTE_POLL_TIMEOUT_RECOVER_SECONDS` | `5` | Bound on `lib-ssm.sh::_ssm_poll_timeout_recover`'s post-cancel recovery poll (see [Poll-timeout recovery](#4-agent-progress-snapshot--compare-and-signal-transport-inv-137-485) above) — gives a `cancel-command` request time to actually land before falling back to indeterminate |
 | `HEARTBEAT_INTERVAL_SECONDS` | `120` | Wrapper-side heartbeat cadence; threshold = `× 3 = 360s` (consumed remote-side in the liveness snippet) |
 | `DEV_PROGRESS_STALE_SECONDS` | `1800` | Agent-progress freshness threshold ([INV-137]) — a fixed shared constant, deliberately NOT an operator-tunable `autonomous.conf` knob; overridable only for test fixtures |
 

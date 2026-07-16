@@ -231,18 +231,26 @@ assert_rc "TC-LCS-006 rc=2 on Status: Failed" 2 "$rc"
 echo ""
 echo "=== TC-LCS-007: poll-loop wall-clock timeout → rc=2 ==="
 # ---------------------------------------------------------------------------
+# Bound now covers the main poll cap PLUS lib-ssm.sh's post-timeout recovery
+# window (issue #485 round-2 review finding #1: _ssm_poll_timeout_recover no
+# longer does a single immediate recheck after cancel-command, it polls for
+# up to REMOTE_POLL_TIMEOUT_RECOVER_SECONDS — 1s here, kept short so this
+# test still runs fast). The stub's AWS_GET_STATUS stays "InProgress" for
+# every get-command-invocation call including the recovery poll's, so the
+# recovery window also elapses in full before returning rc=2.
 reset_recorder
 t0=$(date +%s)
 PATH="$STUB_BIN:$PATH" \
 AWS_RECORD_FILE="$TMPROOT/aws-record" \
 AWS_GET_STATUS="InProgress" \
 REMOTE_LIVENESS_CHECK_TIMEOUT_SECONDS=1 \
+REMOTE_POLL_TIMEOUT_RECOVER_SECONDS=1 \
 bash "$DRIVER" issue 99 >/dev/null 2>&1
 rc=$?
 t1=$(date +%s)
 assert_rc "TC-LCS-007 rc=2 on poll timeout" 2 "$rc"
 elapsed=$((t1 - t0))
-if [[ "$elapsed" -le 4 ]]; then
+if [[ "$elapsed" -le 5 ]]; then
   echo -e "  ${GREEN}PASS${NC}: TC-LCS-007 wall-clock cap honored (elapsed=${elapsed}s)"
   PASS=$((PASS + 1))
 else

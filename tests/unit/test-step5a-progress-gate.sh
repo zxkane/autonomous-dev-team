@@ -54,22 +54,6 @@ assert_contains() {
   fi
 }
 
-# Poll (short bounded increments) rather than a fixed wall-clock sleep for
-# "did this PID actually die yet" — a real SIGTERM's delivery is async, so
-# a fixed sleep is inherently a guess at how long that takes and is flaky
-# under scheduling pressure. Same technique as
-# test-codex-rerun-orphan-containment.sh's wait_for_pid_gone. Returns 0 as
-# soon as the pid is gone, 1 if it's still alive after the deadline.
-_wait_for_pid_gone() {
-  local pid="$1" timeout_s="${2:-5}" i
-  local iterations=$((timeout_s * 20))
-  for ((i = 0; i < iterations; i++)); do
-    kill -0 "$pid" 2>/dev/null || return 0
-    sleep 0.05
-  done
-  return 1
-}
-
 TMPROOT=$(mktemp -d)
 trap 'rm -rf "$TMPROOT"' EXIT
 
@@ -262,16 +246,25 @@ echo ""
 echo "=== Snapshot probe (remote backend) — real driver, stubbed aws ==="
 # ===========================================================================
 
-# _make_replay_aws_stub <stub_bin> <real_output> <xdg_dir>
+# _make_replay_aws_stub <stub_bin> <real_output> <xdg_dir> [inner_path]
 #
 # Writes an `aws` stub into <stub_bin> that replays the driver's OWN
 # base64-encoded inner shell snippet locally (same technique as
 # test-agent-progress-lease.sh's TC-LEASE-013), routing its stdout to
-# <real_output> under XDG_RUNTIME_DIR=<xdg_dir>. Shared verbatim by the
-# --snapshot and --compare-and-signal runners below; the ONLY difference
-# between the two paths is the driver invocation each makes afterward.
+# <real_output> under XDG_RUNTIME_DIR=<xdg_dir>. Shared by the --snapshot
+# and --compare-and-signal runners below; the ONLY difference between those
+# paths is the driver invocation each makes afterward.
+#
+# Optional <inner_path>: when set, the replayed inner snippet runs with
+# PATH pinned to that value, simulating a genuinely separate remote host
+# whose shell cannot reach the controller's PATH. Used by the skewed-clock
+# test (TC-DPS-034) to force PATH=/usr/bin:/bin for the inner invocation
+# only; left empty everywhere else so the inner snippet inherits the
+# ambient PATH (including any frozen-clock shadow the caller prepended).
 _make_replay_aws_stub() {
-  local stub_bin="$1" real_output="$2" xdg_dir="$3"
+  local stub_bin="$1" real_output="$2" xdg_dir="$3" inner_path="${4:-}"
+  local inner_path_prefix=""
+  [[ -n "$inner_path" ]] && inner_path_prefix="PATH=\"$inner_path\" "
   cat > "$stub_bin/aws" <<STUBEOF
 #!/bin/bash
 case "\$*" in
@@ -285,7 +278,7 @@ case "\$*" in
     full_cmd=\$(printf '%s' "\$params_json" | jq -r '.commands[0]')
     b64=\$(printf '%s' "\$full_cmd" | grep -oE 'printf %s [A-Za-z0-9+/=]+ \\| base64 -d' | sed -E 's/^printf %s //; s/ \\| base64 -d\$//')
     inner_cmd=\$(printf '%s' "\$b64" | base64 -d)
-    XDG_RUNTIME_DIR="$xdg_dir" bash -c "\$inner_cmd" > "$real_output" 2>/dev/null || true
+    XDG_RUNTIME_DIR="$xdg_dir" ${inner_path_prefix}bash -c "\$inner_cmd" > "$real_output" 2>/dev/null || true
     echo '{"Command":{"CommandId":"stub-1","Status":"Pending"}}'
     ;;
   *get-command-invocation*)
@@ -297,13 +290,29 @@ STUBEOF
   chmod +x "$stub_bin/aws"
 }
 
+# _run_remote_snapshot <project_id> <issue> <xdg_dir> [frozen]
+#
+# `frozen=1` prepends FAKE_DATE_BIN (the SAME frozen-`date` stub the local
+# snapshot block above uses, pinned to $NOW) ahead of the stub `aws` on
+# PATH. The remote inner shell's own `date -u +%s` call resolves PATH at
+# the time it runs inside the stub's `bash -c "$inner_cmd"` replay, so this
+# freezes the remote-side clock too — verified empirically that the
+# shadow reaches through the stub's own subshell layer. Round-2 review
+# finding #3: TC-DPS-030 only exercised age=0 and age=1801 against the
+# REAL wall clock, never the FRESH/STALE boundary (1799/1800 inclusive,
+# 1801 strict) the local probe's TC-DPS-002/003/004 already pin — a
+# regression in the remote driver's OWN copy of the boundary comparison
+# could pass TC-DPS-030 (nowhere near the boundary) while failing at
+# exactly 1800.
 _run_remote_snapshot() {
-  local remote_project_id="$1" issue="$2" xdg_dir="$3"
+  local remote_project_id="$1" issue="$2" xdg_dir="$3" frozen="${4:-0}"
   local stub_bin="$TMPROOT/remote-stub-bin-$$-$RANDOM"
   mkdir -p "$stub_bin"
   local real_output="$TMPROOT/remote-real-output-$$-$RANDOM.txt"
   _make_replay_aws_stub "$stub_bin" "$real_output" "$xdg_dir"
-  PATH="$stub_bin:$PATH" \
+  local path_prefix="$stub_bin"
+  [[ "$frozen" == "1" ]] && path_prefix="$FAKE_DATE_BIN:$stub_bin"
+  PATH="$path_prefix:$PATH" \
   SSM_INSTANCE_ID="i-test" \
   SSM_REMOTE_PROJECT_ID="$remote_project_id" \
   SSM_REMOTE_PROJECT_DIR="/data/git/test" \
@@ -348,6 +357,23 @@ assert_eq "TC-DPS-030a: remote FRESH (age=0) matches local" "FRESH" "$(_state_of
 _write_remote_lease 202 111 run-a "$((NOW - 1801))"
 out=$(_run_remote_snapshot "$REMOTE_PROJECT" 202 "$REMOTE_XDG")
 assert_eq "TC-DPS-030b: remote STALE (age=1801) matches local" "STALE" "$(_state_of "$out")"
+
+# TC-DPS-049..051: remote FRESH/STALE boundary at exactly 1799/1800/1801,
+# under the FROZEN clock (see _run_remote_snapshot's docstring) so the
+# assertion is exact rather than a wall-clock-drift-tolerant range — the
+# same boundary local TC-DPS-002/003/004 already pin, run through the REAL
+# remote driver instead of the local dev_progress_snapshot.
+_write_remote_lease 234 111 run-a "$((NOW - 1799))"
+out=$(_run_remote_snapshot "$REMOTE_PROJECT" 234 "$REMOTE_XDG" 1)
+assert_eq "TC-DPS-049: remote age=1799 -> FRESH (frozen clock)" "FRESH" "$(_state_of "$out")"
+
+_write_remote_lease 235 111 run-a "$((NOW - 1800))"
+out=$(_run_remote_snapshot "$REMOTE_PROJECT" 235 "$REMOTE_XDG" 1)
+assert_eq "TC-DPS-050: remote age=1800 -> FRESH (inclusive boundary, frozen clock)" "FRESH" "$(_state_of "$out")"
+
+_write_remote_lease 236 111 run-a "$((NOW - 1801))"
+out=$(_run_remote_snapshot "$REMOTE_PROJECT" 236 "$REMOTE_XDG" 1)
+assert_eq "TC-DPS-051: remote age=1801 -> STALE (strict boundary, frozen clock)" "STALE" "$(_state_of "$out")"
 
 # TC-DPS-035..048: remote UNKNOWN-family parity. Same fixture families as
 # the local probe's TC-DPS-005..018, run through the REAL remote driver
@@ -527,42 +553,114 @@ EOF
 assert_eq "TC-DPS-033: malformed remote stdout -> rc=2 (indeterminate, never STALE)" "2" "$out_rc"
 
 # TC-DPS-034: remote age is computed on the REMOTE host's clock, not the
-# controller's. Prove by writing a lease with a KNOWN remote age (1801s) while
-# NOT touching the controller's own `date` — the remote inner script's own
-# `date -u +%s` call (executed via the stub's `bash -c`) is what computes AGE,
-# so this is inherently remote-clock-derived; assert the resulting age is
-# still exactly what the remote-side computation would produce. The
-# tolerance window is computed from the REAL wall clock at assertion time
+# controller's — proven with a genuinely SKEWED controller clock (round-2
+# review finding #4: the original version read the real host clock for
+# BOTH fixture setup and assertion, so it would still pass even if the
+# driver regressed to computing age from the CONTROLLER's clock, since
+# both clocks were, in fact, the same clock).
+#
+# Setup: the OUTER PATH (the "controller") is shadowed with a `date` stub
+# skewed 500000s into the future — far outside any plausible tolerance
+# window. If the driver's remote snippet's `NOW=$(date -u +%s)` resolved
+# this skewed controller `date` (the regression this test exists to
+# catch), the resulting age would be ~500000s too large, nowhere near the
+# expected ~1801. The `aws` stub's replay of the remote inner script
+# forces PATH=/usr/bin:/bin for that inner invocation ONLY — simulating a
+# genuinely separate remote host whose clock the skewed controller PATH
+# cannot reach — so a CORRECT driver still reports age~1801 despite the
+# hostile outer PATH.
+SKEW_DATE_BIN="$TMPROOT/skew-date-bin"
+mkdir -p "$SKEW_DATE_BIN"
+_real_now_probe=$(date -u +%s)
+_skew_now=$((_real_now_probe + 500000))
+cat > "$SKEW_DATE_BIN/date" <<EOF
+#!/bin/bash
+if [[ "\$1" == "-u" && "\$2" == "+%s" ]]; then
+  echo "$_skew_now"
+else
+  exec /usr/bin/date "\$@"
+fi
+EOF
+chmod +x "$SKEW_DATE_BIN/date"
+
+_run_remote_snapshot_skew_controller_clock() {
+  local remote_project_id="$1" issue="$2" xdg_dir="$3"
+  local stub_bin="$TMPROOT/remote-stub-bin-skew-$$-$RANDOM"
+  mkdir -p "$stub_bin"
+  local real_output="$TMPROOT/remote-real-output-skew-$$-$RANDOM.txt"
+  # Pin the replayed inner snippet's PATH to /usr/bin:/bin so it CANNOT
+  # reach $SKEW_DATE_BIN on the outer (controller) PATH — a correct driver
+  # must then compute age from the real remote-host clock, not the skew.
+  _make_replay_aws_stub "$stub_bin" "$real_output" "$xdg_dir" "/usr/bin:/bin"
+  PATH="$SKEW_DATE_BIN:$stub_bin:$PATH" \
+  SSM_INSTANCE_ID="i-test" \
+  SSM_REMOTE_PROJECT_ID="$remote_project_id" \
+  SSM_REMOTE_PROJECT_DIR="/data/git/test" \
+  SSM_REGION="ap-southeast-1" \
+  bash "$REMOTE_DRIVER" --snapshot "$issue"
+}
+
+_write_remote_lease 205 111 run-a "$((_real_now_probe - 1801))"
+out=$(_run_remote_snapshot_skew_controller_clock "$REMOTE_PROJECT" 205 "$REMOTE_XDG")
+remote_age=$(jq -r '.age' <<<"$out" 2>/dev/null)
+# Tolerance window computed from the REAL wall clock at assertion time
 # (not a fixed constant) — this block runs after an increasing number of
 # earlier fixture/driver invocations elsewhere in this file, so a fixed
 # "< N seconds since script start" window would grow flaky as this file
-# gains more test cases ahead of it.
-_write_epoch=$(date -u +%s)
-_write_remote_lease 205 111 run-a "$((_write_epoch - 1801))"
-out=$(_run_remote_snapshot "$REMOTE_PROJECT" 205 "$REMOTE_XDG")
-remote_age=$(jq -r '.age' <<<"$out" 2>/dev/null)
-_expected_age_ceiling=$(( $(date -u +%s) - _write_epoch + 1801 + 5 ))
+# gains more test cases ahead of it. Critically, the ceiling stays anchored
+# to the small real-time delta, NOT to the 500000s skew — a regression that
+# leaked the skewed controller clock into the remote age computation would
+# blow past this ceiling by ~500000s and fail loudly.
+_expected_age_ceiling=$(( $(date -u +%s) - _real_now_probe + 1801 + 5 ))
 if [[ "$remote_age" -ge 1801 ]] && [[ "$remote_age" -le "$_expected_age_ceiling" ]]; then
-  ok "TC-DPS-034: remote age computed independently (age=${remote_age}, expected ~1801)"
+  ok "TC-DPS-034: remote age computed independently of a skewed controller clock (age=${remote_age}, expected ~1801)"
 else
-  bad "TC-DPS-034: remote age computed independently (got age=${remote_age}, expected <= ${_expected_age_ceiling})"
+  bad "TC-DPS-034: remote age computed independently of a skewed controller clock (got age=${remote_age}, expected <= ${_expected_age_ceiling})"
 fi
 
+# Spawns a real, killable process that blocks on a FIFO it opens for both
+# read AND write (so there's no writer/EOF race to depend on) — never a
+# `sleep N`. Round-2 review finding #4: a `sleep 60 &` "real background
+# process" plus a bounded poll loop for its death is still a wall-clock
+# dependency in spirit, and this codebase already has a no-sleep idiom for
+# "spawn a real victim process" (test-lane-gc-p1-source-hygiene.sh's
+# `mkfifo` + blocking-open technique). The victim blocks in the kernel on
+# the `exec 3<>fifo` open / the subsequent read, not on a timer, so its
+# liveness is a pure kill/wait fact rather than a timing guess.
+#
+# Spawned INLINE (not via a helper called through `$(...)`) for two
+# reasons: (1) command substitution runs in its own subshell, so a
+# background job started inside one is never a child of THIS shell and
+# `wait` on it fails with "not a child of this shell"; (2) the FIFO
+# reader's stdout would otherwise inherit the substitution's capture pipe,
+# which never sees EOF while the child is alive, hanging the substitution
+# itself. `>/dev/null 2>&1` keeps the victim's stdio detached from
+# anything this script reads.
+
 # Compare-and-signal: SIGNALED path against a real background process.
-sleep 60 &
+VICTIM_FIFO_206="$TMPROOT/victim-206.fifo"
+mkfifo "$VICTIM_FIFO_206"
+( exec 3<>"$VICTIM_FIFO_206"; cat <&3 ) >/dev/null 2>&1 &
 REAL_PID=$!
 _write_remote_lease 206 "$REAL_PID" run-sig "$((NOW - 1801))"
 out=$(_run_remote_cas "$REMOTE_PROJECT" 206 "$REMOTE_XDG" "$REAL_PID" "run-sig")
 assert_eq "TC-S5A-031 (remote CAS): matching pid/run_id -> SIGNALED" "SIGNALED" "$out"
-if _wait_for_pid_gone "$REAL_PID" 5; then
-  ok "TC-S5A-031 (remote CAS): process actually terminated"
-else
+# `wait` blocks until the process is actually reaped — no poll loop, no
+# fixed sleep, no timing guess: SIGNALED already means the driver's remote
+# shell delivered kill -TERM before returning, so the signal has already
+# been sent by the time we get here; `wait` just observes the outcome.
+wait "$REAL_PID" 2>/dev/null
+if kill -0 "$REAL_PID" 2>/dev/null; then
   bad "TC-S5A-031 (remote CAS): process actually terminated"
   kill "$REAL_PID" 2>/dev/null
+else
+  ok "TC-S5A-031 (remote CAS): process actually terminated"
 fi
 
 # Compare-and-signal: ABORTED on run_id mismatch — process must survive.
-sleep 60 &
+VICTIM_FIFO_207="$TMPROOT/victim-207.fifo"
+mkfifo "$VICTIM_FIFO_207"
+( exec 3<>"$VICTIM_FIFO_207"; cat <&3 ) >/dev/null 2>&1 &
 REAL_PID2=$!
 _write_remote_lease 207 "$REAL_PID2" run-sig "$((NOW - 1801))"
 out=$(_run_remote_cas "$REMOTE_PROJECT" 207 "$REMOTE_XDG" "$REAL_PID2" "WRONG-RUN-ID")
@@ -576,6 +674,7 @@ else
   bad "TC-S5A-032 (remote CAS): process survives an aborted signal"
 fi
 kill "$REAL_PID2" 2>/dev/null
+wait "$REAL_PID2" 2>/dev/null
 
 # TC-S5A-033: compare-and-signal SSM transport failure -> ABORTED sentinel, never SIGNALED
 out_cas_fail=$(
