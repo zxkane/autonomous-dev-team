@@ -37,9 +37,26 @@ adapter_invoke_gemini() {
   else
     sid_flag=(--session-id "$session_id")
   fi
+
+  # [#493 R3] Framing selection: the operator-tunable extra_args (see file
+  # header) may or may not include `--output-format stream-json`. When it
+  # does, gemini emits one JSON object per line — same json framing as
+  # claude/codex/opencode. When it doesn't (or the operator hasn't set the
+  # load-bearing flags at all, the #102/#134 misconfiguration case), gemini's
+  # output is plain text lines — line framing, same as agy/kiro/the generic
+  # fallback. Scanned on the resolved extra_args array, not the raw env var,
+  # so this tracks whatever actually reaches the CLI's argv.
+  local _framing="line"
+  local _a
+  for _a in "${extra_args[@]}"; do
+    [[ "$_a" == "stream-json" ]] && { _framing="json"; break; }
+  done
+
   printf '%s' "$prompt" | _run_with_timeout "$AGENT_CMD" \
     "${sid_flag[@]}" \
     ${model:+--model "$model"} \
     "${extra_args[@]}" \
-    -p
+    -p \
+    | _agent_progress_recorder "$_framing"
+  return "${PIPESTATUS[1]}"
 }

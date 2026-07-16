@@ -644,6 +644,14 @@ _run_with_timeout() {
     printf '%s\n' "$_AGENT_RUN_PID" > "$AGENT_PID_FILE" 2>/dev/null || true
   fi
 
+  # [#493 R2 case 1] Launch progress event: the current agent process has
+  # been spawned and its PID/PGID is now published above. Refresh the lease
+  # here (not only per output record below) so a session that launches but
+  # produces no output for a while (e.g. a slow cold start) still shows
+  # fresh progress rather than an immediately-stale lease. No-op when
+  # AGENT_PROGRESS_FILE is unset (review side).
+  _agent_progress_refresh
+
   local _rc
   wait "$_AGENT_RUN_PID"
   _rc=$?
@@ -1089,6 +1097,192 @@ install_agent_heartbeat() {
 }
 
 # ---------------------------------------------------------------------------
+# Current-run agent-progress lease (issue #493 — producer half; consumer is a
+# later change, #485). Distinguishes "agent actively working locally" from
+# "agent idle" for a future dispatcher change: the wrapper heartbeat
+# (install_agent_heartbeat above) proves LIVENESS for the wrapper's whole
+# lifetime, not PROGRESS, and Claude's log mtime can stay unchanged for an
+# entire active session. This lease refreshes once per complete agent output
+# record (R2/R3) so a reader can tell the two apart. Nothing reads it yet in
+# this PR — dispatcher-tick.sh Step 5a is byte-unchanged here.
+#
+# Scope: dev-side only. The dev wrapper (autonomous-dev.sh) is the ONLY
+# caller that exports AGENT_PROGRESS_FILE / AGENT_PROGRESS_RUNID_FILE — every
+# function below is a silent no-op when they're unset, exactly mirroring how
+# _run_with_timeout treats an unset AGENT_PID_FILE. The review wrapper's
+# per-fan-out-member subshells never set these vars, so composing the
+# recorder into every adapter (below) is always safe there too — it degrades
+# to a bare `cat` passthrough.
+#
+# Files (both under pid_dir_for_project(), mode 0700, mirroring the PID file):
+#   issue-${ISSUE_NUMBER}.progress.json — {"schema_version":1,"run_id":"...",
+#     "pid":<n>,"updated_at_epoch":<n>}
+#   issue-${ISSUE_NUMBER}.run-id         — exactly "$RUN_ID\n"
+# Both written atomically (tmp file in the same dir + `mv -f`), mode 0600,
+# refusing to follow a symlinked target (CWE-59, same posture as
+# acquire_pid_guard / _agy_capture_conversation).
+#
+# Accepted residuals (documented in docs/pipeline/invariants.md, all
+# fail-safe for the future consumer, whose UNKNOWN/defer semantics never
+# kill on any of these):
+#   1. compare-then-unlink TOCTOU in _agent_progress_cleanup can transiently
+#      delete a newer run's lease; that run's next output record rewrites it.
+#   2. OS PID reuse is NOT detected — `pid` equality is PID-FILE equality,
+#      the same residual today's Step 5a `kill -0` check already has.
+#   3. a refresh racing a reader is resolved by the atomic rename — the
+#      reader sees the old or the new complete lease, never a partial write.
+
+# _agent_progress_refresh — atomically (re)write the current run's progress
+# lease. No-op when AGENT_PROGRESS_FILE is unset (review side). `pid` is read
+# from the CURRENT content of AGENT_PID_FILE at call time — NEVER cached —
+# because the pid file has two publication phases (acquire_pid_guard's `$$`
+# placeholder, then _run_with_timeout's PGID republish) and the lease must
+# always mirror whichever is current, exactly like a fresh liveness probe
+# would. Falls back to this shell's own `$$` if the pid file is missing,
+# unreadable, or symlinked. Always returns 0 (observe-only, like
+# install_agent_heartbeat's touches).
+_agent_progress_refresh() {
+  [[ -n "${AGENT_PROGRESS_FILE:-}" ]] || return 0
+  [[ -L "$AGENT_PROGRESS_FILE" ]] && return 0
+
+  local pid=""
+  if [[ -n "${AGENT_PID_FILE:-}" && -f "$AGENT_PID_FILE" && ! -L "$AGENT_PID_FILE" ]]; then
+    pid="$(cat "$AGENT_PID_FILE" 2>/dev/null)"
+  fi
+  [[ "$pid" =~ ^[0-9]+$ ]] || pid="$$"
+
+  local now
+  now="$(date +%s 2>/dev/null)" || now=0
+  [[ "$now" =~ ^[0-9]+$ ]] || now=0
+
+  # Minimal JSON-string escaping for run_id (backslash, quote, control chars)
+  # — RUN_ID is dispatcher-minted from a fixed safe charset in practice
+  # (mint_run_id: <project>-<issue>-<side>-<ts>), but an operator-set
+  # override could contain anything, and this is cheap defense in depth
+  # (same posture as the agy adapter's [[:cntrl:]] strip).
+  local run_id="${RUN_ID:-}"
+  run_id="${run_id//\\/\\\\}"
+  run_id="${run_id//\"/\\\"}"
+  run_id="${run_id//[[:cntrl:]]/}"
+
+  local dir tmp
+  dir="$(dirname "$AGENT_PROGRESS_FILE")"
+  tmp="$(mktemp "${dir}/.progress.XXXXXX" 2>/dev/null)" || return 0
+  if ! printf '{"schema_version":1,"run_id":"%s","pid":%s,"updated_at_epoch":%s}\n' \
+      "$run_id" "$pid" "$now" > "$tmp" 2>/dev/null; then
+    rm -f "$tmp" 2>/dev/null
+    return 0
+  fi
+  chmod 600 "$tmp" 2>/dev/null || true  # best-effort perms; a chmod failure still leaves a valid (if looser-mode) lease, never blocks the write
+  mv -f "$tmp" "$AGENT_PROGRESS_FILE" 2>/dev/null || rm -f "$tmp" 2>/dev/null
+  return 0
+}
+
+# _agent_progress_init — write the current run's run-id sidecar and an
+# initial lease BEFORE the agent process is launched. This is the R1
+# guarantee that a new run's files exist before its first agent output can
+# be observed, so a PRIOR run's lease can never lend freshness to the
+# current run — the caller (autonomous-dev.sh) invokes this right after
+# acquire_pid_guard/AGENT_PID_FILE export, before run_agent/resume_agent.
+# No-op when AGENT_PROGRESS_RUNID_FILE is unset. Always returns 0.
+_agent_progress_init() {
+  [[ -n "${AGENT_PROGRESS_RUNID_FILE:-}" ]] || return 0
+  [[ -L "$AGENT_PROGRESS_RUNID_FILE" ]] && return 0
+
+  local dir tmp
+  dir="$(dirname "$AGENT_PROGRESS_RUNID_FILE")"
+  tmp="$(mktemp "${dir}/.runid.XXXXXX" 2>/dev/null)" || return 0
+  if printf '%s\n' "${RUN_ID:-}" > "$tmp" 2>/dev/null; then
+    chmod 600 "$tmp" 2>/dev/null || true  # best-effort perms; a chmod failure still leaves a valid (if looser-mode) run-id file, never blocks the write
+    mv -f "$tmp" "$AGENT_PROGRESS_RUNID_FILE" 2>/dev/null || rm -f "$tmp" 2>/dev/null
+  else
+    rm -f "$tmp" 2>/dev/null
+  fi
+  _agent_progress_refresh
+  return 0
+}
+
+# _agent_progress_cleanup — remove THIS run's progress lease + run-id
+# sidecar, but ONLY when the on-disk run_id matches this run's own RUN_ID
+# (compare-then-unlink). A newer run's files (different run_id — e.g. a
+# fresh dispatch that raced a stale wrapper's teardown) survive. Called from
+# the wrapper's cleanup() trap alongside the existing PID-file removal.
+# No-op when the relevant env var is unset. Always returns 0.
+_agent_progress_cleanup() {
+  if [[ -n "${AGENT_PROGRESS_RUNID_FILE:-}" && -f "${AGENT_PROGRESS_RUNID_FILE}" && ! -L "${AGENT_PROGRESS_RUNID_FILE}" ]]; then
+    local rid
+    rid="$(head -n1 "${AGENT_PROGRESS_RUNID_FILE}" 2>/dev/null)"
+    [[ "$rid" == "${RUN_ID:-}" ]] && rm -f "${AGENT_PROGRESS_RUNID_FILE}" 2>/dev/null
+  fi
+  if [[ -n "${AGENT_PROGRESS_FILE:-}" && -f "${AGENT_PROGRESS_FILE}" && ! -L "${AGENT_PROGRESS_FILE}" ]]; then
+    local rid2
+    if command -v jq >/dev/null 2>&1; then
+      rid2="$(jq -r '.run_id // empty' "${AGENT_PROGRESS_FILE}" 2>/dev/null)"
+    else
+      rid2="$(grep -o '"run_id":"[^"]*"' "${AGENT_PROGRESS_FILE}" 2>/dev/null | head -1 | sed 's/^"run_id":"//; s/"$//')"
+    fi
+    [[ "$rid2" == "${RUN_ID:-}" ]] && rm -f "${AGENT_PROGRESS_FILE}" 2>/dev/null
+  fi
+  return 0
+}
+
+# _agent_progress_recorder <framing> — shared pass-through progress recorder
+# (R2/R3), composed into every dev launch path's pipeline. Streams stdin to
+# stdout with NO buffering/modification (byte-identical, including a final
+# line with no trailing newline) and, as a side effect, calls
+# _agent_progress_refresh once per COMPLETE non-empty output record:
+#   framing="json" — a line counts as a record only when it starts with '{'
+#     (every JSON/JSONL adapter this pipeline drives emits one complete
+#     object per line — Claude/Codex/OpenCode always, Gemini when its
+#     effective args select stream-json).
+#   anything else ("line" framing) — every non-empty line counts.
+# No-op passthrough (bare `cat`) when AGENT_PROGRESS_FILE is unset — the
+# review side never sets it, so composing this into every adapter is always
+# safe there. Never swallows/buffers stdout, never touches stderr, and never
+# affects the pipeline's exit-status propagation — callers read the CLI's own
+# rc via PIPESTATUS at the SAME index it already used before this stage was
+# inserted (recorder is appended strictly AFTER the CLI's own
+# _run_with_timeout stage, so that index never shifts).
+#
+# A bash read-loop, not an awk filter like the codex/opencode capture
+# filters below: _agent_progress_refresh is a real function call per record,
+# and forking it via awk's system() would either require `export -f` (whose
+# visibility to a POSIX /bin/sh system() shell is not guaranteed) or hand-
+# duplicating the atomic-write logic as an inline shell string. A read-loop
+# keeps exactly one implementation of the write. The manual rc-tracking
+# below (instead of the common `read -r line || [[ -n "$line" ]]` idiom)
+# exists so the final no-trailing-newline line is re-emitted WITHOUT a
+# synthesized newline — true byte-identical passthrough.
+_agent_progress_recorder() {
+  local framing="${1:-line}"
+  if [[ -z "${AGENT_PROGRESS_FILE:-}" ]]; then
+    cat
+    return 0
+  fi
+  local line rc
+  while :; do
+    IFS= read -r line
+    rc=$?
+    if [[ $rc -ne 0 && -z "$line" ]]; then
+      break
+    fi
+    if [[ $rc -eq 0 ]]; then
+      printf '%s\n' "$line"
+    else
+      printf '%s' "$line"
+    fi
+    # A complete non-empty output record: under "line" framing every non-empty
+    # line counts; under "json" framing only a line that starts with '{' (the
+    # one-object-per-line contract the JSON adapters emit).
+    if [[ -n "$line" && ( "$framing" != "json" || "$line" == \{* ) ]]; then
+      _agent_progress_refresh
+    fi
+    [[ $rc -ne 0 ]] && break
+  done
+  return 0
+}
+
+# ---------------------------------------------------------------------------
 # Per-CLI adapters ([INV-75]). All per-CLI argv assembly, session-handle
 # capture/recall, model validation, the per-CLI review lane(s), and the
 # drop-reason scrapers live in adapters/<cli>.sh — sourced here so run_agent /
@@ -1280,7 +1474,11 @@ run_agent() {
         echo "[lib-agent] WARN: AGENT_CMD=${AGENT_CMD} hits the generic fallback. The wrapper feeds the prompt via stdin to '${AGENT_CMD} -p'. Verify your CLI accepts a stdin prompt under that flag — otherwise the prompt will be silently truncated. Suppress this warning by setting _LIB_AGENT_GENERIC_WARNED=1." >&2
         export _LIB_AGENT_GENERIC_WARNED=1
       fi
-      printf '%s' "$prompt" | _run_with_timeout "$AGENT_CMD" "${extra_args[@]}" -p
+      # [#493 R3] line framing — an unknown CLI is never assumed to emit a
+      # JSON event stream. Recorder appended AFTER _run_with_timeout;
+      # PIPESTATUS[1] (printf is [0]) holds the CLI's own rc.
+      printf '%s' "$prompt" | _run_with_timeout "$AGENT_CMD" "${extra_args[@]}" -p | _agent_progress_recorder line
+      return "${PIPESTATUS[1]}"
       ;;
   esac
 }

@@ -8316,3 +8316,48 @@ _Triage (issue #236): [machine-checked: tests/unit/test-review-ci-rollup-gate.sh
 - [`docs/pipeline/provider-spec.md`](provider-spec.md) §3.2 — the `chp_ci_rollup` verb contract table row.
 
 ---
+
+## INV-135: the agent-progress lease is a producer-only signal, refreshed on launch and per complete output record, never by the heartbeat
+
+_Triage (issue #236): [machine-checked: tests/unit/test-agent-progress-lease.sh]_
+
+**Rule**: The dev wrapper maintains two sidecars per issue under `pid_dir_for_project()` (mode 0700, alongside `issue-<N>.pid`):
+
+- `issue-<N>.progress.json` — `{"schema_version":1,"run_id":"<RUN_ID>","pid":<n>,"updated_at_epoch":<n>}`
+- `issue-<N>.run-id` — exactly `<RUN_ID>\n`
+
+Both are written atomically (tmp file in the same directory + `mv -f`), mode 0600, and every writer refuses to follow a pre-planted symlink at either path. `pid` is read from the CURRENT content of `AGENT_PID_FILE` at write time — never cached — because that file has two publication phases (`acquire_pid_guard`'s `$$` placeholder, then `_run_with_timeout`'s later PGID republish); the lease always mirrors whichever value is current on disk.
+
+A **progress event** — the only thing allowed to refresh `updated_at_epoch` — is exactly one of:
+
+1. the successful launch of the current agent process, immediately after its PID/PGID is published (`_run_with_timeout`, right after the `AGENT_PID_FILE` write); or
+2. one complete, non-empty output record emitted by the current dev CLI after launch, via the shared pass-through recorder `_agent_progress_recorder <json|line>` composed into all seven dev launch paths (the six adapters plus the unknown-CLI fallback branch in `run_agent`).
+
+The wrapper's `install_agent_heartbeat` touch loop MUST NOT call the refresh primitive — it proves wrapper liveness for the run's whole lifetime, never agent progress, and conflating the two is the exact ambiguity this feature exists to resolve. Dispatcher polling, transport keepalives, and PR/CI/label/issue changes made by other processes are likewise never progress events.
+
+A new run's files (`issue-<N>.run-id` + an initial lease, via `_agent_progress_init`) are written BEFORE the agent process can produce any observable output — right after `acquire_pid_guard`/`AGENT_PID_FILE` export, before `run_agent`/`resume_agent` — so a prior run's leftover lease can never lend freshness to the current run. The wrapper's exit trap calls `_agent_progress_cleanup`, which removes `issue-<N>.progress.json` / `issue-<N>.run-id` ONLY when the on-disk `run_id` still matches this run's own `RUN_ID` (compare-then-unlink) — a newer run's files that raced this teardown survive.
+
+**Accepted residuals** (documented here, not bugs — all fail-safe because the sole future consumer's UNKNOWN/defer semantics never kill on any of these):
+
+1. **Compare-then-unlink TOCTOU.** `_agent_progress_cleanup`'s read-then-unlink is not atomic against a concurrent init from a fresh dispatch for the same issue. A stale cleanup could transiently delete a newer run's lease between the read and the `rm`; that run's next output record rewrites it on its own next refresh. A reader observes a transient UNKNOWN in between, never a false-fresh signal.
+2. **OS PID reuse is not detected.** The `pid` field's equality check (when a future consumer adds one) is PID-FILE equality, not process-identity equality — the exact same residual today's Step 5a `kill -0` liveness check already carries. This feature does not make that residual worse or better.
+3. **A refresh racing a reader resolves via the atomic rename**, never a partial read: the reader always observes either the immediately-prior complete lease or the immediately-new complete lease, never a torn write.
+
+**Why**: `dispatcher-tick.sh` Step 5a decides whether to SIGTERM a live dev wrapper using the linked PR's `updatedAt` age. That clock does not move while the agent is editing/testing locally between pushes — observed three times on one downstream issue (a session doing typecheck/test/build for ~11.5 minutes with no push, killed mid-work, the same head re-reviewed, and the resulting false cycle consumed `MAX_RETRIES` and stalled the issue). Before this feature, no signal distinguished "actively working locally" from "idle": `install_agent_heartbeat` only proves the wrapper process itself is alive (it ticks for the wrapper's ENTIRE lifetime, hung or not), and for Claude specifically — before the [R4] `stream-json` migration below — `run.log` mtime stayed frozen for an entire active session, since `--output-format json` emits exactly one line, at the very end.
+
+This issue produces the signal only. `dispatcher-tick.sh` Step 5a is byte-unchanged by this PR — the freshness threshold, the SIGTERM decision rule, and remote-SSM probing of the lease are the consumer issue's scope (#485). Nothing in the pipeline reads `issue-<N>.progress.json` yet.
+
+**Claude stream-json migration (R4, same PR).** The claude adapter's `dev-new` and `dev-resume` argv switched from `--output-format json` to `--output-format stream-json --verbose` — one complete JSON record per line as the turn progresses, instead of a single object emitted at the end — so the recorder's `json` framing has something to refresh against for Claude specifically. The final record is still `{"type":"result","stop_reason":...,"terminal_reason":...,"usage":{...}}`, byte-preserved at column zero, so the three existing consumers of "the last `{"type":"result"...}` line in the captured log" are unaffected: `is_session_completed` (`lib-dispatch.sh`), the remote probe (`session-log-probe-remote-aws-ssm.sh`), and `metrics_parse_tokens` (`lib-metrics.sh`).
+
+**Producer**: `lib-agent.sh::_agent_progress_init` / `_agent_progress_refresh` / `_agent_progress_cleanup` / `_agent_progress_recorder`; wired from `autonomous-dev.sh` (init right after `AGENT_PID_FILE` export, cleanup in the exit trap) and from every `adapters/<cli>.sh::adapter_invoke_<cli>` plus `run_agent`'s generic fallback branch (recorder composition).
+**Consumer**: none yet (producer-only PR). The review wrapper never exports `AGENT_PROGRESS_FILE`/`AGENT_PROGRESS_RUNID_FILE`, so every lease primitive is a silent no-op there — composing the recorder into a shared adapter function is safe on both sides.
+**Status**: **ENFORCED** (producer half; closes #493). The consumer half (Step 5a's progress-aware SIGTERM decision) is tracked in #485.
+**Test**: `tests/unit/test-agent-progress-lease.sh` — TC-LEASE-001..020 (lease-file contract: atomic write, mode 0600, symlink refusal, pid mirrors the current pid-file content across both publication phases, own-run-only cleanup, prior-run freshness cannot leak to a new run; the heartbeat-does-not-refresh regression guard; the recorder's byte-identical pass-through and exit-status transparency for 0/124/137/143; composition with the existing codex/opencode session-capture filters; the unknown-CLI fallback and gemini's conditional json/line framing selection; and the R4 consumer pins — `is_session_completed`, the remote-probe-style grep, and `metrics_parse_tokens` all still parse a realistic multi-record stream-json fixture correctly, with a negative pin proving a reframed/indented final line breaks the parse). `tests/unit/test-lib-agent-prompt-stdin.sh` / `tests/unit/test-cli-adapters.sh` are updated to assert `--output-format stream-json` (not the retired `--output-format json`) for claude.
+
+**Cross-references**:
+- [INV-13](#inv-13-wall-clock-cap-on-agent-invocations) — the existing wall-clock safety net this feature complements; a hung agent is still bounded by `AGENT_TIMEOUT` regardless of whether the lease shows progress.
+- [INV-29](#inv-29-pid_alive-heartbeat-is-owned-exclusively-by-the-wrapper-not-by-the-pid-file-alone) — the heartbeat this invariant's Rule explicitly distinguishes progress from; both live beside the PID file but answer different questions ("is the wrapper alive" vs "did the agent make progress").
+- [INV-34](#inv-34-agent-prompt-is-fed-via-stdin-never-as-a-single-argv-element) — the stdin prompt-channel contract every adapter's pipeline (recorder included) must not disturb.
+- [INV-75](#inv-75-all-per-cli-behavior-lives-in-that-clis-adapter--inline-cli-conditionals-in-orchestration-code-are-a-defect) — the adapter boundary the recorder composition respects: each adapter decides its own framing, `lib-agent.sh` supplies the one shared recorder implementation.
+
+---

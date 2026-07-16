@@ -438,6 +438,70 @@ Goldens: [`fixture-manifest.golden.codex-review.json`](schemas/examples/fixture-
 
 ---
 
+## 9. The agent-progress recorder (dev mode, #493)
+
+> This section documents the PRODUCER contract only. Nothing in the pipeline
+> reads the lease yet — see [INV-135](invariants.md#inv-135-the-agent-progress-lease-is-a-producer-only-signal-refreshed-on-launch-and-per-complete-output-record-never-by-the-heartbeat).
+
+Every `dev-new` / `dev-resume` adapter invocation composes one additional
+pipeline stage after its own CLI invocation (and after any pre-existing
+session-handle capture filter):
+
+```
+printf '%s' "$prompt" | _run_with_timeout <cli> <args> | [<capture-filter> |] _agent_progress_recorder <framing>
+```
+
+**Clause R1 (framing per adapter).** `_agent_progress_recorder` takes exactly
+one framing argument, `json` or `line`:
+
+| Adapter | Framing | Why |
+|---|---|---|
+| `claude` | `json` | `--output-format stream-json --verbose` (§ dev-agent-flow.md R4) — one complete JSON object per line. |
+| `codex` | `json` | `codex exec --json` — JSONL event stream. |
+| `opencode` | `json` | `opencode run --format json` — JSON event stream. |
+| `gemini` | `json` **iff** the resolved `AGENT_*_EXTRA_ARGS` includes `--output-format stream-json`; **else `line`** | Gemini's JSON stream mode is operator-opted-in via `AGENT_DEV_EXTRA_ARGS`/`AGENT_REVIEW_EXTRA_ARGS` ([INV-31](invariants.md#inv-31-operator-tunable-per-cli-flags-live-in-conf-not-in-lib-agentsh)), not hardcoded — the adapter scans its OWN resolved extra-args array (not the raw env var) so the framing choice tracks whatever actually reached the CLI's argv. |
+| `agy` | `line` | No JSON event stream (§7 lying-modes table; agy's only structured channel is `--log-file`, which the recorder does not read). |
+| `kiro` | `line` | No JSON event stream. |
+| unknown-CLI fallback (`run_agent`'s generic branch) | `line` | An unrecognized CLI is never assumed to emit a JSON stream. |
+
+**Clause R2 (a record).** Under `json` framing, a record is a line whose first
+character is `{` — every JSON/JSONL adapter in this table emits exactly one
+complete object per line, so this is a safe, cheap discriminator (no JSON
+parse needed in the hot path). Under `line` framing, every non-empty line is a
+record.
+
+**Clause R3 (byte-identical pass-through).** The recorder **MUST NOT** buffer,
+reorder, drop, or otherwise alter a single byte of the CLI's stdout — including
+preserving a final line with no trailing newline. It **MUST NOT** touch stderr
+at all. This is a hard requirement because the recorder sits in the SAME
+pipeline that ultimately lands in `/tmp/agent-*-issue-N.log` — anything it
+alters corrupts the log every downstream consumer (`is_session_completed`,
+`metrics_parse_tokens`, the remote probe, an operator `tail -f`) reads.
+
+**Clause R4 (exit-status transparency).** The recorder's own exit status
+(always `0`) **MUST NOT** be read by any caller. Every call site appends the
+recorder strictly AFTER the CLI's own `_run_with_timeout` stage (and after any
+existing capture filter), so the CLI's rc is read from the SAME `PIPESTATUS`
+index every call site used before the recorder was inserted — the recorder
+never shifts that index.
+
+**Clause R5 (composes with existing capture filters).** Where a CLI already
+has a session-handle capture filter in its pipeline (`_codex_capture_thread`,
+`_opencode_capture_session`), the recorder composes AFTER it: `... | <capture
+filter> | _agent_progress_recorder <framing>`. Both are pass-through awk/read
+filters operating on the same byte stream; chaining them changes neither's
+behavior.
+
+**Clause R6 (never driven by the heartbeat).** The recorder is the ONLY writer
+of progress refreshes driven by CLI *output*. `install_agent_heartbeat`'s touch
+loop **MUST NOT** call the progress-refresh primitive — conflating "wrapper
+process is alive" with "agent made progress" is exactly the ambiguity this
+feature exists to resolve (dispatcher polling, transport keepalives, and
+PR/CI/label/issue changes made by OTHER processes are likewise never progress
+events).
+
+---
+
 ## Mapping appendix — current CLIs onto the contract
 
 How today's behavior maps onto the contract, per CLI × mode. "Gap" = where the
@@ -508,3 +572,5 @@ that is the whole point of [INV-75](invariants.md#inv-75-all-per-cli-behavior-li
 - [`invariants.md` § INV-58](invariants.md#inv-58-agy-quotaauth-unavailable-drops-surface-a-distinct-reason-fan-out--reviewed-head-model-labels-are-per-agent) / [INV-61](invariants.md#inv-61-kiro-authlogin-failure-unavailable-drops-surface-a-distinct-reason-not-a-bare-opaque-unavailable) / [INV-62](invariants.md#inv-62-the-codex-review-lane-runs-the-codex-review-subcommand-auto-scoped-prompt-carried-gate-with-a-stdout-verdict-fallback) — the per-CLI provider classifications.
 - [`autonomous-pipeline.md`](../autonomous-pipeline.md) — the orientation doc this spec is linked from.
 - [`docs/designs/adapter-spec.md`](../designs/adapter-spec.md) — design canvas.
+- [`invariants.md` § INV-135](invariants.md#inv-135-the-agent-progress-lease-is-a-producer-only-signal-refreshed-on-launch-and-per-complete-output-record-never-by-the-heartbeat) — the agent-progress lease contract (§9, #493).
+- [`dev-agent-flow.md`](dev-agent-flow.md) — the lease's sidecar-file ownership, init/cleanup lifecycle, and the Claude stream-json migration (#493 R4).

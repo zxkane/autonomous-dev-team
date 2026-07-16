@@ -47,7 +47,10 @@ adapter_invoke_kiro() {
     ${model:+--model "$model"}
     "${extra_args[@]}"
   )
-  printf '%s' "$prompt" | _run_with_timeout kiro-cli "${kiro_args[@]}"
+  # [#493 R3] line framing (no JSON event stream). Recorder appended AFTER
+  # _run_with_timeout; PIPESTATUS[1] (printf is [0]) holds kiro's own rc.
+  printf '%s' "$prompt" | _run_with_timeout kiro-cli "${kiro_args[@]}" | _agent_progress_recorder line
+  return "${PIPESTATUS[1]}"
 }
 
 # ---------------------------------------------------------------------------

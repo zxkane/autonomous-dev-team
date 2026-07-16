@@ -38,7 +38,8 @@ adapter_invoke_opencode() {
         | _run_with_timeout "$AGENT_CMD" run --format json --session "$_opencode_sid" \
           ${model:+--model "$model"} \
           "${extra_args[@]}" \
-        | _opencode_capture_session "$session_id"
+        | _opencode_capture_session "$session_id" \
+        | _agent_progress_recorder json
       return "${PIPESTATUS[1]}"
     else
       echo "[lib-agent] no captured opencode sessionID for session $session_id; starting a new opencode session" >&2
@@ -53,7 +54,8 @@ adapter_invoke_opencode() {
       ${model:+--model "$model"} \
       ${session_name:+--title "$session_name"} \
       "${extra_args[@]}" \
-    | _opencode_capture_session "$session_id"
+    | _opencode_capture_session "$session_id" \
+    | _agent_progress_recorder json
   return "${PIPESTATUS[1]}"
 }
 

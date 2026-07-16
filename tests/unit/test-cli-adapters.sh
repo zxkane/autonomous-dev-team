@@ -158,11 +158,11 @@ run_dispatch() {
   '
 }
 
-# TC-010 claude → adapter assembles --session-id / --output-format json.
+# TC-010 claude → adapter assembles --session-id / --output-format stream-json.
 REC="$TMPG/rec-claude"; : > "$REC"; run_dispatch claude run_agent "$REC"
 claude_argv=$(cat "$REC")
 assert_contains "TC-010 claude run_agent routes to adapter (--session-id present)" '--session-id' "$claude_argv"
-assert_contains "TC-010 claude argv carries --output-format json" '--output-format json' "$claude_argv"
+assert_contains "TC-010 claude argv carries --output-format stream-json (#493 R4)" '--output-format stream-json' "$claude_argv"
 
 # TC-012 mode routing: claude resume uses --resume.
 REC="$TMPG/rec-claude-r"; : > "$REC"; run_dispatch claude resume_agent "$REC"
