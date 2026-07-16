@@ -149,6 +149,206 @@ fi
 
 # ---------------------------------------------------------------------------
 echo ""
+echo "=== SIGTERM-path bounded retry + UNKNOWN-defer (INV-15 rev 2, #500) ==="
+# ---------------------------------------------------------------------------
+# The hand-written classify_label() replica above is too coarse to exercise
+# the retry loop, the sleep count, or the "no label write" defer path — so
+# this section EXTRACTS and RUNS the real cleanup() fragment (same technique
+# as tests/unit/test-autonomous-dev-cleanup-startup-failure.sh), varying a
+# stubbed chp_pr_list's per-call behavior.
+
+assert_contains() {
+  local desc="$1" needle="$2" haystack="$3"
+  if [[ "$haystack" == *"$needle"* ]]; then
+    echo -e "  ${GREEN}PASS${NC}: $desc"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${NC}: $desc"
+    echo "      needle='$needle'"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
+assert_not_contains() {
+  local desc="$1" needle="$2" haystack="$3"
+  if [[ "$haystack" != *"$needle"* ]]; then
+    echo -e "  ${GREEN}PASS${NC}: $desc"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${NC}: $desc (should NOT contain '$needle')"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
+TMPROOT=$(mktemp -d)
+trap 'rm -rf "$TMPROOT"' EXIT
+
+CLEANUP_FN=$(awk '/^cleanup\(\) \{/,/^\}/' "$WRAPPER")
+if [[ -z "$CLEANUP_FN" ]]; then
+  echo -e "  ${RED}FAIL${NC}: could not extract cleanup() from $WRAPPER"
+  FAIL=$((FAIL + 1))
+fi
+
+# run_retry_cleanup <label> <received_sigterm> <pr_list_behavior_csv>
+#
+# pr_list_behavior_csv is a comma-separated per-call script for the stubbed
+# chp_pr_list, one entry consumed per call (1-indexed):
+#   fail    — chp_pr_list itself fails (rc 1, no output): a transport/read failure
+#   garbage — chp_pr_list succeeds (rc 0) but emits non-JSON: a jq parse failure
+#   zero    — succeeds with a body that matches zero issue references
+#   pr      — succeeds with a body that matches issue #77
+#
+# Sets globals: GH_LOG (recorded gh argv), STDERR_LOG (wrapper log output),
+# CALL_COUNT (times chp_pr_list was invoked), SLEEP_COUNT (times sleep ran).
+run_retry_cleanup() {
+  local label="$1" received_sigterm="$2" behavior="$3"
+  local record="$TMPROOT/gh-${label}.log"
+  local stderr_log="$TMPROOT/stderr-${label}.log"
+  local call_count_file="$TMPROOT/calls-${label}.log"
+  local sleep_count_file="$TMPROOT/sleeps-${label}.log"
+  : > "$record"; : > "$stderr_log"; : > "$call_count_file"; : > "$sleep_count_file"
+
+  # Explicitly clear ambient ADT_*/RUN_*/AGENT_PROGRESS_*/AGENT_P{R_CREATE,ID}_FILE
+  # env vars: this harness may itself run inside a dispatched autonomous-dev.sh
+  # wrapper (e.g. under the autonomous pipeline for this very issue), which
+  # exports ADT_GUARD_FD/ADT_LANE_DIR/RUN_DIR/RUN_ID etc. into every subshell.
+  # Without clearing them, cleanup()'s lane/guardian/run-artifacts branches
+  # would fire against the OUTER run's real lane dir instead of behaving as
+  # the "no lane installed" no-op path this harness assumes.
+  env -u ADT_GUARD_FD -u ADT_LANE_DIR -u ADT_LANE_ID -u ADT_STATE_ROOT \
+      -u RUN_DIR -u RUN_ID \
+      -u AGENT_PROGRESS_FILE -u AGENT_PROGRESS_RUNID_FILE \
+      -u AGENT_PID_FILE -u AGENT_PR_CREATE_FILE -u AGENT_BOT_TRIGGER_FILE \
+  PATH="/usr/bin:/bin" \
+  GH_RECORD="$record" \
+  CALL_COUNT_FILE="$call_count_file" \
+  SLEEP_COUNT_FILE="$sleep_count_file" \
+  PR_LIST_BEHAVIOR="$behavior" \
+  AGENT_RAN="true" \
+  ISSUE_NUMBER="77" \
+  REPO="acme/widget" \
+  PID_FILE="/dev/null" \
+  SESSION_ID="test-session" \
+  LOG_FILE="/tmp/test.log" \
+  GH_AUTH_MODE="token" \
+  RECEIVED_SIGTERM="$received_sigterm" \
+  MODE="new" \
+  AGENT_CMD="claude" \
+  AGENT_DEV_MODEL="sonnet" \
+  bash -c "
+    set +e
+    log() { echo \"[test-log] \$*\" >&2; }
+    cleanup_github_auth() { :; }
+    itp_post_comment() { echo \"GH issue comment \$1 --repo \$REPO --body \$2\" >> \"\$GH_RECORD\"; }
+    itp_transition_state() {
+      local args=()
+      [ -n \"\$2\" ] && args+=(--remove-label \"\$2\")
+      [ -n \"\$3\" ] && args+=(--add-label \"\$3\")
+      echo \"GH issue edit \$1 --repo \$REPO \${args[*]}\" >> \"\$GH_RECORD\"
+    }
+    drain_agent_pr_create() { return 0; }
+    drain_agent_bot_triggers() { echo \"BOT-TRIGGER-DRAIN \$1\" >> \"\$GH_RECORD\"; return 0; }
+    rearm_gh_resolution() { :; }
+    sleep() { echo \"\$1\" >> \"\$SLEEP_COUNT_FILE\"; }
+    chp_pr_list() {
+      echo call >> \"\$CALL_COUNT_FILE\"
+      local n behavior_item
+      n=\$(wc -l < \"\$CALL_COUNT_FILE\")
+      behavior_item=\$(echo \"\$PR_LIST_BEHAVIOR\" | cut -d',' -f\"\$n\")
+      case \"\$behavior_item\" in
+        fail) return 1 ;;
+        garbage) echo 'not json'; return 0 ;;
+        zero) echo '[{\"body\":\"unrelated text\"}]'; return 0 ;;
+        pr) echo '[{\"body\":\"Closes #77\"}]'; return 0 ;;
+        *) return 1 ;;
+      esac
+    }
+    $CLEANUP_FN
+    (exit 143); cleanup
+  " 2>"$stderr_log"
+
+  GH_LOG=$(cat "$record")
+  STDERR_LOG=$(cat "$stderr_log")
+  CALL_COUNT=$(wc -l < "$call_count_file" | tr -d '[:space:]')
+  SLEEP_COUNT=$(wc -l < "$sleep_count_file" | tr -d '[:space:]')
+}
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- TC-500-01: SIGTERM + first lookup FAILS, retry SUCCEEDS finding PR ---"
+# ---------------------------------------------------------------------------
+# Regression case: fails before the fix (a bare failed-read-as-zero would
+# route straight to pending-dev on attempt 1, never retrying).
+run_retry_cleanup "500-01" 1 "fail,pr"
+
+assert_eq "TC-500-01 exactly 2 chp_pr_list calls" "2" "$CALL_COUNT"
+assert_eq "TC-500-01 exactly 1 sleep (between attempts)" "1" "$SLEEP_COUNT"
+assert_contains "TC-500-01 converges to pending-review" \
+  "--add-label pending-review" "$GH_LOG"
+assert_not_contains "TC-500-01 never routes to pending-dev" \
+  "--add-label pending-dev" "$GH_LOG"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- TC-500-02: SIGTERM + BOTH attempts fail → UNKNOWN-defer, no label write ---"
+# ---------------------------------------------------------------------------
+run_retry_cleanup "500-02" 1 "fail,fail"
+
+assert_eq "TC-500-02 exactly 2 chp_pr_list calls" "2" "$CALL_COUNT"
+assert_eq "TC-500-02 exactly 1 sleep (bounded, not unbounded)" "1" "$SLEEP_COUNT"
+assert_contains "TC-500-02 logs a WARN naming the failed read" \
+  "WARN" "$STDERR_LOG"
+assert_not_contains "TC-500-02 performs NO wrapper label transition" \
+  "GH issue edit" "$GH_LOG"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- TC-500-03: jq parse failure on a successful transport read → same UNKNOWN path ---"
+# ---------------------------------------------------------------------------
+# First attempt: chp_pr_list itself succeeds (rc 0) but returns non-JSON, so
+# the jq projection fails to parse — this must be treated identically to a
+# transport failure (retry), not silently coerced to "0 matches".
+run_retry_cleanup "500-03" 1 "garbage,pr"
+
+assert_eq "TC-500-03 exactly 2 chp_pr_list calls (parse failure retried)" "2" "$CALL_COUNT"
+assert_eq "TC-500-03 exactly 1 sleep" "1" "$SLEEP_COUNT"
+assert_contains "TC-500-03 converges to pending-review on retry success" \
+  "--add-label pending-review" "$GH_LOG"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- TC-500-04 (companion): SIGTERM + SUCCESSFUL zero-match read → pending-dev, unchanged ---"
+# ---------------------------------------------------------------------------
+# Guards against over-correction: a genuinely successful read that finds no
+# matching PR is NOT an UNKNOWN — it must still route to pending-dev exactly
+# as before this fix, with no retry.
+run_retry_cleanup "500-04" 1 "zero"
+
+assert_eq "TC-500-04 exactly 1 chp_pr_list call (no retry on a clean zero-match)" "1" "$CALL_COUNT"
+assert_eq "TC-500-04 no sleep" "0" "$SLEEP_COUNT"
+assert_contains "TC-500-04 still routes to pending-dev" \
+  "--add-label pending-dev" "$GH_LOG"
+assert_not_contains "TC-500-04 never routes to pending-review" \
+  "--add-label pending-review" "$GH_LOG"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- TC-500-05: non-SIGTERM path stays single-attempt, fail-soft on read failure ---"
+# ---------------------------------------------------------------------------
+# D2 pin: outside the SIGTERM branch, a failed read keeps the ORIGINAL
+# fail-soft-to-"0" single-attempt contract — no retry is introduced there.
+# exit_code is non-zero (143, no SIGTERM rewrite since RECEIVED_SIGTERM=0)
+# so this takes the plain "Agent failed" branch regardless of PR_EXISTS —
+# the assertion here is about call/sleep counts (the D2 pin), not routing.
+run_retry_cleanup "500-05" 0 "fail,pr"
+
+assert_eq "TC-500-05 exactly 1 chp_pr_list call (no SIGTERM ⇒ no retry)" "1" "$CALL_COUNT"
+assert_eq "TC-500-05 no sleep" "0" "$SLEEP_COUNT"
+assert_contains "TC-500-05 falls through to pending-dev" \
+  "--add-label pending-dev" "$GH_LOG"
+
+# ---------------------------------------------------------------------------
+echo ""
 echo "=== Summary ==="
 echo "  PASS: $PASS"
 echo "  FAIL: $FAIL"
