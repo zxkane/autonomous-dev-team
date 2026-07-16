@@ -66,6 +66,9 @@ _MOCK_LABEL_SWAP_RC=0
 _MOCK_DISPATCH_RC=0
 _MOCK_COMMENT_FETCH_RC=0        # 1 = itp_list_comments fails (rate-limit/auth/transport blip)
 _MOCK_MATCHED_PATTERNS_MARKER='' # INV-134 (#488) D4: inv92-matched-patterns marker text, if any
+_MOCK_MATCHED_PATTERNS_HEAD=''   # (codex review round-2, PR #498) head= field the marker carries;
+                                  # defaults to _MOCK_CURRENT_HEAD (same head) — set to a different
+                                  # sha to simulate a STALE marker from an earlier, unrelated round.
 
 _TRACE_FILE=""
 _rec() {
@@ -95,7 +98,8 @@ itp_list_comments() {
   [ "$_MOCK_CRASHED_RETRY_PRESENT" = "1" ] && body+=" crashed-session-retry:${_MOCK_CURRENT_HEAD}"
   [ "$_MOCK_NONSUB_PRESENT" = "1" ] && body+=" self-heal-non-substantive:${_MOCK_CURRENT_HEAD}"
   if [ -n "$_MOCK_MATCHED_PATTERNS_MARKER" ]; then
-    printf '%s\n' "[{\"body\":\"${body}\"},{\"body\":\"<!-- inv92-matched-patterns: ${_MOCK_MATCHED_PATTERNS_MARKER} -->\"}]"
+    local _mp_head="${_MOCK_MATCHED_PATTERNS_HEAD:-$_MOCK_CURRENT_HEAD}"
+    printf '%s\n' "[{\"body\":\"${body}\"},{\"body\":\"<!-- inv92-matched-patterns: head=${_mp_head} ${_MOCK_MATCHED_PATTERNS_MARKER} -->\"}]"
     return 0
   fi
   printf '%s\n' "[{\"body\":\"${body}\"}]"
@@ -153,6 +157,7 @@ _reset() {
   _MOCK_CRASHED_RETRY_PRESENT=0; _MOCK_NONSUB_PRESENT=0
   _MOCK_ACQUIRE_RC=0; _MOCK_LABEL_SWAP_RC=0; _MOCK_DISPATCH_RC=0
   _MOCK_COMMENT_FETCH_RC=0
+  _MOCK_MATCHED_PATTERNS_MARKER=''; _MOCK_MATCHED_PATTERNS_HEAD=''
 }
 
 # ===========================================================================
@@ -224,6 +229,20 @@ rc=$?
 assert_eq   "TC-INV134-D4-10 returns 0" "0" "$rc"
 assert_match "TC-INV134-D4-10 mark_stalled fired" "^mark_stalled" "$(_trace_all)"
 assert_match "TC-INV134-D4-10 notice names the matched pattern" "Matched .REVIEW_PROTECTED_PATHS. pattern\(s\): \.github/workflows/\*\*" "$(_trace_all)"
+
+# ===========================================================================
+echo
+echo "=== TC-INV134-D4-17 (codex review round-2, PR #498): a marker from a DIFFERENT (stale) head must NOT be surfaced ==="
+# ===========================================================================
+_reset
+_MOCK_VERDICT='failed-substantive'; _MOCK_DEV_ACTIONABLE='false'
+_MOCK_MATCHED_PATTERNS_MARKER='.github/workflows/**'
+_MOCK_MATCHED_PATTERNS_HEAD='stale0ld'
+handle_pending_dev_pr_exists 99
+rc=$?
+assert_eq   "TC-INV134-D4-17 returns 0" "0" "$rc"
+assert_match "TC-INV134-D4-17 mark_stalled fired" "^mark_stalled" "$(_trace_all)"
+assert_no_match "TC-INV134-D4-17 notice does NOT surface the stale-head marker" "Matched .REVIEW_PROTECTED_PATHS. pattern\(s\)" "$(_trace_all)"
 
 # ===========================================================================
 echo

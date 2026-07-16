@@ -63,10 +63,13 @@ awk '
 grep -q 'AGENT_MATCHED_PATTERNS' "$BLOCK_SLICE" || { echo "FATAL: extracted slice missing AGENT_MATCHED_PATTERNS reference"; exit 2; }
 grep -q 'inv92-matched-patterns' "$BLOCK_SLICE" || { echo "FATAL: extracted slice missing the marker literal"; exit 2; }
 
-# _run_block <agg_dev_actionable> <agent_names_csv> <agent_verdicts_csv> <agent_matched_patterns_pipe_sep>
+# _run_block <agg_dev_actionable> <agent_names_csv> <agent_verdicts_csv> <agent_matched_patterns_pipe_sep> [pr_head_sha]
 #
 # agent_matched_patterns_pipe_sep: one field per agent, multiple patterns
 # within a field separated by `;` (mapped to newlines inside the sandbox).
+# pr_head_sha defaults to a fixed sentinel — the block now embeds
+# `head=${PR_HEAD_SHA:-unknown}` in the marker (codex review round-2, PR #498)
+# so the dispatcher can bind its read to the reviewed head.
 _run_block() {
   (
     set +e
@@ -75,6 +78,9 @@ _run_block() {
     IFS=',' read -r -a AGENT_NAMES <<<"$2"
     IFS=',' read -r -a AGENT_VERDICTS <<<"$3"
     IFS=',' read -r -a _raw_patterns <<<"$4"
+    # No colon: only defaults when arg 5 is genuinely UNSET (not merely empty)
+    # — TC-INV134-D4-15 passes an explicit "" to exercise the "unknown" path.
+    PR_HEAD_SHA="${5-deadbeef}"
     declare -a AGENT_MATCHED_PATTERNS=()
     local _p
     for _p in "${_raw_patterns[@]}"; do
@@ -101,7 +107,7 @@ _field() { grep "^$2=" <<<"$1" | head -1 | cut -d= -f2-; }
 # ---------------------------------------------------------------------------
 echo "=== TC-INV134-D4-05: dev-actionable=false, matched patterns present → comment posted ==="
 # ---------------------------------------------------------------------------
-OUT=$(_run_block "false" "codex" "fail" ".github/workflows/**;CODEOWNERS")
+OUT=$(_run_block "false" "codex" "fail" ".github/workflows/**;CODEOWNERS" "cafef00d")
 assert_eq "TC-INV134-D4-05 exactly one comment posted" "1" "$(_field "$OUT" COMMENT_COUNT)"
 BODY=$(_field "$OUT" COMMENT_BODY)
 case "$BODY" in
@@ -113,8 +119,19 @@ case "$BODY" in
   *) bad "TC-INV134-D4-05 comment should name the REVIEW_PROTECTED_PATHS conf lever";;
 esac
 case "$BODY" in
-  *"<!-- inv92-matched-patterns: .github/workflows/** CODEOWNERS -->"*) ok "TC-INV134-D4-05 comment carries the machine-readable marker";;
-  *) bad "TC-INV134-D4-05 comment should carry the inv92-matched-patterns marker"; echo "      got: $BODY";;
+  *"<!-- inv92-matched-patterns: head=cafef00d .github/workflows/** CODEOWNERS -->"*) ok "TC-INV134-D4-05 comment carries the machine-readable marker head-bound to PR_HEAD_SHA";;
+  *) bad "TC-INV134-D4-05 comment should carry the head-bound inv92-matched-patterns marker"; echo "      got: $BODY";;
+esac
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-INV134-D4-15 (codex review round-2, PR #498): marker is head-bound — an unresolved PR_HEAD_SHA renders 'unknown' ==="
+# ---------------------------------------------------------------------------
+OUT=$(_run_block "false" "codex" "fail" ".github/workflows/**" "")
+BODY=$(_field "$OUT" COMMENT_BODY)
+case "$BODY" in
+  *"<!-- inv92-matched-patterns: head=unknown .github/workflows/** -->"*) ok "TC-INV134-D4-15 empty PR_HEAD_SHA renders the 'unknown' placeholder, never an empty field";;
+  *) bad "TC-INV134-D4-15 empty PR_HEAD_SHA should render 'unknown'"; echo "      got: $BODY";;
 esac
 
 # ---------------------------------------------------------------------------
@@ -151,7 +168,7 @@ case "$BODY" in
   *) bad "TC-INV134-D4-14 comment should name the matched pattern"; echo "      got: $BODY";;
 esac
 case "$BODY" in
-  *"<!-- inv92-matched-patterns: .github/workflows/** -->"*) ok "TC-INV134-D4-14 comment carries the machine-readable marker";;
+  *"<!-- inv92-matched-patterns: head=deadbeef .github/workflows/** -->"*) ok "TC-INV134-D4-14 comment carries the machine-readable marker";;
   *) bad "TC-INV134-D4-14 comment should carry the inv92-matched-patterns marker"; echo "      got: $BODY";;
 esac
 case "$BODY" in

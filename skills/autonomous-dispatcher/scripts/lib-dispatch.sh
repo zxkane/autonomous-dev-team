@@ -1887,10 +1887,14 @@ handle_completed_session_routing() {
             2>/dev/null | grep -q '^0$'; then
           # INV-134 (#488) D4: surface the matched REVIEW_PROTECTED_PATHS
           # pattern(s) when the review wrapper's `inv92-matched-patterns:`
-          # marker is present on the issue; otherwise fall back to the
-          # unchanged generic wording (no new failure mode).
+          # marker is present on the issue FOR THIS HEAD; otherwise fall back
+          # to the unchanged generic wording (no new failure mode). (codex
+          # review round-2, PR #498): bind the read to `_np_current_head` —
+          # the head this verdict was actually reviewed against — so a stale
+          # marker from an earlier, unrelated round can never be misattributed
+          # to this stall notice.
           local _na_patterns _na_pat_sentence=""
-          _na_patterns="$(_inv92_matched_patterns "$issue_num")"
+          _na_patterns="$(_inv92_matched_patterns "$issue_num" "$_np_current_head")"
           if [ -n "$_na_patterns" ]; then
             _na_pat_sentence=" Matched \`REVIEW_PROTECTED_PATHS\` pattern(s): ${_na_patterns}."
           fi
@@ -3097,13 +3101,30 @@ last_reviewed_head() {
 # INV-134 (#488) D4: echoes the newest `inv92-matched-patterns:` marker's
 # space-separated pattern list posted by the review wrapper's non-actionable
 # findings comment (autonomous-review.sh), or empty if no such marker exists
-# on the issue. The dispatcher's own stall notices (Branch B′ below and
-# `_same_head_verdict_aware_recovery`'s dev-actionable=false branch) only ever
-# see the coarse `dev-actionable=false` trailer bit — this is the sole channel
-# carrying WHICH REVIEW_PROTECTED_PATHS pattern forced that classification, so
-# the stall comment can name it instead of pointing at [INV-92] alone. A
-# transport failure / no match yields empty — the caller's existing generic
-# wording is the fallback, never a new failure mode (D4's own spec).
+# on the issue FOR THE GIVEN HEAD. The dispatcher's own stall notices (Branch
+# B′ below and `_same_head_verdict_aware_recovery`'s dev-actionable=false
+# branch) only ever see the coarse `dev-actionable=false` trailer bit — this
+# is the sole channel carrying WHICH REVIEW_PROTECTED_PATHS pattern forced
+# that classification, so the stall comment can name it instead of pointing
+# at [INV-92] alone. A transport failure / no match yields empty — the
+# caller's existing generic wording is the fallback, never a new failure mode
+# (D4's own spec).
+#
+# _inv92_matched_patterns <issue_num> <reviewed_head>
+#
+# (codex review round-2, PR #498): the marker is now posted head-bound
+# (`<!-- inv92-matched-patterns: head=<sha> <patterns> -->`, autonomous-review.sh),
+# and this reader ONLY accepts a marker whose `head=` field matches the
+# CALLER-SUPPLIED <reviewed_head> exactly. Without this, the newest issue-wide
+# marker was returned unconditionally — so a round-N protected-path failure's
+# marker would still be read on a LATER round N+1 whose OWN
+# `dev-actionable=false` came from an unrelated, non-protected-path cause
+# (e.g. the agent self-reporting `false`), misattributing round N's pattern to
+# round N+1's stall notice instead of falling back to the generic wording. An
+# empty <reviewed_head> matches a marker whose own field is the literal
+# `unknown` (mirrors the producer's placeholder rationale for an
+# unresolved/empty `PR_HEAD_SHA`) — never a real sha, so a genuine head is
+# never satisfied by an `unknown`-headed marker or vice versa.
 #
 # `|| true` is REQUIRED, not decorative: both call sites live under
 # `set -euo pipefail`, so a transient `itp_list_comments` failure (rate-limit
@@ -3113,10 +3134,13 @@ last_reviewed_head() {
 # contract promises never happens.
 _inv92_matched_patterns() {
   local issue_num="$1"
+  local reviewed_head="${2:-unknown}"
+  [ -n "$reviewed_head" ] || reviewed_head="unknown"
   # A transient itp_list_comments failure must degrade to empty (fail-empty), never abort the caller under set -e/pipefail — see the docstring above.
   itp_list_comments "$issue_num" 2>/dev/null \
-    | jq -r '[.[].body | select(type == "string") | capture("<!-- inv92-matched-patterns: (?<p>[^\\n]*) -->"; "g") | .p] | last // empty' \
-    2>/dev/null || true
+    | jq -r --arg head "$reviewed_head" \
+      '[.[].body | select(type == "string") | capture("<!-- inv92-matched-patterns: head=(?<h>[^ \\n]+) (?<p>[^\\n]*) -->"; "g") | select(.h == $head) | .p] | last // empty' \
+    2>/dev/null || true  # fail-empty on jq/transport failure, never abort under set -e (see docstring)
 }
 
 # [INV-85] (#274): returns 0 (true) if any issue comment carries the
@@ -3626,9 +3650,12 @@ _same_head_verdict_aware_recovery() {
     if itp_list_comments "$issue_num" 2>/dev/null \
         | jq -r "[.[].body | select(contains(\"${_na_marker}\"))] | length" \
         2>/dev/null | grep -q '^0$'; then
-      # INV-134 (#488) D4: same marker-surfacing fallback as Branch B′ above.
+      # INV-134 (#488) D4: same marker-surfacing fallback as Branch B′ above,
+      # bound to `current_head` (codex review round-2, PR #498) — the head
+      # this verdict was reviewed against — so a stale marker from an
+      # earlier, unrelated round can never be misattributed here.
       local _na_patterns _na_pat_sentence=""
-      _na_patterns="$(_inv92_matched_patterns "$issue_num")"
+      _na_patterns="$(_inv92_matched_patterns "$issue_num" "$current_head")"
       if [ -n "$_na_patterns" ]; then
         _na_pat_sentence=" Matched \`REVIEW_PROTECTED_PATHS\` pattern(s): ${_na_patterns}."
       fi

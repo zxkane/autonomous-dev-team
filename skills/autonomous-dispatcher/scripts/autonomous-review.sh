@@ -4542,6 +4542,18 @@ else
     # bit; this comment is the ONLY place the matched pattern text lives, so
     # the dispatcher's stall notice greps for the `inv92-matched-patterns:`
     # marker across issue comments when it needs to surface it.
+    #
+    # (codex review round-2, PR #498): the marker embeds `head=${PR_HEAD_SHA}`
+    # so a LATER dispatcher read can bind it to the head under review at read
+    # time (`_inv92_matched_patterns <issue> <head>`, lib-dispatch.sh) instead
+    # of blindly taking the newest issue-wide marker. Without the head field, a
+    # marker posted on round N (protected-path match) would be misattributed
+    # to a LATER round N+1 whose own `dev-actionable=false` came from a
+    # DIFFERENT, non-protected-path cause (e.g. the agent self-reported
+    # `false`) — the dispatcher would name a stale, unrelated pattern instead
+    # of falling back to the generic wording. An empty/unresolved
+    # `PR_HEAD_SHA` renders as the literal `unknown` (never an empty field),
+    # mirroring `_review_round_marker`'s own placeholder rationale.
     if [[ -n "$_AGG_MATCHED_PATTERNS" ]]; then
       # Read line-by-line into an array — NEVER word-split the raw string
       # (an unquoted expansion would pathname-expand a glob pattern like
@@ -4569,7 +4581,7 @@ else
       fi
       itp_post_comment "$ISSUE_NUMBER" \
         "${_agg_pat_lead} Matched protected-path pattern(s): ${_agg_pat_list_md}. If the dev agent's token can actually edit these paths in this deployment, adjust the \`REVIEW_PROTECTED_PATHS\` conf lever (or, for \`.github/workflows/**\` specifically under \`GH_AUTH_MODE=app\`, add \`workflows\` to \`AGENT_TOKEN_PERMISSIONS\` so the capability-aware default applies).
-<!-- inv92-matched-patterns: ${_agg_pat_oneline} -->" 2>/dev/null || true
+<!-- inv92-matched-patterns: head=${PR_HEAD_SHA:-unknown} ${_agg_pat_oneline} -->" 2>/dev/null || true
     fi
 
     # -----------------------------------------------------------------------

@@ -197,6 +197,10 @@ _MOCK_ATTEMPT_WRITE_FAILS="0"    # 1 = reject attempt-marker writes (finding 2)
 _MOCK_ATTEMPT_WRITE_TRIES=0
 _MOCK_MATCHED_PATTERNS_MARKER=""  # INV-134 (#488) D4: when non-empty, itp_list_comments
                                    # emits a comment carrying `<!-- inv92-matched-patterns: … -->`
+_MOCK_MATCHED_PATTERNS_HEAD=""    # (codex review round-2, PR #498) head= field the synthesized
+                                   # marker carries; defaults to _MOCK_PR_HEAD (the SAME head as
+                                   # the reviewed PR) — set to a DIFFERENT sha to simulate a STALE
+                                   # marker left over from an earlier, unrelated round.
 
 fetch_pr_for_issue() {
   # [INV-123] (#461): a nonzero return simulates a resolve_pr_for_issue
@@ -237,10 +241,14 @@ itp_list_comments() {
   fi
   # INV-134 (#488) D4: when the test declares a matched-patterns marker, emit a
   # review-wrapper-style comment carrying it so `_inv92_matched_patterns` (the
-  # dispatcher-side reader) has something to find.
+  # dispatcher-side reader) has something to find. (codex review round-2, PR
+  # #498): the marker is head-bound — defaults to `_MOCK_PR_HEAD` (the same
+  # head under review) unless the test overrides `_MOCK_MATCHED_PATTERNS_HEAD`
+  # to simulate a stale marker from a different round.
   if [[ -n "${_MOCK_MATCHED_PATTERNS_MARKER:-}" ]]; then
+    local _mp_head="${_MOCK_MATCHED_PATTERNS_HEAD:-${_MOCK_PR_HEAD:-unknown}}"
     _bodies+=("Non-actionable findings comment.
-<!-- inv92-matched-patterns: ${_MOCK_MATCHED_PATTERNS_MARKER} -->")
+<!-- inv92-matched-patterns: head=${_mp_head} ${_MOCK_MATCHED_PATTERNS_MARKER} -->")
   fi
   if [[ "${_MOCK_NOTICE_PRESENT:-0}" != "0" ]]; then
     # The fresh-dev/INV-12 notices are session-scoped — the branch searches for
@@ -284,6 +292,7 @@ reset_mocks() {
   _MOCK_ATTEMPT_WRITE_FAILS="0"
   _MOCK_ATTEMPT_WRITE_TRIES=0
   _MOCK_MATCHED_PATTERNS_MARKER=""
+  _MOCK_MATCHED_PATTERNS_HEAD=""
   _MOCK_NOTICE_SESSION=""   # #281: session id the synthesized INV-12/INV-35 marker carries
   _MOCK_PR_LOOKUP_FAILS="0" # [INV-123] (#461): simulate fetch_pr_for_issue transport failure
   unset REVIEW_RETRY_LIMIT
@@ -946,19 +955,51 @@ case "$_MOCK_LAST_COMMENT_BODY" in
     ;;
 esac
 
+# TC-INV134-D4-16 (codex review round-2, PR #498): a marker EXISTS on the
+# issue, but it was posted for a DIFFERENT (earlier, stale) head than the one
+# this verdict was reviewed against — the notice must NOT surface it and must
+# fall back to the generic wording, exactly as if no marker existed at all.
+reset_mocks
+_MOCK_VERDICT="failed-substantive"
+_MOCK_DEV_ACTIONABLE="false"
+_MOCK_PR_HEAD="cafef00d"
+_MOCK_LAST_REVIEWED_HEAD="cafef00d"
+_MOCK_MATCHED_PATTERNS_MARKER=".github/workflows/**"
+_MOCK_MATCHED_PATTERNS_HEAD="stale0ld"
+prepare_log 100
+assert_returns "TC-INV134-D4-16 returns 0" 0 \
+  handle_completed_session_routing 100 "sid-d416" "2026-05-21T03:18:00Z"
+assert_eq "TC-INV134-D4-16 mark_stalled fired" "100 " "$_MOCK_MARK_STALLED_CALLS"
+case "$_MOCK_LAST_COMMENT_BODY" in
+  *"Matched \`REVIEW_PROTECTED_PATHS\` pattern(s)"*)
+    echo -e "  ${RED}FAIL${NC}: TC-INV134-D4-16 notice must NOT surface a stale marker from a different head"
+    FAIL=$((FAIL + 1))
+    ;;
+  *)
+    echo -e "  ${GREEN}PASS${NC}: TC-INV134-D4-16 stale (different-head) marker ignored, generic fallback wording used"
+    PASS=$((PASS + 1))
+    ;;
+esac
+
 # TC-INV134-D4-11: _inv92_matched_patterns directly — fail-empty on an
 # itp_list_comments transport failure (never propagates the error text or a
 # stale value, rc is irrelevant since every caller only checks `-n`), and
-# correct extraction when the marker IS present. Run under this file's own
-# `set +e` posture (the set -e ABORT class itself is TC-INV134-D4-12's job).
+# correct extraction when the marker IS present AND its `head=` field matches
+# the caller-supplied head (codex review round-2, PR #498: the reader now
+# requires an exact head match). Run under this file's own `set +e` posture
+# (the set -e ABORT class itself is TC-INV134-D4-12's job).
+reset_mocks
 _MOCK_MATCHED_PATTERNS_MARKER=".github/workflows/** CODEOWNERS"
-assert_eq "TC-INV134-D4-11a extracts the marker pattern list when present" \
-  ".github/workflows/** CODEOWNERS" "$(_inv92_matched_patterns 100)"
+_MOCK_MATCHED_PATTERNS_HEAD="cafef00d"
+assert_eq "TC-INV134-D4-11a extracts the marker pattern list when the head matches" \
+  ".github/workflows/** CODEOWNERS" "$(_inv92_matched_patterns 100 "cafef00d")"
+assert_eq "TC-INV134-D4-11a2 empty when the caller's head does NOT match the marker's head" \
+  "" "$(_inv92_matched_patterns 100 "some-other-head")"
 _MOCK_MATCHED_PATTERNS_MARKER=""
 _MOCK_COMMENT_FETCH_RC_UNUSED=1  # documents intent; real transport-failure mock below
 itp_list_comments() { return 1; }
 assert_eq "TC-INV134-D4-11b fail-empty on itp_list_comments transport failure" \
-  "" "$(_inv92_matched_patterns 100)"
+  "" "$(_inv92_matched_patterns 100 "cafef00d")"
 # Restore the real mock this file's other tests depend on.
 itp_list_comments() {
   local _bodies=()

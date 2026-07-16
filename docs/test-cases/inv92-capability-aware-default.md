@@ -91,22 +91,27 @@ GitLab mints no scoped GitHub token those vars could describe.
 | TC-INV134-D4-06 | Aggregate `dev-actionable=true`, NO matched patterns recorded | No matched-patterns comment posted (nothing to name) |
 | TC-INV134-D4-07 | Aggregate `dev-actionable=false`, but no FAILing agent recorded a matched pattern (agent self-reported `false` on a non-protected path) | No matched-patterns comment posted — nothing to name |
 | TC-INV134-D4-14 [mixed-failure regression, PR #498 round-1 codex review [P2] finding #2] | Aggregate `dev-actionable=true` (a MIXED FAIL: one protected-path finding + one ordinary actionable finding), but a matched pattern WAS recorded | A comment IS still posted, naming the pattern + carrying the marker; the lead sentence does NOT claim the whole FAIL is unactionable, and instead notes the dev agent is still re-dispatched for the remaining actionable finding(s) |
+| TC-INV134-D4-15 [head-binding, PR #498 round-2 codex review [P3] finding] | `PR_HEAD_SHA` unresolved/empty | The marker renders `head=unknown` (the placeholder), never an empty field |
 
 The matched-pattern collection is computed UNCONDITIONALLY (never gated on
 the aggregate `dev-actionable` bit) — only whether the resulting
 `_AGG_MATCHED_PATTERNS` is non-empty controls whether the comment posts. The
 comment's lead sentence still branches on the aggregate for correct wording.
+The marker is now HEAD-BOUND: `<!-- inv92-matched-patterns: head=<sha|unknown> <patterns> -->`
+(TC-INV134-D4-05 pins the `head=<sha>` form).
 
-### Dispatcher-side: stall comment surfaces the marker when present, generic fallback otherwise
+### Dispatcher-side: stall comment surfaces the marker when present AND head-matched, generic fallback otherwise
 
 | ID | Scenario | Assertion |
 |---|---|---|
-| TC-INV134-D4-08 | Branch B′ (`handle_completed_session_routing`) fires, `inv92-matched-patterns:` marker present on the issue | The escalation notice includes "Matched `REVIEW_PROTECTED_PATHS` pattern(s):" + the pattern list from the marker |
+| TC-INV134-D4-08 | Branch B′ (`handle_completed_session_routing`) fires, `inv92-matched-patterns:` marker present on the issue for the SAME head under review | The escalation notice includes "Matched `REVIEW_PROTECTED_PATHS` pattern(s):" + the pattern list from the marker |
 | TC-INV134-D4-09 | Branch B′ fires, no marker present | The escalation notice is byte-identical to the pre-#488 generic wording (no new sentence, no failure) |
-| TC-INV134-D4-10 | `_same_head_verdict_aware_recovery`'s dev-actionable=false branch fires, marker present | Same pattern-surfacing sentence appears in that notice too |
-| TC-INV134-D4-11 | `_inv92_matched_patterns` helper: `itp_list_comments` transport failure | Returns empty (fail-empty; caller falls back to generic wording, never crashes) |
+| TC-INV134-D4-10 | `_same_head_verdict_aware_recovery`'s dev-actionable=false branch fires, marker present for the SAME head | Same pattern-surfacing sentence appears in that notice too |
+| TC-INV134-D4-11 | `_inv92_matched_patterns` helper: `itp_list_comments` transport failure, or the marker's `head=` field does NOT match the caller-supplied head | Returns empty (fail-empty; caller falls back to generic wording, never crashes) |
 | TC-INV134-D4-12 [set -e regression] | `handle_completed_session_routing` Branch B′, called as a bare top-level statement (mirrors `dispatcher-tick.sh:693`) under REAL `set -euo pipefail`, with the idempotency check succeeding but the `_inv92_matched_patterns`-internal `itp_list_comments` call transiently failing | `mark_stalled` is still reached and the caller returns normally — does NOT abort under `set -e`/`pipefail` (regression: `_inv92_matched_patterns`'s pipe needs `\|\| true`, or a transient transport blip aborts the entire dispatcher tick, silently skipping every other in-flight issue for that cycle) |
 | TC-INV134-D4-13 [set -e regression, defense-in-depth] | Same failure injection, but through `_same_head_verdict_aware_recovery` via `handle_pending_dev_pr_exists` under the SAME `if handle_pending_dev_pr_exists ...; then` context `dispatcher-tick.sh:583` uses | `mark_stalled` still reached; this call site is currently shielded by bash's errexit-suppression-inside-an-if-condition rule regardless of the fix, but the pin locks in the fix as defense-in-depth (a future refactor to a bare-statement call would make this call site load-bearing too) |
+| TC-INV134-D4-16 [head-binding regression, PR #498 round-2 codex review [P3] finding] | Branch B′ fires; an `inv92-matched-patterns:` marker EXISTS on the issue, but for a DIFFERENT (stale, earlier-round) head than the one under review | The notice does NOT surface the stale pattern — falls back to the generic wording exactly as if no marker existed |
+| TC-INV134-D4-17 [head-binding regression, PR #498 round-2 codex review [P3] finding] | Same scenario as D4-16, but through `_same_head_verdict_aware_recovery`'s dev-actionable=false branch | Same fallback-to-generic-wording behavior |
 
 ## D5 — docs (verified structurally, not by these unit tests)
 
