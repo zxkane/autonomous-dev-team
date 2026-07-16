@@ -51,11 +51,22 @@ sites in the recorder's read loop with a bounded-retry write:
   pipe and may fail too).
 - **No new pipeline stage.** The retry lives entirely inside `_agent_progress_recorder`'s
   existing read loop — an additional stage would itself be a new EAGAIN-vulnerable writer.
-  `O_NONBLOCK` is never cleared from bash (no fcntl access). The zero-`AGENT_PROGRESS_FILE`
-  fast path (bare `cat`) is untouched. Both call sites' `|| true` guards mean bound
-  exhaustion/EPIPE can never abort the read loop under a caller's `set -e` — the same
-  rationale as the loop's pre-existing `read -r line || rc=$?` guard for the
-  no-trailing-newline EOF case.
+  `O_NONBLOCK` is never cleared from bash (no fcntl access). Both call sites' `|| true`
+  guards mean bound exhaustion/EPIPE can never abort the read loop under a caller's
+  `set -e` — the same rationale as the loop's pre-existing `read -r line || rc=$?` guard for
+  the no-trailing-newline EOF case.
+- **The zero-`AGENT_PROGRESS_FILE` review-side path goes through the same retry-protected
+  loop, not a bare `cat` (round-2 review finding, caught only by CI).** The first shipped
+  shape special-cased a plain `cat` when `AGENT_PROGRESS_FILE` was unset, reasoning the
+  review side never refreshes a lease so a no-op passthrough was equivalent — true for the
+  lease, false for the write: `autonomous-review.sh` composes the identical
+  `exec > >(tee -a run.log) 2>&1` topology, so the review-side CLI has the SAME shared
+  nonblocking-pipe hazard. GNU coreutils `cat` (the CI runner's `cat`) does not retry
+  `EAGAIN` either and silently drops data past the pipe buffer boundary — TC-LEASE-027
+  failed in CI while passing locally, because the dev box's `cat` happened to be a
+  different (non-GNU) implementation that behaves differently under the same pressure. The
+  shortcut was removed; `_agent_progress_refresh`'s own unset-`AGENT_PROGRESS_FILE` guard
+  already makes the lease side a safe no-op there, so this costs nothing on the review side.
 
 ## Review-round follow-ups (this PR)
 
@@ -66,6 +77,8 @@ sites in the recorder's read loop with a bounded-retry write:
 | 2 | The retry counter reset every 4096-byte slice instead of tracking one budget for the whole record | Single deadline computed before the slice loop, shared by every slice's retry check (see Decision above); TC-LEASE-029 exercises a slow-draining reader across a multi-slice record, plus a characterization run of the retired per-slice-reset shape proving the test discriminates fixed from broken |
 | 2 | TC-LEASE-024..028 existed only in the shell test, not in `docs/test-cases/agent-progress-lease.md` | Added TC-LEASE-024..029 there in Given/When/Then form, plus the R3 acceptance-mapping update |
 | 2 | No design canvas covered the slice/retry/error-classification design | This document |
+| 2 | `local LC_ALL=C` does not reach the child `awk` process unless `LC_ALL` was already exported — a comma-decimal locale could corrupt the deadline float comparison | Prefixed `LC_ALL=C` directly on both `awk` invocations |
+| 2 (CI, not local) | TC-LEASE-027 failed against GNU coreutils `cat` (the CI runner's `cat`) even though it passed locally against this dev box's non-GNU `cat` — the "zero-`AGENT_PROGRESS_FILE` fast path" bare `cat` had the SAME un-retried-`EAGAIN` data-drop bug as the pre-fix `printf`, just on the review side | Removed the bare-`cat` special case; the review-side path now runs through the same `_agent_progress_write_retry`-protected loop as the dev side |
 
 ## Out of scope
 
@@ -80,5 +93,6 @@ See `docs/test-cases/agent-progress-lease.md` TC-LEASE-024..029 —
 `tests/unit/test-agent-progress-lease.sh`, driving the real recorder through a real
 `O_NONBLOCK` pipe via a python3 `fcntl` helper: byte-identical passthrough under transient
 EAGAIN pressure, the no-trailing-newline contract under retry, bounded-exhaustion
-completing instead of hanging, the zero-`AGENT_PROGRESS_FILE` fast path unaffected,
-dead-reader (EPIPE) fast-fail, and the whole-record (not per-slice) retry budget.
+completing instead of hanging, the zero-`AGENT_PROGRESS_FILE` review-side path now
+protected the same way as the dev side, dead-reader (EPIPE) fast-fail, and the whole-record
+(not per-slice) retry budget.

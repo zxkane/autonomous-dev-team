@@ -938,9 +938,19 @@ PYEOF
   fi
 
   # ---------------------------------------------------------------------
-  # TC-LEASE-027: the zero-AGENT_PROGRESS_FILE fast path (bare `cat`) is
-  # unaffected by the retry helper — still byte-identical, still a plain
-  # `cat`, even under the same EAGAIN pressure.
+  # TC-LEASE-027: the zero-AGENT_PROGRESS_FILE review-side path (no lease
+  # to refresh) goes through the SAME retry-protected write loop as the
+  # dev side and stays byte-identical under the same EAGAIN pressure. A
+  # prior shape special-cased a bare `cat` here on the reasoning that the
+  # review side never refreshes a lease so a plain passthrough was
+  # equivalent — true for the lease, false for the write: GNU coreutils
+  # `cat` does not retry EAGAIN either (unlike some other `cat`
+  # implementations), so a bare `cat` on the review side would silently
+  # drop data exactly like the un-retried `printf` this issue fixes on the
+  # dev side. This assertion is what actually catches that: it failed
+  # against a GNU-coreutils `cat` even while every other TC-LEASE-024..029
+  # assertion passed, since the bug lived in the now-removed shortcut, not
+  # in `_agent_progress_write_retry` itself.
   # ---------------------------------------------------------------------
   FASTPATH_OUT="$TMPROOT/fastpath-out.jsonl"
   python3 "$PY_DRIVER" "$FASTPATH_OUT" 1.0 -- bash -c '
@@ -950,7 +960,7 @@ PYEOF
   ' >/dev/null 2>&1
 
   fastpath_sha=$(_sha "$FASTPATH_OUT")
-  assert_eq "TC-LEASE-027 fast path (AGENT_PROGRESS_FILE unset) stays byte-identical under the same pressure" \
+  assert_eq "TC-LEASE-027 review-side path (AGENT_PROGRESS_FILE unset) stays byte-identical under the same pressure" \
     "$expected_sha" "$fastpath_sha"
 
   # ---------------------------------------------------------------------

@@ -178,11 +178,11 @@ fixture-driven; no real sleeps.
 **When** the recorder attempts to write it
 **Then** the recorder process still exits within a bounded wall-clock window (not a hang) and emits EXACTLY ONE best-effort stderr diagnostic naming "Resource temporarily unavailable" for the dropped record — never a loud repeating loop of the same error.
 
-## TC-LEASE-027: the zero-`AGENT_PROGRESS_FILE` fast path stays a byte-identical bare `cat`
+## TC-LEASE-027: the zero-`AGENT_PROGRESS_FILE` review-side path stays byte-identical (round-2 regression, caught in CI)
 
 **Given** `AGENT_PROGRESS_FILE` is unset (the review side's invocation shape)
 **When** the recorder runs under the same EAGAIN pressure as TC-LEASE-024
-**Then** output is still byte-identical to the input — the retry helper is never invoked on this path; it stays the original unconditional `cat`.
+**Then** output is still byte-identical to the input, routed through the SAME `_agent_progress_write_retry`-protected read loop as the dev side — NOT a bare `cat`. A prior shape special-cased a bare `cat` here on the reasoning that the review side never refreshes a lease, so a no-op passthrough was equivalent; that held for the lease but not the write. `autonomous-review.sh` composes the identical `exec > >(tee -a run.log) 2>&1` topology as the dev wrapper, so the review-side CLI has the same shared-nonblocking-pipe hazard. GNU coreutils `cat` does not retry `EAGAIN` either and silently drops data past the pipe buffer boundary — this test failed in CI (GNU `cat`) while passing locally against a non-GNU `cat` implementation, which is what surfaced the gap.
 
 ## TC-LEASE-028: a genuinely dead reader (EPIPE) fails fast, not the full retry budget (round-1 regression)
 
