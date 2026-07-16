@@ -220,6 +220,19 @@ every dispatcher-side escalation fallback for that project silently reverts
 to `REPO_OWNER` regardless of conf intent. A LOCAL path-entry project sources
 its `autonomous.conf` directly and was never affected.
 
+**Ambient-leak guard (review round 2)**: `tick_inline_project` also `unset`s
+`HUMAN_ESCALATION_LOGIN`/`DEV_BOT_LOGIN` (alongside the pre-existing
+`ISSUE_FILTER`/`ISSUE_SCAN_LIMIT` unset) in the per-project subshell BEFORE
+`eval`-ing the inline block. Without this, a value exported into the process
+that launches `dispatcher-multi-tick.sh` (an operator's cron environment, or
+a `dispatcher.conf` top-level assignment — that file is `source`d directly
+into `dispatcher-multi-tick.sh`'s own process) would leak into an inline
+project whose OWN block omits both keys, silently mentioning the wrong
+maintainer / misclassifying a login as the dev bot on a DIFFERENT project's
+PR — the exact ambient-pollution class `ISSUE_FILTER`'s own `TC-IFILT-124`
+regression test (issue #436) exists to prevent, now mirrored for these two
+vars by `TC-PAEM-132`.
+
 **Byte-identical-default guarantee**: this is a pure targeting change — no
 label transition, gate, or comment WORDING changes. The `resolve_pr_author_
 mention` bot-detection rule is deliberately NOT a broad `*bot*` substring

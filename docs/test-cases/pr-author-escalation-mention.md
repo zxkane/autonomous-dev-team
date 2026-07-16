@@ -113,6 +113,7 @@ directly and sees everything.
 |----|----------|----------|
 | TC-PAEM-130 | Inline block declares `HUMAN_ESCALATION_LOGIN`/`DEV_BOT_LOGIN` | both exported into the `dispatcher-tick.sh` subshell env |
 | TC-PAEM-131 | Inline block omits both keys | both stay unset in the subshell (byte-identical default — falls back to `REPO_OWNER`, no `DEV_BOT_LOGIN` classification) |
+| TC-PAEM-132 | Ambient `HUMAN_ESCALATION_LOGIN`/`DEV_BOT_LOGIN` (exported into the process launching `dispatcher-multi-tick.sh`, or a `dispatcher.conf` top-level assignment) + an inline project whose OWN block omits both keys (review round 2) | both stay unset for that project — the ambient value does NOT leak in (mirrors `TC-IFILT-124`'s `ISSUE_FILTER` ambient-leak guard) |
 
 ## Conformance (parity pin)
 

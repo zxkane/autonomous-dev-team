@@ -179,7 +179,16 @@ tick_inline_project() {
     # stale value instead of taking the documented unfiltered/default-100 path
     # (AC-B8) — the conditional exports below only add a var, they never remove
     # one the fork already carried in.
-    unset ISSUE_FILTER ISSUE_SCAN_LIMIT
+    #
+    # [#495 review finding #2, round 2] HUMAN_ESCALATION_LOGIN/DEV_BOT_LOGIN join
+    # this same unset for the identical reason: dispatcher.conf's own top-level
+    # assignments are sourced directly into THIS process (dispatcher-multi-tick.sh
+    # itself), and an operator's ambient shell/cron environment can export either
+    # var too. Without clearing them here, an inline project whose OWN block omits
+    # both keys would silently inherit a DIFFERENT project's (or the operator's)
+    # escalation target instead of the documented unset/REPO_OWNER-fallback
+    # default — mentioning the wrong maintainer on someone else's PR.
+    unset ISSUE_FILTER ISSUE_SCAN_LIMIT HUMAN_ESCALATION_LOGIN DEV_BOT_LOGIN
     # shellcheck disable=SC2294
     eval "$block"
     : "${REPO:?inline project missing REPO}"

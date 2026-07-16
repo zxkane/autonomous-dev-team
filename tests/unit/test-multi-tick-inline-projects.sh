@@ -532,6 +532,42 @@ assert_contains "TC-PAEM-131 DEV_BOT_LOGIN stays unset" "DEV_BOT_LOGIN=<unset>" 
 
 # ---------------------------------------------------------------------------
 echo ""
+echo "=== TC-PAEM-132: ambient HUMAN_ESCALATION_LOGIN/DEV_BOT_LOGIN does NOT leak into an inline project that omits both (review round 2) ==="
+# ---------------------------------------------------------------------------
+# Mirrors TC-IFILT-124's threat model exactly: a stale value exported into the
+# process that launches dispatcher-multi-tick.sh (a cron environment, a
+# dispatcher.conf-level top-level assignment sourced directly into THIS
+# process, or a leftover operator shell export) must NOT leak into an inline
+# project whose own block omits both keys — otherwise that project silently
+# mentions the wrong maintainer / misclassifies a login as the dev bot on
+# someone else's PR, exactly the class of bug #495 exists to eliminate.
+CONF="$TMPROOT/disp-paem-132.conf"
+RECORD="$TMPROOT/record-paem-132"
+: > "$RECORD"
+cat > "$CONF" <<'EOF'
+PROJECTS=()
+PROJECTS+=( '
+PROJECT_ID=projNoEscalationAttr
+REPO=myorg/projNoEscalationAttr
+EXECUTION_BACKEND=remote-aws-ssm
+SSM_INSTANCE_ID=i-noescattr
+SSM_REMOTE_PROJECT_DIR=/data/git/projNoEscalationAttr
+SSM_REMOTE_PROJECT_ID=projNoEscalationAttr
+' )
+EOF
+HUMAN_ESCALATION_LOGIN="stale-ambient-maintainer" DEV_BOT_LOGIN="stale-ambient-bot" \
+  DISPATCHER_CONF="$CONF" TICK_RECORD_FILE="$RECORD" \
+  bash "$SANDBOX/dispatcher-multi-tick.sh" >/dev/null 2>&1
+rc=$?
+assert_rc "TC-PAEM-132 rc=0 despite ambient HUMAN_ESCALATION_LOGIN/DEV_BOT_LOGIN" 0 "$rc"
+record=$(cat "$RECORD")
+assert_contains "TC-PAEM-132 ambient HUMAN_ESCALATION_LOGIN does NOT leak into omitting project" "HUMAN_ESCALATION_LOGIN=<unset>" "$record"
+assert_contains "TC-PAEM-132 ambient DEV_BOT_LOGIN does NOT leak into omitting project" "DEV_BOT_LOGIN=<unset>" "$record"
+assert_not_contains "TC-PAEM-132 stale ambient maintainer login absent from record" "stale-ambient-maintainer" "$record"
+assert_not_contains "TC-PAEM-132 stale ambient bot login absent from record" "stale-ambient-bot" "$record"
+
+# ---------------------------------------------------------------------------
+echo ""
 echo "=== Summary ==="
 echo "  PASS: $PASS"
 echo "  FAIL: $FAIL"
