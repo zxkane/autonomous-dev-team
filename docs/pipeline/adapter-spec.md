@@ -490,7 +490,10 @@ that shared pipe can make the recorder's own write get transient `EAGAIN`
 once the pipe buffer is momentarily full — bash's `printf` does not retry
 `EAGAIN` on its own. `_agent_progress_write_retry` (`lib-agent.sh`) closes
 this gap: both `printf` sites in the read loop go through it instead of a
-bare `printf`, retrying a failed `PIPE_BUF`-sized write slice for up to ~2s
+bare `printf`, slicing the record into `PIPE_BUF`-sized pieces and retrying
+a failed slice for up to ~2s of TOTAL budget shared across the WHOLE
+record (not reset per slice — a per-slice reset was a round-2 review finding
+that let a multi-slice record retry for multiples of the intended bound)
 before giving up. This does not weaken R3 — the byte-identical contract still
 holds for every write that lands within the retry budget (`tee` always
 drains, so `EAGAIN` here is transient by construction). A genuinely dead

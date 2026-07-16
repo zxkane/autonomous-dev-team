@@ -16,21 +16,25 @@
 #   - R4: the Claude stream-json migration does not break the three existing
 #     consumers of the final `{"type":"result",...}` log line.
 #
-# TC-LEASE-024..028 (issue #508): the recorder's shared-nonblocking-pipe
+# TC-LEASE-024..029 (issue #508): the recorder's shared-nonblocking-pipe
 # EAGAIN hazard — the wrapper's `exec > >(tee -a run.log)` stdout is the SAME
 # open file description the Claude CLI (Node.js) inherits as its stderr, and
 # Node's O_NONBLOCK flag on that shared pipe can make the recorder's own
 # printf fail transiently. Driven through a REAL O_NONBLOCK pipe via a
-# python3 fcntl helper with a stalling/never-draining/closed reader (skipped
-# if python3 is unavailable): byte-identical passthrough (checksum + line
-# count + the no-trailing-newline final line) under real EAGAIN pressure,
-# zero write-error diagnostics for the transient case, bounded-retry
-# exhaustion completing instead of hanging with exactly one diagnostic, the
-# zero-AGENT_PROGRESS_FILE fast path staying a byte-identical bare `cat`
-# under the same pressure, and (TC-LEASE-028, round-1 review finding) a
+# python3 fcntl helper with a stalling/never-draining/closed/slow-draining
+# reader (skipped if python3 is unavailable): byte-identical passthrough
+# (checksum + line count + the no-trailing-newline final line) under real
+# EAGAIN pressure, zero write-error diagnostics for the transient case,
+# bounded-retry exhaustion completing instead of hanging with exactly one
+# diagnostic, the zero-AGENT_PROGRESS_FILE fast path staying a byte-identical
+# bare `cat` under the same pressure, (TC-LEASE-028, round-1 review finding) a
 # genuinely dead reader (closed read end, real EPIPE) failing FAST instead
 # of misclassifying as retryable EAGAIN and burning the full per-record
-# retry budget.
+# retry budget, and (TC-LEASE-029, round-2 review finding [P2]) a reader that
+# drains just enough per slice to never trip any SINGLE slice's own retry
+# check — proving the retry budget is tracked once for the WHOLE record, not
+# reset on every 4096-byte slice (a per-slice reset let a large multi-slice
+# record retry far past the documented ~2s total).
 #
 # Strategy: source lib-agent.sh (+ lib-dispatch.sh / lib-metrics.sh where
 # needed) in sandboxed subshells with stub CLIs on PATH, mirroring
@@ -948,8 +952,162 @@ PYEOF
   fastpath_sha=$(_sha "$FASTPATH_OUT")
   assert_eq "TC-LEASE-027 fast path (AGENT_PROGRESS_FILE unset) stays byte-identical under the same pressure" \
     "$expected_sha" "$fastpath_sha"
+
+  # ---------------------------------------------------------------------
+  # TC-LEASE-029 (round-2 review finding [P2]): the retry budget must be
+  # tracked ONCE for the WHOLE record, not reset on every 4096-byte slice.
+  # A single large record spans multiple PIPE_BUF slices; a reader that
+  # drains on an interval comfortably UNDER any one slice's own ~2s budget
+  # (but takes several such drains to clear the whole record) would let a
+  # per-slice reset retry each slice fresh — multiplying the effective
+  # budget by the slice count instead of bounding the record as a whole.
+  # Proven two ways: (a) against the FIXED recorder (in-process, via
+  # AGENT_PROGRESS_WRITE_RETRY_BUDGET_SECONDS shrunk to make the assertion
+  # fast) the total wall-clock stays within one budget window regardless of
+  # slice count; (b) directly against the OLD per-slice-reset shape (a local
+  # copy of the pre-fix helper, exercised standalone — not sourced from
+  # lib-agent.sh, so this is a characterization test of the retired
+  # algorithm, not a second copy of the production code path) to show it
+  # would have taken multiples of the budget for the same input, so this
+  # test actually discriminates the fix from the bug rather than passing
+  # vacuously either way.
+  # ---------------------------------------------------------------------
+  TRICKLE_DRIVER="$TMPROOT/drive_trickle.py"
+  cat > "$TRICKLE_DRIVER" <<'PYEOF'
+# Sets the pipe's capacity down to exactly one PIPE_BUF (4096) via
+# F_SETPIPE_SZ so a single multi-slice record reliably spans several
+# retry-eligible slices, then drains on a fixed interval chosen to be well
+# under any one slice's own per-attempt retry budget but large enough that
+# clearing a multi-slice record takes several drains.
+#   drive_trickle.py <pipe_size> <drain_interval_s> <timeout_s> -- <cmd...>
+import os, sys, fcntl, time
+
+F_SETPIPE_SZ = 1031
+
+args = sys.argv[1:]
+sep = args.index('--')
+pipe_size = int(args[0])
+drain_interval = float(args[1])
+timeout_s = float(args[2])
+cmd = args[sep + 1:]
+
+r, w = os.pipe()
+fcntl.fcntl(w, F_SETPIPE_SZ, pipe_size)
+fl = fcntl.fcntl(w, fcntl.F_GETFL)
+fcntl.fcntl(w, fcntl.F_SETFL, fl | os.O_NONBLOCK)
+
+pid = os.fork()
+if pid == 0:
+    os.close(r)
+    os.dup2(w, 1)
+    os.close(w)
+    os.execvp(cmd[0], cmd)
+    os._exit(127)
+
+os.close(w)
+fl_r = fcntl.fcntl(r, fcntl.F_GETFL)
+fcntl.fcntl(r, fcntl.F_SETFL, fl_r | os.O_NONBLOCK)
+
+start = time.time()
+next_drain = start
+while True:
+    got_pid, status = os.waitpid(pid, os.WNOHANG)
+    if got_pid == pid:
+        print(f"{time.time() - start:.3f}")
+        sys.exit(0)
+    now = time.time()
+    if now - start > timeout_s:
+        os.kill(pid, 9)
+        os.waitpid(pid, 0)
+        print("HUNG")
+        sys.exit(1)
+    if now >= next_drain:
+        try:
+            os.read(r, pipe_size)
+        except BlockingIOError:
+            pass
+        next_drain = now + drain_interval
+    time.sleep(0.01)
+PYEOF
+
+  # A single JSON record spanning 7 PIPE_BUF (4096-byte) slices.
+  TRICKLE_FIXTURE="$TMPROOT/trickle-fixture.jsonl"
+  python3 -c "print('{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"' + 'x'*28000 + '\"}]}}')" \
+    > "$TRICKLE_FIXTURE"
+  TRICKLE_ERR="$TMPROOT/trickle-err.log"
+  TRICKLE_PROGRESS_DIR="$TMPROOT/trickle-pd"
+  rm -rf "$TRICKLE_PROGRESS_DIR"
+
+  # Shrink the per-record budget so the assertion below is fast and
+  # deterministic — 0.5s budget, drained every 0.3s (under the budget, so
+  # every individual attempt could plausibly succeed before ITS OWN
+  # multi-attempt loop times out) but ~7 drains needed to clear all 7
+  # slices: a per-slice reset would take ~7*0.5s=3.5s+; the whole-record
+  # budget must keep this under ~1.5s (generous margin over the 0.5s bound).
+  trickle_elapsed=$(env AGENT_PROGRESS_WRITE_RETRY_BUDGET_SECONDS=0.5 \
+    timeout 20 python3 "$TRICKLE_DRIVER" 4096 0.3 15 -- \
+    bash "$RECORDER_DRIVER" "$LIB" "$TRICKLE_FIXTURE" "$TRICKLE_PROGRESS_DIR/progress.json" json "$TRICKLE_ERR")
+  trickle_driver_rc=$?
+
+  assert_eq "TC-LEASE-029 trickle-drain driver completes without the test's own timeout firing" "0" "$trickle_driver_rc"
+  if [[ -n "$trickle_elapsed" ]] && awk -v e="$trickle_elapsed" 'BEGIN{exit !(e < 1.5)}'; then
+    ok "TC-LEASE-029 whole-record retry budget (${trickle_elapsed}s) is NOT multiplied per slice (stayed under 1.5s for a 7-slice record with a 0.5s budget)"
+  else
+    bad "TC-LEASE-029 whole-record retry budget took ${trickle_elapsed}s — a per-slice reset would multiply the budget by the slice count instead of bounding the whole record"
+  fi
+
+  # Characterization check (b) above: exercise the RETIRED per-slice-reset
+  # shape directly (not lib-agent.sh) to prove this harness actually tells
+  # the fixed and broken behavior apart, rather than both passing under
+  # this drain pattern by coincidence.
+  OLD_SHAPE_DRIVER="$TMPROOT/run_old_shape.sh"
+  cat > "$OLD_SHAPE_DRIVER" <<'SHEOF'
+#!/bin/bash
+# Byte-for-byte reproduction of the pre-fix per-slice attempts=0 reset
+# (round-1 shipped shape), isolated from lib-agent.sh so it can be run
+# standalone as a characterization fixture without resurrecting the bug in
+# production code. Uses the same fd-dup trick as the real helper (a bare
+# `1>&1` inside the command substitution would redirect the write into the
+# substitution's OWN capture pipe instead of the process's real stdout).
+set -uo pipefail
+LC_ALL=C
+FIXTURE="$1"
+data="$(cat "$FIXTURE")"
+total=${#data}
+off=0
+chunk=4096
+exec {write_fd}>&1
+while (( off < total )); do
+  take=$(( total - off < chunk ? total - off : chunk ))
+  piece="${data:off:take}"
+  attempts=0
+  while :; do
+    err=$(printf '%s' "$piece" 2>&1 1>&"$write_fd")
+    if [[ $? -eq 0 ]]; then
+      off=$(( off + take ))
+      break
+    fi
+    attempts=$(( attempts + 1 ))
+    if (( attempts >= 2 )); then
+      exit 1
+    fi
+    sleep 0.3
+  done
+done
+SHEOF
+  chmod +x "$OLD_SHAPE_DRIVER"
+
+  old_shape_elapsed=$(timeout 20 python3 "$TRICKLE_DRIVER" 4096 0.3 15 -- \
+    bash "$OLD_SHAPE_DRIVER" "$TRICKLE_FIXTURE")
+  old_shape_rc=$?
+  assert_eq "TC-LEASE-029 characterization: retired per-slice-reset driver completes without the test's own timeout firing" "0" "$old_shape_rc"
+  if [[ -n "$old_shape_elapsed" ]] && awk -v e="$old_shape_elapsed" 'BEGIN{exit !(e > 1.5)}'; then
+    ok "TC-LEASE-029 characterization: the retired per-slice-reset shape DOES take multiples of a single slice's budget (${old_shape_elapsed}s) — this harness discriminates fixed from broken"
+  else
+    bad "TC-LEASE-029 characterization: the retired per-slice-reset shape finished in ${old_shape_elapsed}s — expected it to exceed 1.5s, or this test cannot tell fixed from broken"
+  fi
 else
-  echo "  SKIP: TC-LEASE-024..028 require python3 (not found on PATH) — the fcntl-based nonblocking-pipe harness has no shell-only equivalent"
+  echo "  SKIP: TC-LEASE-024..029 require python3 (not found on PATH) — the fcntl-based nonblocking-pipe harness has no shell-only equivalent"
 fi
 
 # ---------------------------------------------------------------------------

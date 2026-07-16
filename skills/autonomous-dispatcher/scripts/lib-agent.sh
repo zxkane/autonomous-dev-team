@@ -1339,10 +1339,32 @@ _agent_progress_cleanup() {
 # NEVER re-sent, so no byte is ever duplicated. `LC_ALL=C` makes `${#s}` and
 # `${s:off:len}` operate on raw bytes (not multibyte characters), so a slice
 # boundary landing mid-UTF-8-codepoint still round-trips byte-for-byte.
+#
+# The retry BUDGET is tracked ONCE for the WHOLE record, not reset per slice
+# (round-1 review finding [P2]): a per-slice `attempts=0` reset let a
+# slowly-draining reader hand each 4096-byte slice of a large record its own
+# fresh ~2s allowance, so a record with N slices could retry for N*2s with no
+# overall bound — the exact "bounded total" the issue's fix contract requires.
+# The fix computes ONE deadline (via `_agent_progress_write_retry_now_seconds`
+# below) from AGENT_PROGRESS_WRITE_RETRY_BUDGET_SECONDS (default 2, overridable so
+# the regression test can force exhaustion in well under a second) BEFORE the
+# slice loop starts; every slice's retry loop checks elapsed time against that
+# SAME deadline, so the total time spent retrying across the entire record is
+# bounded to ~AGENT_PROGRESS_WRITE_RETRY_BUDGET_SECONDS regardless of how many
+# slices it took. `${EPOCHREALTIME:-}` (bash >=5.0, sub-second, this box's
+# shell) is preferred over `date` for a cheap per-attempt clock read inside a
+# tight retry loop; `date +%s.%N` is the portable fallback for older bash.
+_agent_progress_write_retry_now_seconds() {
+  if [[ -n "${EPOCHREALTIME:-}" ]]; then
+    printf '%s\n' "$EPOCHREALTIME"
+  else
+    date +%s.%N 2>/dev/null || date +%s
+  fi
+}
 _agent_progress_write_retry() {
   local LC_ALL=C
-  local data="$1" total wrote=0 off=0 chunk=4096 take piece attempts err
-  local write_fd
+  local data="$1" total wrote=0 off=0 chunk=4096 take piece err
+  local write_fd deadline now attempts=0
   total=${#data}
   [[ "$total" -eq 0 ]] && return 0
   # Duplicate the CURRENT fd 1 once so `printf`'s stderr can be captured via
@@ -1350,10 +1372,11 @@ _agent_progress_write_retry() {
   # substitution's own subshell — the write target is fd 1 at call time,
   # matching every other write site in this recorder.
   exec {write_fd}>&1
+  deadline=$(_agent_progress_write_retry_now_seconds)
+  deadline=$(awk -v n="$deadline" -v b="${AGENT_PROGRESS_WRITE_RETRY_BUDGET_SECONDS:-2}" 'BEGIN{printf "%.6f", n + b}')
   while (( off < total )); do
     take=$(( total - off < chunk ? total - off : chunk ))
     piece="${data:off:take}"
-    attempts=0
     while :; do
       err=$(printf '%s' "$piece" 2>&1 1>&"$write_fd")
       if [[ $? -eq 0 ]]; then
@@ -1370,12 +1393,14 @@ _agent_progress_write_retry() {
         return 1
       fi
       attempts=$(( attempts + 1 ))
-      # ~2s total budget per slice (40 * 0.05s), matches the issue's
-      # "bounded total (e.g. ~2s worth)" guidance — bounds a pathological
-      # stall in an otherwise-live (non-EPIPE) reader.
-      if (( attempts >= 40 )); then
+      # One deadline for the ENTIRE record (see comment above), not a
+      # per-slice reset — ~2s total budget by default (AGENT_PROGRESS_WRITE_
+      # RETRY_BUDGET_SECONDS), matching the issue's "bounded total (e.g.
+      # ~2s worth)" guidance regardless of how many slices the record took.
+      now=$(_agent_progress_write_retry_now_seconds)
+      if awk -v n="$now" -v d="$deadline" 'BEGIN{exit !(n >= d)}'; then
         printf 'lib-agent.sh: _agent_progress_recorder: dropping output record (%d of %d bytes written) after %d retries — write error: Resource temporarily unavailable\n' \
-          "$wrote" "$total" "$attempts" >&2 || true
+          "$wrote" "$total" "$attempts" >&2 || true  # best-effort diagnostic; a failed write to a full pipe must not itself abort the record-drop path
         exec {write_fd}>&-
         return 1
       fi
@@ -1428,7 +1453,7 @@ _agent_progress_recorder() {
     cat
     return 0
   fi
-  local line rc
+  local line rc out
   while :; do
     # `|| rc=$?` (not a bare `read`) so a non-zero `read` at EOF — the
     # expected way this loop learns "no trailing newline on the final
@@ -1444,15 +1469,17 @@ _agent_progress_recorder() {
       break
     fi
     if [[ $rc -eq 0 ]]; then
-      # `|| true`: a non-zero return here means retry-bound exhaustion (the
-      # record was dropped after the diagnostic below already fired) — never
-      # let that abort the whole read loop under a caller's `set -e`, the
-      # same rationale as the `read -r line || rc=$?` guard above.
-      _agent_progress_write_retry "$line
-" || true
+      out="$line
+"
     else
-      _agent_progress_write_retry "$line" || true
+      out="$line"
     fi
+    # `|| true`: a non-zero return here means retry-bound exhaustion (the
+    # record was dropped after the diagnostic inside _agent_progress_write_
+    # retry already fired) — never let that abort the whole read loop under
+    # a caller's `set -e`, the same rationale as the `read -r line || rc=$?`
+    # guard above.
+    _agent_progress_write_retry "$out" || true
     # A complete non-empty output record: under "line" framing every non-empty
     # line counts; under "json" framing only a line that is a COMPLETE JSON
     # object — validated with `jq -e .` so a truncated/mid-write record never

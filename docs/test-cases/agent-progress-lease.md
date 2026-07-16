@@ -160,9 +160,45 @@ fixture-driven; no real sleeps.
 **When** `_agent_progress_init` then `_agent_progress_cleanup` run
 **Then** both complete (rc=0, run-id/lease still written unlocked) instead of the caller aborting — proving the `_agent_progress_lock_acquire _lock_fd || true` guard at both call sites is load-bearing: a bare (unguarded) call trips `set -e` on the helper's documented "return 1 when locking is unavailable" contract and aborts the whole wrapper before the agent is ever launched, the opposite of the "best-effort, degrades to unlocked" promise TC-LEASE-022's fix was supposed to preserve.
 
+## TC-LEASE-024: byte-identical passthrough under real EAGAIN pressure (issue #508)
+
+**Given** the recorder's stdout is a real `O_NONBLOCK` pipe (via a python3 `fcntl` helper) whose reader stalls long enough to overflow the pipe buffer and force genuine `EAGAIN`, then drains slowly, and a fixture large enough (>64KB) to guarantee the stall forces at least one real `EAGAIN`
+**When** the fixture (including a final no-trailing-newline `{"type":"result",...}` record) is piped through `_agent_progress_recorder json`
+**Then** the recorder's output is byte-identical to the input (checksum AND line count match, including the final record) and no `write error` diagnostic reaches stderr — `tee`/the test reader always drains, so `EAGAIN` here is transient by construction.
+
+## TC-LEASE-025: no-trailing-newline final-line contract holds under the retry path
+
+**Given** the TC-LEASE-024 fixture/harness (final record has no trailing newline)
+**When** the recorder runs under the same EAGAIN pressure
+**Then** the output's final byte is identical to the fixture's final byte — the retry path never appends a synthesized trailing newline.
+
+## TC-LEASE-026: bounded-retry exhaustion does not hang on a never-draining reader
+
+**Given** a reader that fills the pipe once and never reads again (still open, distinct from a closed/dead reader), and a single-record fixture large enough on its own to force this exact record into the retry-exhaustion path
+**When** the recorder attempts to write it
+**Then** the recorder process still exits within a bounded wall-clock window (not a hang) and emits EXACTLY ONE best-effort stderr diagnostic naming "Resource temporarily unavailable" for the dropped record — never a loud repeating loop of the same error.
+
+## TC-LEASE-027: the zero-`AGENT_PROGRESS_FILE` fast path stays a byte-identical bare `cat`
+
+**Given** `AGENT_PROGRESS_FILE` is unset (the review side's invocation shape)
+**When** the recorder runs under the same EAGAIN pressure as TC-LEASE-024
+**Then** output is still byte-identical to the input — the retry helper is never invoked on this path; it stays the original unconditional `cat`.
+
+## TC-LEASE-028: a genuinely dead reader (EPIPE) fails fast, not the full retry budget (round-1 regression)
+
+**Given** a reader whose read end is closed before the recorder writes anything (a real `EPIPE`, distinct from TC-LEASE-026's open-but-never-draining reader) and a multi-record fixture where every record is individually undeliverable
+**When** the recorder attempts to write each record
+**Then** the whole run completes well under `record_count * per-record retry budget` (fails fast per record instead of burning the ~2s budget on each), and the stderr diagnostic names "Broken pipe" — proving bash `printf`'s own non-SIGPIPE-death `EPIPE` message is classified as terminal, not misclassified as retryable `EAGAIN`.
+
+## TC-LEASE-029: the retry budget is tracked once per RECORD, not reset per slice (round-2 review finding [P2])
+
+**Given** a single JSON record large enough to span several `PIPE_BUF` (4096-byte) write slices, and a reader that drains on a fixed interval chosen to be comfortably under any ONE slice's own retry allowance but that takes several such drains to clear the whole record
+**When** the recorder writes the record
+**Then** total wall-clock time stays within one whole-record retry budget (`AGENT_PROGRESS_WRITE_RETRY_BUDGET_SECONDS`, default ~2s) regardless of how many slices the record took — proving the deadline is computed ONCE before the slice loop starts and shared across every slice's retry loop, not reset to a fresh allowance every time a new slice begins (the round-1 shipped shape's `attempts=0` reset inside the slice loop, which would let an N-slice record retry for up to N times the intended per-record bound). A characterization run of the retired per-slice-reset shape (isolated from `lib-agent.sh`, exercised standalone) against the identical drain pattern confirms it DOES exceed the bound for the same input, so this test is proven to discriminate the fix from the bug rather than passing either way.
+
 ## Acceptance mapping
 
 - R1 → TC-LEASE-001, 004-010, 018, 022, 023
 - R2 → TC-LEASE-001, 003, 018
-- R3 → TC-LEASE-011, 016, 017, 019, 020, 020b, 021
+- R3 → TC-LEASE-011, 016, 017, 019, 020, 020b, 021, 024, 025, 026, 027, 028, 029
 - R4 → TC-LEASE-011, 012, 013, 014, 015
