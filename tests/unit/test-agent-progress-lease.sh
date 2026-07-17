@@ -16,35 +16,42 @@
 #   - R4: the Claude stream-json migration does not break the three existing
 #     consumers of the final `{"type":"result",...}` log line.
 #
-# TC-LEASE-024..032 (issue #508): the recorder's shared-nonblocking-pipe
-# EAGAIN hazard — the wrapper's `exec > >(tee -a run.log)` stdout is the SAME
-# open file description the Claude CLI (Node.js) inherits as its stderr, and
-# Node's O_NONBLOCK flag on that shared pipe can make the recorder's own
-# printf fail transiently. Driven through a REAL O_NONBLOCK pipe via a
-# python3 fcntl helper with a stalling/never-draining/closed/slow-draining
-# reader (skipped if python3 is unavailable): byte-identical passthrough
-# (checksum + line count + the no-trailing-newline final line) under real
-# EAGAIN pressure, zero write-error diagnostics for the transient case,
-# bounded-retry exhaustion completing instead of hanging with exactly one
-# diagnostic, the zero-AGENT_PROGRESS_FILE fast path staying a byte-identical
-# bare `cat` under the same pressure, (TC-LEASE-028, round-1 review finding) a
-# genuinely dead reader (closed read end, real EPIPE) failing FAST instead
-# of misclassifying as retryable EAGAIN and burning the full per-record
-# retry budget, (TC-LEASE-029, round-2 review finding [P2]) a reader that
-# drains just enough per slice to never trip any SINGLE slice's own retry
-# check — proving the retry budget is tracked once for the WHOLE record, not
-# reset on every 4096-byte slice (a per-slice reset let a large multi-slice
-# record retry far past the documented ~2s total), (TC-LEASE-030, round-3
-# review finding) a missing/broken `awk` on PATH failing safe rather than
-# reading its own non-execution as "not yet reached", (TC-LEASE-031,
+# TC-LEASE-024..031, 035..037 (issue #508): the recorder's shared-
+# nonblocking-pipe EAGAIN hazard — the wrapper's `exec > >(tee -a run.log)`
+# stdout is the SAME open file description the Claude CLI (Node.js) inherits
+# as its stderr, and Node's O_NONBLOCK flag on that shared pipe can make the
+# recorder's own printf fail transiently. Driven through a REAL O_NONBLOCK
+# pipe via a python3 fcntl helper with a stalling/never-draining/closed/
+# slow-draining reader (skipped if python3 is unavailable): byte-identical
+# passthrough (checksum + line count + the no-trailing-newline final line)
+# under real EAGAIN pressure, zero write-error diagnostics for the transient
+# case, bounded-retry exhaustion completing instead of hanging with exactly
+# one diagnostic, the zero-AGENT_PROGRESS_FILE fast path staying a
+# byte-identical bare `cat` under the same pressure, (TC-LEASE-028, round-1
+# review finding) a genuinely dead reader (closed read end, real EPIPE)
+# failing FAST instead of misclassifying as retryable EAGAIN and burning the
+# full per-record retry budget, (TC-LEASE-029, round-2 review finding [P2])
+# a reader that drains just enough per slice to never trip any SINGLE
+# slice's own retry check — proving the retry budget is tracked once for
+# the WHOLE record, not reset per slice (a per-slice reset let a large
+# multi-slice record retry far past the documented ~2s total), (TC-LEASE-030,
+# round-3 review finding) a missing/broken `awk` on PATH failing safe rather
+# than reading its own non-execution as "not yet reached", (TC-LEASE-031,
 # round-4 review finding) a bash with no EPOCHREALTIME AND a missing/broken
 # `date` fallback — no usable clock at all — also failing safe, distinct
 # from TC-LEASE-030 because here `awk` runs fine and exits normally on an
-# empty clock reading silently coerced to 0, and (TC-LEASE-032, round-9
-# review finding) a clock that steps backward (or freezes) after the retry
-# deadline was computed also failing safe via a clock-independent attempt
-# ceiling, distinct from TC-LEASE-031 because every reading here is a
-# perfectly valid, well-formed number that simply never reaches the deadline.
+# empty clock reading silently coerced to 0, (TC-LEASE-035, round-9 review
+# finding) a clock that steps backward (or freezes) after the retry deadline
+# was computed also failing safe via a clock-independent attempt ceiling,
+# distinct from TC-LEASE-031 because every reading here is a perfectly
+# valid, well-formed number that simply never reaches the deadline,
+# (TC-LEASE-036, round-10 review finding [P2]) a BSD/macOS-shaped `date`
+# (exit 0, non-numeric `%N` output) does not misclassify a healthy clock as
+# unavailable, and (TC-LEASE-037, round-10 review finding [P2]) the write
+# slice size never exceeds the portable 512-byte PIPE_BUF floor. Renumbered
+# from a first-draft 032/033/034 that collided with issue #510's own
+# already-merged fast-path tests of the same numbers (see TC-LEASE-032..034
+# below, a different code path entirely) once this PR rebased onto main.
 #
 # Strategy: source lib-agent.sh (+ lib-dispatch.sh / lib-metrics.sh where
 # needed) in sandboxed subshells with stub CLIs on PATH, mirroring
@@ -977,7 +984,7 @@ SHEOF
     "clock unavailable" "$(cat "$NOCLOCK_ERR" 2>/dev/null)"
 
   # ---------------------------------------------------------------------
-  # TC-LEASE-032 (round-9 review finding): a realtime clock that goes
+  # TC-LEASE-035 (round-9 review finding): a realtime clock that goes
   # BACKWARD (or simply never advances, e.g. an NTP step) after `deadline`
   # was computed must still bound the retry loop. Unlike TC-LEASE-031 (no
   # clock at all, caught by `_agent_progress_write_retry_clock_ok`), every
@@ -1036,15 +1043,15 @@ SHEOF
   nojump_driver_rc=$?
   rm -rf "$NOJUMP_BIN"
 
-  assert_eq "TC-LEASE-032 recorder completes within the wall-clock bound when the clock never advances past deadline (proves no hang)" \
+  assert_eq "TC-LEASE-035 recorder completes within the wall-clock bound when the clock never advances past deadline (proves no hang)" \
     "0" "$nojump_driver_rc"
-  assert_contains "TC-LEASE-032 recorder process actually exited (not killed by the test's own timeout)" \
+  assert_contains "TC-LEASE-035 recorder process actually exited (not killed by the test's own timeout)" \
     "EXITED" "$nojump_out"
-  assert_contains "TC-LEASE-032 diagnostic reports the generic exhaustion reason (a valid, well-formed clock reading — not a clock-unavailable case)" \
+  assert_contains "TC-LEASE-035 diagnostic reports the generic exhaustion reason (a valid, well-formed clock reading — not a clock-unavailable case)" \
     "Resource temporarily unavailable" "$(cat "$NOJUMP_ERR" 2>/dev/null)"
 
   # ---------------------------------------------------------------------
-  # TC-LEASE-033 (round-10 review finding [P2]): BSD/macOS `date` does not
+  # TC-LEASE-036 (round-10 review finding [P2]): BSD/macOS `date` does not
   # support `%N` but does NOT fail on it either — it exits 0 and echoes the
   # literal leftover character (`%` is consumed as the format-spec sigil, so
   # only `N` remains) appended after the seconds, e.g. "1700000000.N". The
@@ -1115,13 +1122,13 @@ SHEOF
 
   bsddate_sha=$(_sha "$EAGAIN_FIXTURE")
   bsddate_out_sha=$(_sha "$BSDDATE_OUT")
-  assert_eq "TC-LEASE-033 recorder output is byte-identical with a BSD-shaped (%N-unsupported, exit-0) date stub" \
+  assert_eq "TC-LEASE-036 recorder output is byte-identical with a BSD-shaped (%N-unsupported, exit-0) date stub" \
     "$bsddate_sha" "$bsddate_out_sha"
 
   if grep -q "clock unavailable" "$BSDDATE_ERR" 2>/dev/null; then
-    bad "TC-LEASE-033 BSD-shaped date's non-numeric %N output was misclassified as clock unavailable"
+    bad "TC-LEASE-036 BSD-shaped date's non-numeric %N output was misclassified as clock unavailable"
   else
-    ok "TC-LEASE-033 BSD-shaped date's non-numeric %N output does NOT misclassify a healthy clock as unavailable"
+    ok "TC-LEASE-036 BSD-shaped date's non-numeric %N output does NOT misclassify a healthy clock as unavailable"
   fi
 
   # ---------------------------------------------------------------------
@@ -1378,7 +1385,7 @@ SHEOF
   fi
 
   # ---------------------------------------------------------------------
-  # TC-LEASE-034 (round-10 review finding [P2]): the write slice size must
+  # TC-LEASE-037 (round-10 review finding [P2]): the write slice size must
   # not exceed the POSIX PIPE_BUF floor (512 bytes). Linux's actual PIPE_BUF
   # is 4096, but POSIX only GUARANTEES {_POSIX_PIPE_BUF} = 512 — macOS/BSD's
   # is genuinely 512. A hard-coded 4096-byte slice size is only atomic on
@@ -1411,15 +1418,15 @@ SHEOF
       > /dev/null
     max_write=$(grep -h -oP 'write\(1, .*, \K[0-9]+' "$SLICE_STRACE_PREFIX".* 2>/dev/null | sort -n | tail -1)
     if [[ -n "$max_write" ]] && (( max_write <= 512 )); then
-      ok "TC-LEASE-034 recorder's own writes to fd 1 never exceed the portable 512-byte PIPE_BUF floor (max observed: ${max_write})"
+      ok "TC-LEASE-037 recorder's own writes to fd 1 never exceed the portable 512-byte PIPE_BUF floor (max observed: ${max_write})"
     else
-      bad "TC-LEASE-034 recorder wrote ${max_write:-no writes captured}-byte chunk(s) to fd 1 — exceeds the portable 512-byte PIPE_BUF floor, unsafe on platforms where PIPE_BUF is genuinely 512"
+      bad "TC-LEASE-037 recorder wrote ${max_write:-no writes captured}-byte chunk(s) to fd 1 — exceeds the portable 512-byte PIPE_BUF floor, unsafe on platforms where PIPE_BUF is genuinely 512"
     fi
   else
-    echo "  SKIP: TC-LEASE-034 requires strace (not found on PATH) — no portable way to observe raw write(2) sizes from bash alone"
+    echo "  SKIP: TC-LEASE-037 requires strace (not found on PATH) — no portable way to observe raw write(2) sizes from bash alone"
   fi
 else
-  echo "  SKIP: TC-LEASE-024..029,033,034 require python3 (not found on PATH) — the fcntl-based nonblocking-pipe harness has no shell-only equivalent"
+  echo "  SKIP: TC-LEASE-024..029,035..037 require python3 (not found on PATH) — the fcntl-based nonblocking-pipe harness has no shell-only equivalent"
 fi
 
 # ---------------------------------------------------------------------------
@@ -1939,6 +1946,218 @@ rm -rf "$NOFLOCK_BIN"
 assert_eq "TC-LEASE-023 init+cleanup survive set -e with flock unavailable (rc=0, not aborted)" "0" "$noflock_rc"
 assert_contains "TC-LEASE-023 _agent_progress_init completes under set -e without flock" "INIT_SURVIVED" "$noflock_out"
 assert_contains "TC-LEASE-023 _agent_progress_cleanup completes under set -e without flock" "CLEANUP_SURVIVED" "$noflock_out"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-LEASE-032 / TC-LEASE-033: review-side (zero-AGENT_PROGRESS_FILE) fast path EAGAIN retry (issue #510) ==="
+# ---------------------------------------------------------------------------
+# Root cause: the wrapper's stdout is `exec > >(tee -a run.log) 2>&1`, the SAME
+# open file description the CLI child (Node.js, for Claude) inherits as its own
+# stdio. Node sets O_NONBLOCK on that shared pipe, so once the CLI's own writes
+# fill the pipe buffer, the review-side fast path's own write can get EAGAIN.
+# The fast path previously ran a bare external `cat` — bash cannot intercept or
+# retry a syscall made inside another process's binary — and GNU coreutils
+# `cat` (this project's CI runner) does not retry EAGAIN, silently dropping
+# data past the pipe buffer boundary. These tests drive the REAL
+# _agent_progress_recorder fast path (AGENT_PROGRESS_FILE unset) through a REAL
+# O_NONBLOCK pipe via a self-contained python3 fcntl driver (defined below,
+# the same harness shape issue #508's still-unmerged dev-side tests use;
+# skipped, not failed, if python3 is unavailable).
+_sha_510() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    shasum -a 256 "$1" | awk '{print $1}'
+  fi
+}
+
+HAVE_PY3_510=0
+command -v python3 >/dev/null 2>&1 && HAVE_PY3_510=1
+
+if [[ "$HAVE_PY3_510" -eq 1 ]]; then
+  PY_DRIVER_510="$TMPROOT/drive_recorder_510.py"
+  cat > "$PY_DRIVER_510" <<'PYEOF'
+# Same harness shape as issue #508's dev-side EAGAIN tests: stalls WITHOUT
+# reading for <stall_seconds> so the pipe buffer fills and the child's own
+# writes hit real EAGAIN, then drains slowly in small chunks until stdout
+# closes.
+#   drive_recorder_510.py <out_file> <stall_seconds> -- <cmd...>
+import os, sys, fcntl, time
+
+args = sys.argv[1:]
+sep = args.index('--')
+out_path = args[0]
+stall_seconds = float(args[1])
+cmd = args[sep + 1:]
+
+r, w = os.pipe()
+fl = fcntl.fcntl(w, fcntl.F_GETFL)
+fcntl.fcntl(w, fcntl.F_SETFL, fl | os.O_NONBLOCK)
+
+pid = os.fork()
+if pid == 0:
+    os.close(r)
+    os.dup2(w, 1)
+    os.close(w)
+    os.execvp(cmd[0], cmd)
+    os._exit(127)
+
+os.close(w)
+fl_r = fcntl.fcntl(r, fcntl.F_GETFL)
+fcntl.fcntl(r, fcntl.F_SETFL, fl_r | os.O_NONBLOCK)
+
+start = time.time()
+with open(out_path, 'wb') as out:
+    while time.time() - start < stall_seconds:
+        time.sleep(0.01)
+    while True:
+        try:
+            chunk = os.read(r, 128)
+        except BlockingIOError:
+            time.sleep(0.02)
+            continue
+        if not chunk:
+            break
+        out.write(chunk)
+        out.flush()
+        time.sleep(0.01)
+
+os.close(r)
+_, status = os.waitpid(pid, 0)
+sys.exit(os.waitstatus_to_exitcode(status))
+PYEOF
+
+  # A fixture large enough (>64KB, the typical pipe capacity) to guarantee the
+  # stall phase forces real EAGAIN.
+  FASTPATH_EAGAIN_FIXTURE="$TMPROOT/fastpath-eagain-fixture.jsonl"
+  : > "$FASTPATH_EAGAIN_FIXTURE"
+  for i in $(seq 1 500); do
+    printf '{"type":"assistant","message":{"content":[{"type":"text","text":"chunk-%d-%s"}]}}\n' \
+      "$i" "$(printf 'x%.0s' $(seq 1 200))" >> "$FASTPATH_EAGAIN_FIXTURE"
+  done
+  # Final record has NO trailing newline — same no-trailing-newline contract
+  # TC-LEASE-011b/025 pin, now on the review-side fast path under pressure.
+  printf '{"type":"result"}' >> "$FASTPATH_EAGAIN_FIXTURE"
+
+  FASTPATH_RECORDER_DRIVER="$TMPROOT/run_fastpath_recorder.sh"
+  cat > "$FASTPATH_RECORDER_DRIVER" <<'SHEOF'
+#!/bin/bash
+# This script's own stdout must remain whatever the caller wired it to (the
+# pressured pipe from drive_recorder_510.py) — never redirected to a file here.
+set -uo pipefail
+LIB="$1" FIXTURE="$2" FRAMING="$3" ERR_LOG="$4"
+env -u AUTONOMOUS_CONF_DIR \
+  AUTONOMOUS_PID_DIR="$(dirname "$FIXTURE")" \
+  PROJECT_ID="testproj" \
+  PROJECT_DIR="$(dirname "$FIXTURE")" \
+  AGENT_CMD=claude \
+  bash -c '
+    unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE AGENT_PROGRESS_FILE
+    source "'"$LIB"'"
+    cat "'"$FIXTURE"'" | _agent_progress_recorder "'"$FRAMING"'"
+  ' 2>"$ERR_LOG"
+SHEOF
+  chmod +x "$FASTPATH_RECORDER_DRIVER"
+
+  # ---------------------------------------------------------------------
+  # TC-LEASE-032: byte-identical passthrough under EAGAIN pressure on the
+  # zero-AGENT_PROGRESS_FILE fast path — record count AND checksum match,
+  # including the final no-trailing-newline record. Red before the fix
+  # (fails against the old bare `cat` on a GNU-coreutils-backed `cat`),
+  # green after.
+  # ---------------------------------------------------------------------
+  FASTPATH_EAGAIN_OUT="$TMPROOT/fastpath-eagain-out.jsonl"
+  FASTPATH_EAGAIN_ERR="$TMPROOT/fastpath-eagain-err.log"
+  # Stall duration: well under the retry helper's own ~2s per-record retry
+  # budget, long enough to overflow the 64KB pipe and force genuine EAGAIN.
+  python3 "$PY_DRIVER_510" "$FASTPATH_EAGAIN_OUT" 1.0 -- \
+    bash "$FASTPATH_RECORDER_DRIVER" "$LIB" "$FASTPATH_EAGAIN_FIXTURE" json "$FASTPATH_EAGAIN_ERR" \
+    >/dev/null 2>&1
+
+  fastpath_expected_sha=$(_sha_510 "$FASTPATH_EAGAIN_FIXTURE")
+  fastpath_actual_sha=$(_sha_510 "$FASTPATH_EAGAIN_OUT")
+  assert_eq "TC-LEASE-032 review-side fast path output is byte-identical (checksum) under EAGAIN pressure" \
+    "$fastpath_expected_sha" "$fastpath_actual_sha"
+
+  fastpath_expected_lines=$(wc -l < "$FASTPATH_EAGAIN_FIXTURE")
+  fastpath_actual_lines=$(wc -l < "$FASTPATH_EAGAIN_OUT")
+  assert_eq "TC-LEASE-032 review-side fast path line count matches fixture under EAGAIN pressure" \
+    "$fastpath_expected_lines" "$fastpath_actual_lines"
+
+  if grep -q '"type":"result"' "$FASTPATH_EAGAIN_OUT" 2>/dev/null; then
+    ok "TC-LEASE-032 final {\"type\":\"result\"} record survives EAGAIN pressure on the fast path"
+  else
+    bad "TC-LEASE-032 final {\"type\":\"result\"} record was dropped under EAGAIN pressure on the fast path"
+  fi
+
+  if grep -q "write error" "$FASTPATH_EAGAIN_ERR" 2>/dev/null; then
+    bad "TC-LEASE-032 no write-error diagnostic reaches stderr under transient EAGAIN (reader always drains)"
+  else
+    ok "TC-LEASE-032 no write-error diagnostic reaches stderr under transient EAGAIN (reader always drains)"
+  fi
+
+  # ---------------------------------------------------------------------
+  # TC-LEASE-033: the fast path stays byte-identical under NORMAL
+  # (non-adversarial) conditions too — no regression to the happy path this
+  # fix must preserve.
+  # ---------------------------------------------------------------------
+  FASTPATH_NORMAL_OUT="$TMPROOT/fastpath-normal-out.jsonl"
+  bash -c '
+    unset AGENT_PROGRESS_FILE
+    source "'"$LIB"'"
+    cat "'"$FASTPATH_EAGAIN_FIXTURE"'" | _agent_progress_recorder json
+  ' >"$FASTPATH_NORMAL_OUT" 2>/dev/null
+
+  fastpath_normal_sha=$(_sha_510 "$FASTPATH_NORMAL_OUT")
+  assert_eq "TC-LEASE-033 fast path (AGENT_PROGRESS_FILE unset) stays byte-identical under normal (non-adversarial) conditions" \
+    "$fastpath_expected_sha" "$fastpath_normal_sha"
+else
+  echo "  SKIP: TC-LEASE-032/033 (python3 not available)"
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-LEASE-034: closed-reader SIGPIPE classified as terminal, not retried as EAGAIN (issue #510 round-1 review) ==="
+# ---------------------------------------------------------------------------
+# Drives the REAL _agent_progress_recorder_fastpath_write against a reader
+# that has ALREADY EXITED (a genuinely dead reader, not a merely-stalled
+# one) — the SIGPIPE case the round-1 review flagged: printf's command
+# substitution is killed outright by an un-ignored SIGPIPE (exit 141, EMPTY
+# captured stderr) rather than catching the error in-process and printing
+# "write error: Broken pipe" itself. Before the fix, the bare exit-code
+# check only compared against 0 and then string-matched "Broken pipe" in
+# the (empty) captured err, so a 141 fell through every time to the EAGAIN
+# retry branch and burned the whole ~2s budget against a reader that could
+# never drain. Bounded via `timeout` so a regression hangs the test run
+# instead of the whole suite.
+CLOSED_READER_ERR="$TMPROOT/closed-reader-err.log"
+closed_reader_start=$(date +%s.%N 2>/dev/null || date +%s)
+closed_reader_out=$(
+  timeout 10 bash -c '
+    set -uo pipefail
+    source "'"$LIB"'"
+    exec {write_fd}> >(exit 0)
+    sleep 0.3
+    _agent_progress_recorder_fastpath_write "this record is long enough to force a real write attempt against the closed pipe end" 1>&"$write_fd"
+    echo "rc=$?"
+  ' 2>"$CLOSED_READER_ERR"
+)
+closed_reader_end=$(date +%s.%N 2>/dev/null || date +%s)
+closed_reader_elapsed=$(awk -v s="$closed_reader_start" -v e="$closed_reader_end" 'BEGIN{d=e-s; if (d<0) d=0; print d}' 2>/dev/null || echo 0)
+
+assert_contains "TC-LEASE-034 write helper returns non-zero (record dropped) against a closed reader" "rc=1" "$closed_reader_out"
+
+# 1.5s is comfortably under the ~2s EAGAIN retry budget: a regression that
+# falls through to the retry branch burns the full budget (>=2s); the fix
+# drops within milliseconds of the single failed write attempt.
+closed_reader_fast=$(awk -v d="$closed_reader_elapsed" 'BEGIN{exit !(d < 1.5)}'; echo $?)
+if [[ "$closed_reader_fast" -eq 0 ]]; then
+  ok "TC-LEASE-034 dead-reader write drops immediately (${closed_reader_elapsed}s), not after burning the EAGAIN retry budget"
+else
+  bad "TC-LEASE-034 dead-reader write took ${closed_reader_elapsed}s — fell through to the EAGAIN retry budget instead of dropping immediately"
+fi
+
+assert_contains "TC-LEASE-034 dead-reader drop is diagnosed as Broken pipe on stderr" "Broken pipe" "$(cat "$CLOSED_READER_ERR" 2>/dev/null)"
 
 echo ""
 echo "=== Summary ==="
