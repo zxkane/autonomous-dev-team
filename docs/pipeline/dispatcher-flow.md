@@ -153,25 +153,36 @@ the pre-#495 blast was benign; on GitLab, `REPO_OWNER` is the project's
 stall. Three mention-target classes now apply, split by whether the comment
 is genuinely PR-scoped:
 
-1. **PR-scoped stall/escalation reports** (a PR is normally already resolved
-   by the time these fire — Step 4's completed-session router
+1. **PR/issue-scoped stall/escalation reports** (a PR is normally already
+   resolved by the time these fire — Step 4's completed-session router
    `handle_completed_session_routing`, the `_same_head_verdict_aware_recovery`
    helper, and the [INV-105] convergence circuit-breaker report) call the
-   shared resolver
-   `resolve_pr_author_mention <PR_NUMBER>`
-   (`lib-review-resolve-author.sh`, sourced by both `lib-dispatch.sh` and
-   `autonomous-review.sh` so the dispatcher and the review wrapper resolve
-   the SAME target identically). The resolver reads the PR's author via
-   `chp_pr_view <pr> author` (provider-spec.md §3.2.1's pr_view-only 15th
-   vocabulary member) and mentions that human — **unless** the author is a
-   bot: an autonomous PR's author is normally the dev-agent bot itself
+   COMPOSED chain
+   `resolve_escalation_mention <ISSUE_NUMBER> <PR_NUMBER>`
+   ([INV-138], `lib-review-resolve-author.sh`, sourced by both
+   `lib-dispatch.sh` and `autonomous-review.sh` so the dispatcher and the
+   review wrapper resolve the SAME target identically). The chain tries the
+   **ISSUE author first** (the raw `issue_mention_login` read over the
+   `itp_read_task ISSUE author` seam, [INV-134] — the pipeline is
+   issue-driven, so the issue author is the human owner of the work item),
+   then the **PR author** (`resolve_pr_author_mention`, reading
+   `chp_pr_view <pr> author`, provider-spec.md §3.2.1's pr_view-only 15th
+   vocabulary member), then the operator target. EVERY candidate — issue
+   author included (a dispatcher-filed follow-up issue's author IS a bot) —
+   passes the same bot/malformed-token validation — **unless** the author is
+   a bot: an autonomous PR's author is normally the dev-agent bot itself
    (`app/…` on GitHub, a `project_N_bot_…`/`group_N_bot_…` service account on
    GitLab, the wrapper's own resolved `BOT_LOGIN`, or the operator-configured
    `DEV_BOT_LOGIN`), so mentioning it would notify nobody. On any bot author,
-   null/empty author, non-numeric PR arg, or `chp_pr_view` failure, the
-   resolver falls back to `@${HUMAN_ESCALATION_LOGIN:-$REPO_OWNER}`. The
-   resolver ALWAYS exits 0 and emits exactly one `@<token>` — it never aborts
-   a `set -euo pipefail` caller. **Malformed `.author` shape hardening (#495
+   null/empty author, non-numeric arg, or provider-read failure, the chain
+   advances to its next candidate, terminating in `_rpam_fallback`'s
+   THREE-STATE `HUMAN_ESCALATION_LOGIN` semantics ([INV-138]): **unset** →
+   `@REPO_OWNER` on github / NO mention on a non-github provider (no group
+   blast); **set non-empty** → that login; **set EMPTY** → MUTE (the
+   operator explicitly opted out — the comment posts un-mentioned). Every
+   entry point ALWAYS exits 0 and emits AT MOST one `@<token>` (possibly
+   empty under mute/the gitlab default) — it never aborts a
+   `set -euo pipefail` caller. **Malformed `.author` shape hardening (#495
    review round 3, extended round 5):** the resolver only accepts a
    single-token JSON *string* author; a non-string shape (e.g. a stray
    `{"login":"…"}` object surviving a provider-leaf regression) or a string

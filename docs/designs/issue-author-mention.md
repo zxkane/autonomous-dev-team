@@ -1,4 +1,19 @@
-# Design: @-mention the issue author, not `REPO_OWNER` (INV-134)
+# Design: @-mention the issue author, not `REPO_OWNER` — composed with #495's resolver chain (INV-138)
+
+> **Integration note (2026-07-17)**: this design originally predated PR #499
+> (issue #495), which independently built the resolver/bot-detection/
+> `HUMAN_ESCALATION_LOGIN` infrastructure keyed on the PR author. The two are
+> complementary halves of the same problem: the PR author on this pipeline is
+> almost always the dev-agent BOT (so #495's resolver nearly always fell
+> through to its fallback), while the issue author is almost always a human —
+> but #492's original helper lacked bot detection (a dispatcher-filed
+> follow-up issue's author IS a bot). The merged design keeps this doc's
+> provider-leaf work (`itp_read_task` `author` field + the raw
+> `issue_mention_login` read) as the PRIMARY signal of a composed chain in
+> `lib-review-resolve-author.sh::resolve_escalation_mention`:
+> issue author (bot-checked) → PR author (bot-checked) → three-state
+> `HUMAN_ESCALATION_LOGIN` (unset=provider default / set=login / set-EMPTY=
+> MUTE) → `@REPO_OWNER` on github, no-mention on gitlab. See [INV-138].
 
 ## Problem
 

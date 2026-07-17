@@ -158,7 +158,7 @@ out="$(_mention_in_env gitlab gl-filer)"
 assert_eq "helper: gitlab + author present → author login" "gl-filer" "$out"
 
 out="$(_mention_in_env github "")"
-assert_eq "helper: github + author absent → REPO_OWNER fallback" "zxkane" "$out"
+assert_eq "helper: github + author absent → EMPTY (fallback policy lives in resolve_escalation_mention, INV-138)" "" "$out"
 
 out="$(_mention_in_env gitlab "")"
 assert_eq "helper: gitlab + author absent → EMPTY (no group ping)" "" "$out"
@@ -172,7 +172,7 @@ out="$(env -u AUTONOMOUS_PROVIDERS_DIR ISSUE_PROVIDER=github \
     itp_read_task() { echo "boom" >&2; return 1; }
     issue_mention_login 42
   ')"
-assert_eq "helper: github + read_task failure → REPO_OWNER fallback (no abort)" "zxkane" "$out"
+assert_eq "helper: github + read_task failure → EMPTY, no abort (fallback policy lives in resolve_escalation_mention, INV-138)" "" "$out"
 
 out="$(env -u AUTONOMOUS_PROVIDERS_DIR ISSUE_PROVIDER=gitlab \
         REPO="$REPO" REPO_OWNER="$REPO_OWNER" PROJECT_ID="$PROJECT_ID" \

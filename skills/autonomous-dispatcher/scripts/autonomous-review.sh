@@ -1984,7 +1984,7 @@ ${_gf_envelope}
 **To resume: fix per the checklist above, then push a new commit and REMOVE
 the \`stalled\` label (the \`autonomous\` label is retained; removal re-arms
 the pipeline).**
-$(resolve_pr_author_mention "$PR_NUMBER")
+$(resolve_escalation_mention "$ISSUE_NUMBER" "$PR_NUMBER")
 GATEBREAKREPORT
 )" 2>/dev/null || true
       exit 0
@@ -4929,7 +4929,7 @@ for the next finding without the review converging.
 either fix the remaining P0/P1 issue(s) yourself or push a targeted commit,
 and REMOVE the \`stalled\` label (the \`autonomous\` label is retained;
 removal re-arms the pipeline).
-$(resolve_pr_author_mention "$PR_NUMBER")
+$(resolve_escalation_mention "$ISSUE_NUMBER" "$PR_NUMBER")
 ROUNDCAPREPORT
 )" 2>/dev/null || true
         log "Issue #${ISSUE_NUMBER} moved to stalled (INV-127 review-round-cap breaker)."

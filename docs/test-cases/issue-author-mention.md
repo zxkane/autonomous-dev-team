@@ -1,4 +1,11 @@
-# Test cases: issue-author @-mention (INV-134)
+# Test cases: issue-author @-mention (INV-134 provider leaf + INV-138 composed chain)
+
+> **Integration note (2026-07-17)**: the raw `issue_mention_login` helper no
+> longer applies its own github-side `REPO_OWNER` fallback — fallback policy
+> (bot detection, three-state `HUMAN_ESCALATION_LOGIN` incl. set-EMPTY mute,
+> provider-scoped default) lives in `resolve_escalation_mention` ([INV-138],
+> `lib-review-resolve-author.sh`). Composed-chain rows: TC-PAEM-070..084 in
+> `tests/unit/test-pr-author-escalation-mention.sh`.
 
 Primary suite: `tests/unit/test-issue-mention-login.sh`
 Supporting: `tests/unit/test-w1b-read-task-contracts.sh` (github `author` leaf),
