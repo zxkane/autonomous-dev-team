@@ -160,9 +160,28 @@ fixture-driven; no real sleeps.
 **When** `_agent_progress_init` then `_agent_progress_cleanup` run
 **Then** both complete (rc=0, run-id/lease still written unlocked) instead of the caller aborting — proving the `_agent_progress_lock_acquire _lock_fd || true` guard at both call sites is load-bearing: a bare (unguarded) call trips `set -e` on the helper's documented "return 1 when locking is unavailable" contract and aborts the whole wrapper before the agent is ever launched, the opposite of the "best-effort, degrades to unlocked" promise TC-LEASE-022's fix was supposed to preserve.
 
+## TC-LEASE-032: review-side (zero-`AGENT_PROGRESS_FILE`) fast path is byte-identical under EAGAIN pressure (issue #510)
+
+**Given** the recorder's zero-`AGENT_PROGRESS_FILE` fast path (the review-side invocation shape) driven through a real `O_NONBLOCK` pipe (python3 `fcntl` helper) with a reader that stalls long enough to force genuine `EAGAIN`, then drains slowly
+**When** a ~140KB/500-line fixture (final record with no trailing newline) is piped through
+**Then** the fast path's output is byte-identical to the fixture (checksum + line count match, including the final no-trailing-newline `{"type":"result"}` record) and no write-error diagnostic reaches stderr — red before the fix (reproducible against a GNU coreutils `cat`, which drops data under this exact pressure), green after.
+
+## TC-LEASE-033: review-side fast path stays byte-identical under normal conditions (no regression)
+
+**Given** the same fixture as TC-LEASE-032, without EAGAIN pressure
+**When** piped through the fast path
+**Then** output is byte-identical — the non-adversarial happy path this fix must preserve.
+
+## TC-LEASE-034: closed-reader `SIGPIPE` is classified as terminal, not retried as EAGAIN (issue #510 round-1 review regression)
+
+**Given** the fast path's write helper (`_agent_progress_recorder_fastpath_write`) writing to a pipe whose reader has already exited (a genuinely dead reader, not a merely-stalled one)
+**When** the write's underlying `printf` is killed outright by an un-ignored `SIGPIPE` (exit 141, empty captured stderr) rather than catching the error in-process and printing "write error: Broken pipe" itself
+**Then** the helper still classifies the failure as terminal and drops the record immediately (well under the ~2s retry budget, in particular under 500ms) with a "Broken pipe" diagnostic on stderr — before the fix, a bare exit-code check for 141 fell through every time to the EAGAIN retry branch (the captured `err` was empty, so the `"Broken pipe"` substring match never fired), burning the entire retry budget against a reader that could never drain.
+
 ## Acceptance mapping
 
 - R1 → TC-LEASE-001, 004-010, 018, 022, 023
 - R2 → TC-LEASE-001, 003, 018
 - R3 → TC-LEASE-011, 016, 017, 019, 020, 020b, 021
 - R4 → TC-LEASE-011, 012, 013, 014, 015
+- Issue #510 (review-side fast path EAGAIN retry) → TC-LEASE-032, 033, 034

@@ -1125,6 +1125,218 @@ assert_eq "TC-LEASE-023 init+cleanup survive set -e with flock unavailable (rc=0
 assert_contains "TC-LEASE-023 _agent_progress_init completes under set -e without flock" "INIT_SURVIVED" "$noflock_out"
 assert_contains "TC-LEASE-023 _agent_progress_cleanup completes under set -e without flock" "CLEANUP_SURVIVED" "$noflock_out"
 
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-LEASE-032 / TC-LEASE-033: review-side (zero-AGENT_PROGRESS_FILE) fast path EAGAIN retry (issue #510) ==="
+# ---------------------------------------------------------------------------
+# Root cause: the wrapper's stdout is `exec > >(tee -a run.log) 2>&1`, the SAME
+# open file description the CLI child (Node.js, for Claude) inherits as its own
+# stdio. Node sets O_NONBLOCK on that shared pipe, so once the CLI's own writes
+# fill the pipe buffer, the review-side fast path's own write can get EAGAIN.
+# The fast path previously ran a bare external `cat` — bash cannot intercept or
+# retry a syscall made inside another process's binary — and GNU coreutils
+# `cat` (this project's CI runner) does not retry EAGAIN, silently dropping
+# data past the pipe buffer boundary. These tests drive the REAL
+# _agent_progress_recorder fast path (AGENT_PROGRESS_FILE unset) through a REAL
+# O_NONBLOCK pipe via a self-contained python3 fcntl driver (defined below,
+# the same harness shape issue #508's still-unmerged dev-side tests use;
+# skipped, not failed, if python3 is unavailable).
+_sha_510() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    shasum -a 256 "$1" | awk '{print $1}'
+  fi
+}
+
+HAVE_PY3_510=0
+command -v python3 >/dev/null 2>&1 && HAVE_PY3_510=1
+
+if [[ "$HAVE_PY3_510" -eq 1 ]]; then
+  PY_DRIVER_510="$TMPROOT/drive_recorder_510.py"
+  cat > "$PY_DRIVER_510" <<'PYEOF'
+# Same harness shape as issue #508's dev-side EAGAIN tests: stalls WITHOUT
+# reading for <stall_seconds> so the pipe buffer fills and the child's own
+# writes hit real EAGAIN, then drains slowly in small chunks until stdout
+# closes.
+#   drive_recorder_510.py <out_file> <stall_seconds> -- <cmd...>
+import os, sys, fcntl, time
+
+args = sys.argv[1:]
+sep = args.index('--')
+out_path = args[0]
+stall_seconds = float(args[1])
+cmd = args[sep + 1:]
+
+r, w = os.pipe()
+fl = fcntl.fcntl(w, fcntl.F_GETFL)
+fcntl.fcntl(w, fcntl.F_SETFL, fl | os.O_NONBLOCK)
+
+pid = os.fork()
+if pid == 0:
+    os.close(r)
+    os.dup2(w, 1)
+    os.close(w)
+    os.execvp(cmd[0], cmd)
+    os._exit(127)
+
+os.close(w)
+fl_r = fcntl.fcntl(r, fcntl.F_GETFL)
+fcntl.fcntl(r, fcntl.F_SETFL, fl_r | os.O_NONBLOCK)
+
+start = time.time()
+with open(out_path, 'wb') as out:
+    while time.time() - start < stall_seconds:
+        time.sleep(0.01)
+    while True:
+        try:
+            chunk = os.read(r, 128)
+        except BlockingIOError:
+            time.sleep(0.02)
+            continue
+        if not chunk:
+            break
+        out.write(chunk)
+        out.flush()
+        time.sleep(0.01)
+
+os.close(r)
+_, status = os.waitpid(pid, 0)
+sys.exit(os.waitstatus_to_exitcode(status))
+PYEOF
+
+  # A fixture large enough (>64KB, the typical pipe capacity) to guarantee the
+  # stall phase forces real EAGAIN.
+  FASTPATH_EAGAIN_FIXTURE="$TMPROOT/fastpath-eagain-fixture.jsonl"
+  : > "$FASTPATH_EAGAIN_FIXTURE"
+  for i in $(seq 1 500); do
+    printf '{"type":"assistant","message":{"content":[{"type":"text","text":"chunk-%d-%s"}]}}\n' \
+      "$i" "$(printf 'x%.0s' $(seq 1 200))" >> "$FASTPATH_EAGAIN_FIXTURE"
+  done
+  # Final record has NO trailing newline — same no-trailing-newline contract
+  # TC-LEASE-011b/025 pin, now on the review-side fast path under pressure.
+  printf '{"type":"result"}' >> "$FASTPATH_EAGAIN_FIXTURE"
+
+  FASTPATH_RECORDER_DRIVER="$TMPROOT/run_fastpath_recorder.sh"
+  cat > "$FASTPATH_RECORDER_DRIVER" <<'SHEOF'
+#!/bin/bash
+# This script's own stdout must remain whatever the caller wired it to (the
+# pressured pipe from drive_recorder_510.py) — never redirected to a file here.
+set -uo pipefail
+LIB="$1" FIXTURE="$2" FRAMING="$3" ERR_LOG="$4"
+env -u AUTONOMOUS_CONF_DIR \
+  AUTONOMOUS_PID_DIR="$(dirname "$FIXTURE")" \
+  PROJECT_ID="testproj" \
+  PROJECT_DIR="$(dirname "$FIXTURE")" \
+  AGENT_CMD=claude \
+  bash -c '
+    unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE AGENT_PROGRESS_FILE
+    source "'"$LIB"'"
+    cat "'"$FIXTURE"'" | _agent_progress_recorder "'"$FRAMING"'"
+  ' 2>"$ERR_LOG"
+SHEOF
+  chmod +x "$FASTPATH_RECORDER_DRIVER"
+
+  # ---------------------------------------------------------------------
+  # TC-LEASE-032: byte-identical passthrough under EAGAIN pressure on the
+  # zero-AGENT_PROGRESS_FILE fast path — record count AND checksum match,
+  # including the final no-trailing-newline record. Red before the fix
+  # (fails against the old bare `cat` on a GNU-coreutils-backed `cat`),
+  # green after.
+  # ---------------------------------------------------------------------
+  FASTPATH_EAGAIN_OUT="$TMPROOT/fastpath-eagain-out.jsonl"
+  FASTPATH_EAGAIN_ERR="$TMPROOT/fastpath-eagain-err.log"
+  # Stall duration: well under the retry helper's own ~2s per-record retry
+  # budget, long enough to overflow the 64KB pipe and force genuine EAGAIN.
+  python3 "$PY_DRIVER_510" "$FASTPATH_EAGAIN_OUT" 1.0 -- \
+    bash "$FASTPATH_RECORDER_DRIVER" "$LIB" "$FASTPATH_EAGAIN_FIXTURE" json "$FASTPATH_EAGAIN_ERR" \
+    >/dev/null 2>&1
+
+  fastpath_expected_sha=$(_sha_510 "$FASTPATH_EAGAIN_FIXTURE")
+  fastpath_actual_sha=$(_sha_510 "$FASTPATH_EAGAIN_OUT")
+  assert_eq "TC-LEASE-032 review-side fast path output is byte-identical (checksum) under EAGAIN pressure" \
+    "$fastpath_expected_sha" "$fastpath_actual_sha"
+
+  fastpath_expected_lines=$(wc -l < "$FASTPATH_EAGAIN_FIXTURE")
+  fastpath_actual_lines=$(wc -l < "$FASTPATH_EAGAIN_OUT")
+  assert_eq "TC-LEASE-032 review-side fast path line count matches fixture under EAGAIN pressure" \
+    "$fastpath_expected_lines" "$fastpath_actual_lines"
+
+  if grep -q '"type":"result"' "$FASTPATH_EAGAIN_OUT" 2>/dev/null; then
+    ok "TC-LEASE-032 final {\"type\":\"result\"} record survives EAGAIN pressure on the fast path"
+  else
+    bad "TC-LEASE-032 final {\"type\":\"result\"} record was dropped under EAGAIN pressure on the fast path"
+  fi
+
+  if grep -q "write error" "$FASTPATH_EAGAIN_ERR" 2>/dev/null; then
+    bad "TC-LEASE-032 no write-error diagnostic reaches stderr under transient EAGAIN (reader always drains)"
+  else
+    ok "TC-LEASE-032 no write-error diagnostic reaches stderr under transient EAGAIN (reader always drains)"
+  fi
+
+  # ---------------------------------------------------------------------
+  # TC-LEASE-033: the fast path stays byte-identical under NORMAL
+  # (non-adversarial) conditions too — no regression to the happy path this
+  # fix must preserve.
+  # ---------------------------------------------------------------------
+  FASTPATH_NORMAL_OUT="$TMPROOT/fastpath-normal-out.jsonl"
+  bash -c '
+    unset AGENT_PROGRESS_FILE
+    source "'"$LIB"'"
+    cat "'"$FASTPATH_EAGAIN_FIXTURE"'" | _agent_progress_recorder json
+  ' >"$FASTPATH_NORMAL_OUT" 2>/dev/null
+
+  fastpath_normal_sha=$(_sha_510 "$FASTPATH_NORMAL_OUT")
+  assert_eq "TC-LEASE-033 fast path (AGENT_PROGRESS_FILE unset) stays byte-identical under normal (non-adversarial) conditions" \
+    "$fastpath_expected_sha" "$fastpath_normal_sha"
+else
+  echo "  SKIP: TC-LEASE-032/033 (python3 not available)"
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-LEASE-034: closed-reader SIGPIPE classified as terminal, not retried as EAGAIN (issue #510 round-1 review) ==="
+# ---------------------------------------------------------------------------
+# Drives the REAL _agent_progress_recorder_fastpath_write against a reader
+# that has ALREADY EXITED (a genuinely dead reader, not a merely-stalled
+# one) — the SIGPIPE case the round-1 review flagged: printf's command
+# substitution is killed outright by an un-ignored SIGPIPE (exit 141, EMPTY
+# captured stderr) rather than catching the error in-process and printing
+# "write error: Broken pipe" itself. Before the fix, the bare exit-code
+# check only compared against 0 and then string-matched "Broken pipe" in
+# the (empty) captured err, so a 141 fell through every time to the EAGAIN
+# retry branch and burned the whole ~2s budget against a reader that could
+# never drain. Bounded via `timeout` so a regression hangs the test run
+# instead of the whole suite.
+CLOSED_READER_ERR="$TMPROOT/closed-reader-err.log"
+closed_reader_start=$(date +%s.%N 2>/dev/null || date +%s)
+closed_reader_out=$(
+  timeout 10 bash -c '
+    set -uo pipefail
+    source "'"$LIB"'"
+    exec {write_fd}> >(exit 0)
+    sleep 0.3
+    _agent_progress_recorder_fastpath_write "this record is long enough to force a real write attempt against the closed pipe end" 1>&"$write_fd"
+    echo "rc=$?"
+  ' 2>"$CLOSED_READER_ERR"
+)
+closed_reader_end=$(date +%s.%N 2>/dev/null || date +%s)
+closed_reader_elapsed=$(awk -v s="$closed_reader_start" -v e="$closed_reader_end" 'BEGIN{d=e-s; if (d<0) d=0; print d}' 2>/dev/null || echo 0)
+
+assert_contains "TC-LEASE-034 write helper returns non-zero (record dropped) against a closed reader" "rc=1" "$closed_reader_out"
+
+# 1.5s is comfortably under the ~2s EAGAIN retry budget: a regression that
+# falls through to the retry branch burns the full budget (>=2s); the fix
+# drops within milliseconds of the single failed write attempt.
+closed_reader_fast=$(awk -v d="$closed_reader_elapsed" 'BEGIN{exit !(d < 1.5)}'; echo $?)
+if [[ "$closed_reader_fast" -eq 0 ]]; then
+  ok "TC-LEASE-034 dead-reader write drops immediately (${closed_reader_elapsed}s), not after burning the EAGAIN retry budget"
+else
+  bad "TC-LEASE-034 dead-reader write took ${closed_reader_elapsed}s — fell through to the EAGAIN retry budget instead of dropping immediately"
+fi
+
+assert_contains "TC-LEASE-034 dead-reader drop is diagnosed as Broken pipe on stderr" "Broken pipe" "$(cat "$CLOSED_READER_ERR" 2>/dev/null)"
+
 echo ""
 echo "=== Summary ==="
 echo "  PASS: $PASS"
