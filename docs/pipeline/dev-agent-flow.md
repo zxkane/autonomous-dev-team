@@ -186,6 +186,42 @@ branch (#234 review). In PAT
 mode / app-mode-mint-failure the prefix is empty (no scrub) — byte-identical to
 pre-INV-79. See [INV-79](invariants.md#inv-79-in-app-mode-the-agent-process-gets-only-a-scoped-token-the-wrapper-keeps-full-write-and-is-the-sole-approvemergepr-create-path).
 
+### Structured blocked-403 marker ([INV-85], #511)
+
+Every dev prompt (`new`, `resume`, resume-fallback) interpolates a
+`DEV_BLOCKED_403_MARKER_BLOCK` — unconditionally, regardless of scoped-token
+mode — instructing the agent:
+
+> If — and ONLY if — a review finding cannot be addressed because it requires
+> an action the token's scope forbids (PR metadata/body, `.github/workflows`,
+> etc., returning `403 Resource not accessible by integration`), post a
+> comment containing `<!-- dev-blocked-403: head=<sha> -->`, substituting the
+> actual current commit SHA (`git rev-parse HEAD`) for `<sha>`. Use the marker
+> ONLY for a genuine blocker — an incidental/optional-action 403 (e.g. asking
+> the operator to retrigger a flaked third-party CI run) should be mentioned in
+> free-form prose and must NOT emit the marker.
+
+This closes a false-positive class in the dispatcher's `dev_report_bot_unfixable`
+detector ([INV-85](invariants.md#inv-85-the-completed-session-failed-substantive-route-is-bounded-to-one-dev-new-per-unchanged-head-a-no-progress-or-bot-unfixable-finding-escalates-to-stalled-never-loops)):
+pre-#511 the detector's only signal was a free-text substring scan for
+`Resource not accessible by integration` in a PR-metadata-edit context, fired
+by ANY dev-authored mention — including a completion comment that quoted the
+403 about an unrelated, optional courtesy action while the session otherwise
+fixed every finding and pushed a new commit. That stalled the NEXT round's
+genuinely dev-actionable finding with zero `dev-new` spent. The marker gives
+the dispatcher a signal that can't be confused with incidental commentary: it
+is checked FIRST (before the legacy substring scan), matched against the
+dev-authored/current-attempt-window scoping [INV-85] already enforces, and
+narrowed to the marker's `head=` field exactly matching the PR's current head
+— a marker for a superseded head is not unfixable. When no marker exists
+anywhere in the window, the dispatcher falls back to a success-comment veto
+(an exit-0 session report + a demonstrably-moved HEAD suppresses the legacy
+scan) and finally the byte-identical legacy substring scan, so a dev agent
+running an older prompt (not yet marker-aware) degrades to exactly the
+pre-#511 behavior. See [INV-85](invariants.md#inv-85-the-completed-session-failed-substantive-route-is-bounded-to-one-dev-new-per-unchanged-head-a-no-progress-or-bot-unfixable-finding-escalates-to-stalled-never-loops)
+and [`dispatcher-flow.md`](dispatcher-flow.md#step-4b51-review-aware-routing-for-completed-sessions-inv-35)
+for the full three-step detector logic and the `head=` matching rule.
+
 ## Code-Host Provider seam — close keyword + PR creation ([INV-87](invariants.md#inv-87-provider-dispatch-is-spec-defined--callers-route-every-issuecode-host-op-through-itp_chp_-never-a-raw-gh-in-the-caller-layer), #282)
 
 The PR-body **auto-close keyword** the prompt builders interpolate is now
