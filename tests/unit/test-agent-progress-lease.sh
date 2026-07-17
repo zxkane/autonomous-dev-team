@@ -1378,10 +1378,19 @@ SHEOF
     bash "$OLD_SHAPE_DRIVER" "$TRICKLE_FIXTURE")
   old_shape_rc=$?
   assert_eq "TC-LEASE-029 characterization: retired per-slice-reset driver completes without the test's own timeout firing" "0" "$old_shape_rc"
-  if [[ -n "$old_shape_elapsed" ]] && awk -v e="$old_shape_elapsed" 'BEGIN{exit !(e > 1.5)}'; then
-    ok "TC-LEASE-029 characterization: the retired per-slice-reset shape DOES take multiples of a single slice's budget (${old_shape_elapsed}s) — this harness discriminates fixed from broken"
+  # Compared against the FIXED shape's own `$trickle_elapsed` measured in
+  # THIS SAME run (not a hardcoded absolute threshold) — a shared/virtualized
+  # CI runner can have scheduling jitter this dev box doesn't, so an absolute
+  # "> 1.5s" check flaked in CI (observed: 1.225s) even though the two shapes
+  # remained cleanly separated (fixed ~0.6s vs broken ~1.2-2.4s, a >=2x gap in
+  # every observed run). Self-calibrating to the fixed shape's OWN measured
+  # time on the SAME machine in the SAME run removes the absolute-threshold
+  # dependency on this box's specific scheduling latency.
+  if [[ -n "$old_shape_elapsed" && -n "$trickle_elapsed" ]] && \
+     awk -v o="$old_shape_elapsed" -v f="$trickle_elapsed" 'BEGIN{exit !(o > f * 2)}'; then
+    ok "TC-LEASE-029 characterization: the retired per-slice-reset shape DOES take multiples of the fixed shape's own budget (${old_shape_elapsed}s vs fixed ${trickle_elapsed}s) — this harness discriminates fixed from broken"
   else
-    bad "TC-LEASE-029 characterization: the retired per-slice-reset shape finished in ${old_shape_elapsed}s — expected it to exceed 1.5s, or this test cannot tell fixed from broken"
+    bad "TC-LEASE-029 characterization: the retired per-slice-reset shape finished in ${old_shape_elapsed}s, not clearly more than 2x the fixed shape's ${trickle_elapsed}s — this test cannot tell fixed from broken"
   fi
 
   # ---------------------------------------------------------------------
@@ -1406,15 +1415,40 @@ SHEOF
     SLICE_PROGRESS_DIR="$TMPROOT/slice-pd"
     rm -rf "$SLICE_PROGRESS_DIR"
     SLICE_STRACE_PREFIX="$TMPROOT/slice-strace"
-    # `-ff` (one trace file per process, not `-f` which interleaves into one
-    # file) isolates the recorder's OWN writes from an unrelated `jq -e .`
-    # validation subprocess in the json-framing path, which also happens to
-    # inherit fd 1 and would otherwise pollute a single merged trace with an
-    # unrelated single large write. "line" framing avoids spawning that
-    # subprocess entirely, so every write(2) captured here is unambiguously
-    # this recorder's own.
+    # A DEDICATED driver, not $RECORDER_DRIVER: that one feeds the fixture via
+    # `cat "$FIXTURE" | _agent_progress_recorder ...`, and `cat`'s own single
+    # bulk write into that internal pipe ALSO shows up as a "write(1, ...)" in
+    # its own per-process trace file (each process has its own fd-1 numbering,
+    # `-ff`'s per-file split does not distinguish "this fd 1" by process
+    # identity) — a false positive that inflates the observed max. Whether
+    # this actually happens is `cat`-implementation-dependent (glibc coreutils
+    # `cat` can use `splice()`/`sendfile()` for a file-to-pipe copy, invisible
+    # to `-e trace=write`, so it stayed hidden on some boxes and fired on
+    # others — reproduced empirically as a real CI failure). Redirecting the
+    # fixture directly via `<` removes `cat` from the process tree entirely,
+    # so every "write(1, ...)" captured is unambiguously this recorder's own.
+    SLICE_DRIVER="$TMPROOT/run_recorder_slice.sh"
+    cat > "$SLICE_DRIVER" <<'SHEOF'
+#!/bin/bash
+set -uo pipefail
+LIB="$1" FIXTURE="$2" PROGRESS_FILE="$3" FRAMING="$4"
+env -u AUTONOMOUS_CONF_DIR \
+  AUTONOMOUS_PID_DIR="$(dirname "$PROGRESS_FILE")" \
+  PROJECT_ID="testproj" \
+  PROJECT_DIR="$(dirname "$PROGRESS_FILE")" \
+  AGENT_CMD=claude \
+  AGENT_PROGRESS_FILE="$PROGRESS_FILE" \
+  RUN_ID="run-slicecheck" \
+  bash -c '
+    mkdir -p "$AUTONOMOUS_PID_DIR"
+    unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE
+    source "'"$LIB"'"
+    _agent_progress_recorder "'"$FRAMING"'" < "'"$FIXTURE"'"
+  '
+SHEOF
+    chmod +x "$SLICE_DRIVER"
     strace -ff -e trace=write -o "$SLICE_STRACE_PREFIX" \
-      bash "$RECORDER_DRIVER" "$LIB" "$SLICE_FIXTURE" "$SLICE_PROGRESS_DIR/progress.json" line /dev/null \
+      bash "$SLICE_DRIVER" "$LIB" "$SLICE_FIXTURE" "$SLICE_PROGRESS_DIR/progress.json" line \
       > /dev/null
     max_write=$(grep -h -oP 'write\(1, .*, \K[0-9]+' "$SLICE_STRACE_PREFIX".* 2>/dev/null | sort -n | tail -1)
     if [[ -n "$max_write" ]] && (( max_write <= 512 )); then
