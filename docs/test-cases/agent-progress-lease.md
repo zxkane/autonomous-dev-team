@@ -202,9 +202,15 @@ fixture-driven; no real sleeps.
 **When** the recorder attempts to write the record and its per-attempt deadline-exhaustion check shells out to `awk`
 **Then** the recorder process still exits within the same bounded wall-clock window as TC-LEASE-026 (not a hang) — proving that when `awk` itself cannot execute (as opposed to executing and evaluating "not yet"), the exhaustion check is read as "deadline reached" rather than silently falling through to "keep retrying" and spinning `sleep 0.05` forever. Verified to discriminate fixed from broken: reverting the fix (a bare `if awk ...; then` that cannot distinguish awk's own exit 1 from a shell-level "command not found") makes this exact scenario hang past the test's wall-clock bound.
 
+## TC-LEASE-031: a missing/broken clock (no `EPOCHREALTIME`, no `date`) fails safe instead of retrying forever (round-4 review finding)
+
+**Given** the SAME never-draining-reader harness as TC-LEASE-026/030, but with `EPOCHREALTIME` explicitly `unset` inside the recorder child's own subshell (a bash-internal variable, not resolvable via `PATH` restriction) AND `date` excluded from a TC-LEASE-030-style symlink farm, so `_agent_progress_write_retry_now_seconds` has no usable clock source at all
+**When** the recorder computes its retry deadline and, on each retry attempt, re-checks elapsed time against it
+**Then** the recorder process still exits within the same bounded wall-clock window as TC-LEASE-026/030 (not a hang), and the stderr diagnostic names "clock unavailable" rather than the generic exhaustion message — proving the clock reading is validated as a plain decimal number BEFORE it reaches `awk`. This is distinct from TC-LEASE-030: here `awk` itself runs and exits normally (0 or 1) because it silently coerces the empty clock reading to `0` in arithmetic, so the round-3 exit-code fix alone does not catch it — `deadline` and every later `now` both compute from `0`, and `0 >= deadline` never holds. Verified to discriminate fixed from broken: reverting the round-4 fix (removing the `_agent_progress_write_retry_clock_ok` validation) makes this exact scenario hang past the test's wall-clock bound.
+
 ## Acceptance mapping
 
 - R1 → TC-LEASE-001, 004-010, 018, 022, 023
 - R2 → TC-LEASE-001, 003, 018
-- R3 → TC-LEASE-011, 016, 017, 019, 020, 020b, 021, 024, 025, 026, 027, 028, 029, 030
+- R3 → TC-LEASE-011, 016, 017, 019, 020, 020b, 021, 024, 025, 026, 027, 028, 029, 030, 031
 - R4 → TC-LEASE-011, 012, 013, 014, 015

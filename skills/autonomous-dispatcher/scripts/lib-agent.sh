@@ -1361,6 +1361,24 @@ _agent_progress_write_retry_now_seconds() {
     date +%s.%N 2>/dev/null || date +%s
   fi
 }
+# _agent_progress_write_retry_clock_ok <value> — true iff <value> is a
+# plain, non-empty decimal number (round-4 review finding). On a bash
+# without EPOCHREALTIME (<5.0) whose `date` is ALSO missing/broken, both
+# branches of _agent_progress_write_retry_now_seconds produce an empty
+# string, not a command failure — there is no non-zero exit code to check.
+# Feeding that empty string straight into `awk -v n="$now0" ...` is the
+# actual bug: awk's numeric-string coercion treats an unset variable as 0
+# in arithmetic context, so `deadline` still computes as a plausible-looking
+# "now0 + budget" (0 + budget), and every later exhaustion check re-derives
+# `now=0` the same way, so `0 >= deadline` never holds — the retry loop
+# spins on `sleep 0.05` forever against a never-draining reader. Explicitly
+# validating the clock reading BEFORE it ever reaches awk closes this: a
+# non-numeric/empty reading fails closed immediately, the same posture as
+# the missing-`awk` fail-safe below, instead of silently degrading to an
+# unbounded hang.
+_agent_progress_write_retry_clock_ok() {
+  [[ "$1" =~ ^[0-9]+(\.[0-9]+)?$ ]]
+}
 _agent_progress_write_retry() {
   local LC_ALL=C
   local data="$1" total wrote=0 off=0 chunk=4096 take piece err
@@ -1373,6 +1391,12 @@ _agent_progress_write_retry() {
   # matching every other write site in this recorder.
   exec {write_fd}>&1
   now0=$(_agent_progress_write_retry_now_seconds)
+  if ! _agent_progress_write_retry_clock_ok "$now0"; then
+    printf 'lib-agent.sh: _agent_progress_recorder: dropping output record (%d of %d bytes written) — write error: clock unavailable (no EPOCHREALTIME, date missing or broken)\n' \
+      "$wrote" "$total" >&2 || true  # best-effort diagnostic; a failed write to a full pipe must not itself abort the record-drop path
+    exec {write_fd}>&-
+    return 1
+  fi
   # LC_ALL=C prefixed directly on the awk invocation (not relying on the
   # function-local `local LC_ALL=C` above, which only reaches a child
   # process if LC_ALL was already exported) — an exported LC_NUMERIC/LANG
@@ -1411,8 +1435,17 @@ _agent_progress_write_retry() {
       # RETRY_BUDGET_SECONDS), matching the issue's "bounded total (e.g.
       # ~2s worth)" guidance regardless of how many slices the record took.
       now=$(_agent_progress_write_retry_now_seconds)
-      LC_ALL=C awk -v n="$now" -v d="$deadline" 'BEGIN{exit !(n >= d)}'
-      awk_rc=$?
+      # Re-validate on EVERY attempt, not just the initial now0 (round-4
+      # review finding) — a clock reading that goes bad mid-loop (e.g. a
+      # transient `date` failure under resource pressure, on a bash without
+      # EPOCHREALTIME) must fail closed here too; otherwise it feeds awk the
+      # same empty-coerces-to-zero value that made this loop retry forever.
+      if ! _agent_progress_write_retry_clock_ok "$now"; then
+        awk_rc=2
+      else
+        LC_ALL=C awk -v n="$now" -v d="$deadline" 'BEGIN{exit !(n >= d)}'
+        awk_rc=$?
+      fi
       # The awk program only ever exits 0 ("n >= d", deadline reached) or 1
       # ("n < d", keep retrying) by construction — any OTHER exit code means
       # awk itself failed to execute (missing/corrupt PATH), not that the

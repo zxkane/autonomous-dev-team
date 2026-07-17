@@ -16,7 +16,7 @@
 #   - R4: the Claude stream-json migration does not break the three existing
 #     consumers of the final `{"type":"result",...}` log line.
 #
-# TC-LEASE-024..029 (issue #508): the recorder's shared-nonblocking-pipe
+# TC-LEASE-024..031 (issue #508): the recorder's shared-nonblocking-pipe
 # EAGAIN hazard — the wrapper's `exec > >(tee -a run.log)` stdout is the SAME
 # open file description the Claude CLI (Node.js) inherits as its stderr, and
 # Node's O_NONBLOCK flag on that shared pipe can make the recorder's own
@@ -30,11 +30,17 @@
 # bare `cat` under the same pressure, (TC-LEASE-028, round-1 review finding) a
 # genuinely dead reader (closed read end, real EPIPE) failing FAST instead
 # of misclassifying as retryable EAGAIN and burning the full per-record
-# retry budget, and (TC-LEASE-029, round-2 review finding [P2]) a reader that
+# retry budget, (TC-LEASE-029, round-2 review finding [P2]) a reader that
 # drains just enough per slice to never trip any SINGLE slice's own retry
 # check — proving the retry budget is tracked once for the WHOLE record, not
 # reset on every 4096-byte slice (a per-slice reset let a large multi-slice
-# record retry far past the documented ~2s total).
+# record retry far past the documented ~2s total), (TC-LEASE-030, round-3
+# review finding) a missing/broken `awk` on PATH failing safe rather than
+# reading its own non-execution as "not yet reached", and (TC-LEASE-031,
+# round-4 review finding) a bash with no EPOCHREALTIME AND a missing/broken
+# `date` fallback — no usable clock at all — also failing safe, distinct
+# from TC-LEASE-030 because here `awk` runs fine and exits normally on an
+# empty clock reading silently coerced to 0.
 #
 # Strategy: source lib-agent.sh (+ lib-dispatch.sh / lib-metrics.sh where
 # needed) in sandboxed subshells with stub CLIs on PATH, mirroring
@@ -904,6 +910,67 @@ PYEOF
     "0" "$noawk_driver_rc"
   assert_contains "TC-LEASE-030 recorder process actually exited (not killed by the test's own timeout)" \
     "EXITED" "$noawk_out"
+
+  # ---------------------------------------------------------------------
+  # TC-LEASE-031 (round-4 review finding): a bash with no EPOCHREALTIME
+  # whose `date` fallback is ALSO missing/broken must fail SAFE, not retry
+  # forever. Unlike TC-LEASE-030 (awk absent), here the CLOCK READING itself
+  # is empty — `_agent_progress_write_retry_now_seconds` returns "" from
+  # both branches — and awk's numeric-string coercion silently treats an
+  # empty `-v n=""` as 0, so a naive implementation computes a
+  # plausible-looking `deadline` (0 + budget) and then re-derives `now=0` on
+  # every retry, so `0 >= deadline` never holds: an unbounded hang triggered
+  # by an absent clock, not an absent awk. Reuses TC-LEASE-026/030's exact
+  # never-draining-reader harness so this isolates ONE variable — no usable
+  # clock — against an otherwise identical repro. `date` is excluded from
+  # the child's PATH (same symlink-farm technique as TC-LEASE-030's
+  # no-`awk` farm) and EPOCHREALTIME is explicitly unset inside the
+  # recorder's own subshell (it is a bash-internal variable, not resolved
+  # via PATH, so simply omitting a binary cannot suppress it).
+  NOCLOCK_BIN=$(mktemp -d)
+  for _b in bash cat mkdir mktemp stat sh dirname readlink pwd printf tr grep sed ps sleep kill cp basename wc chmod mv rm head timeout setsid env awk; do
+    _bp="$(command -v "$_b" 2>/dev/null)" || continue
+    ln -sf "$_bp" "$NOCLOCK_BIN/$_b"
+  done
+
+  NOCLOCK_DRIVER="$TMPROOT/run_recorder_noclock.sh"
+  cat > "$NOCLOCK_DRIVER" <<'SHEOF'
+#!/bin/bash
+set -uo pipefail
+LIB="$1" FIXTURE="$2" PROGRESS_FILE="$3" FRAMING="$4" ERR_LOG="$5"
+env -u AUTONOMOUS_CONF_DIR \
+  AUTONOMOUS_PID_DIR="$(dirname "$PROGRESS_FILE")" \
+  PROJECT_ID="testproj" \
+  PROJECT_DIR="$(dirname "$PROGRESS_FILE")" \
+  AGENT_CMD=claude \
+  AGENT_PROGRESS_FILE="$PROGRESS_FILE" \
+  RUN_ID="run-noclock" \
+  bash -c '
+    mkdir -p "$AUTONOMOUS_PID_DIR"
+    unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE
+    unset EPOCHREALTIME
+    source "'"$LIB"'"
+    cat "'"$FIXTURE"'" | _agent_progress_recorder "'"$FRAMING"'"
+  ' 2>"$ERR_LOG"
+SHEOF
+  chmod +x "$NOCLOCK_DRIVER"
+
+  NOCLOCK_ERR="$TMPROOT/noclock-err.log"
+  NOCLOCK_PROGRESS_DIR="$TMPROOT/noclock-pd"
+  rm -rf "$NOCLOCK_PROGRESS_DIR"
+
+  noclock_out=$(timeout 20 python3 "$STUCK_DRIVER" 10 -- \
+    env PATH="$NOCLOCK_BIN" AGENT_PROGRESS_WRITE_RETRY_BUDGET_SECONDS=1 \
+    bash "$NOCLOCK_DRIVER" "$LIB" "$STUCK_FIXTURE" "$NOCLOCK_PROGRESS_DIR/progress.json" json "$NOCLOCK_ERR" 2>&1)
+  noclock_driver_rc=$?
+  rm -rf "$NOCLOCK_BIN"
+
+  assert_eq "TC-LEASE-031 recorder completes within the wall-clock bound with no usable clock (no EPOCHREALTIME, no date) (proves no hang)" \
+    "0" "$noclock_driver_rc"
+  assert_contains "TC-LEASE-031 recorder process actually exited (not killed by the test's own timeout)" \
+    "EXITED" "$noclock_out"
+  assert_contains "TC-LEASE-031 diagnostic reports the clock-unavailable reason, not a generic exhaustion" \
+    "clock unavailable" "$(cat "$NOCLOCK_ERR" 2>/dev/null)"
 
   # ---------------------------------------------------------------------
   # TC-LEASE-028 (round-1 review finding): a dead reader (closed read end,

@@ -63,6 +63,24 @@ sites in the recorder's read loop with a bounded-retry write:
   than the program's documented "not yet" (rc 1) as exhaustion — including the deadline
   computation's `awk` call, guarded by falling back to `deadline=now` (immediately
   exhausted) if that invocation's rc is non-zero or it produced empty output.
+- **A missing/broken CLOCK fails safe (round-4 review finding), distinct from a missing
+  `awk`.** `_agent_progress_write_retry_now_seconds` returns `${EPOCHREALTIME}` when the
+  running bash has it (>=5.0), else falls back to `date +%s.%N` / `date +%s`. On a bash
+  WITHOUT `EPOCHREALTIME` whose `date` is ALSO missing or broken, both branches produce an
+  EMPTY string — not a non-zero exit code, since command substitution of a failed `date`
+  still "succeeds" as an empty capture. Feeding that straight into
+  `awk -v n="$now0" ...` does NOT fail the way a missing `awk` does: awk's numeric-string
+  coercion silently treats the unset variable as `0` in arithmetic context, so `deadline`
+  still computes a plausible-looking value (`0 + budget`) and every later exhaustion check
+  re-derives `now=0` the same way — `0 >= deadline` never holds, so the retry loop spins on
+  `sleep 0.05` forever against a never-draining reader. The round-3 `awk`-exit-code fix does
+  NOT catch this, because `awk` itself runs and exits normally here; the bad input never
+  reaches a failing exit code. Fixed by validating the clock reading BEFORE it ever reaches
+  `awk` (`_agent_progress_write_retry_clock_ok`, a plain-decimal-number regex check) — once
+  for the initial `now0` and again on every retry attempt's `now` (a transient `date`
+  failure mid-loop must fail closed too, not just the initial read) — dropping the record
+  immediately with a diagnostic that names the actual cause ("clock unavailable") instead of
+  the generic exhaustion message.
 - **No new pipeline stage.** The retry lives entirely inside `_agent_progress_recorder`'s
   existing read loop — an additional stage would itself be a new EAGAIN-vulnerable writer.
   `O_NONBLOCK` is never cleared from bash (no fcntl access). Both call sites' `|| true`
@@ -94,6 +112,7 @@ sites in the recorder's read loop with a bounded-retry write:
 | 2 | `local LC_ALL=C` does not reach the child `awk` process unless `LC_ALL` was already exported — a comma-decimal locale could corrupt the deadline float comparison | Prefixed `LC_ALL=C` directly on both `awk` invocations |
 | 2 (CI, not local) | TC-LEASE-027 failed against GNU coreutils `cat` (the CI runner's `cat`) even though it passed locally against this dev box's non-GNU `cat` — the "zero-`AGENT_PROGRESS_FILE` fast path" bare `cat` had the SAME un-retried-`EAGAIN` data-drop bug as the pre-fix `printf`, just on the review side | Removed the bare-`cat` special case; the review-side path now runs through the same `_agent_progress_write_retry`-protected loop as the dev side |
 | 3 | A missing/broken `awk` on `PATH` made the exhaustion check's `if awk ...; then` misread "awk itself couldn't execute" as "deadline not yet reached", spinning the retry loop forever instead of failing safe | Capture the `awk` invocation's exit code explicitly and treat anything other than its documented rc 1 ("not yet") as exhaustion; the deadline computation's own `awk` call falls back to `deadline=now` on failure (see Decision above); TC-LEASE-030 |
+| 4 | On a bash without `EPOCHREALTIME` whose `date` fallback is also missing/broken, the clock helper returns an empty string; awk coerces that to `0` in arithmetic (not a failing exit code), so `deadline` and every later `now` both compute from `0` and `0 >= deadline` never holds — an unbounded hang the round-3 `awk`-exit-code fix does not catch, since `awk` itself runs successfully here | `_agent_progress_write_retry_clock_ok` validates the clock reading is a plain decimal number BEFORE it reaches `awk`, checked on the initial `now0` and again on every retry attempt's `now`; an unusable reading fails closed immediately with a "clock unavailable" diagnostic; TC-LEASE-031 |
 
 ## Out of scope
 
@@ -104,12 +123,15 @@ log probe (reads the same file post-hoc; fixed by the same producer fix).
 
 ## Test plan
 
-See `docs/test-cases/agent-progress-lease.md` TC-LEASE-024..030 —
+See `docs/test-cases/agent-progress-lease.md` TC-LEASE-024..031 —
 `tests/unit/test-agent-progress-lease.sh`, driving the real recorder through a real
 `O_NONBLOCK` pipe via a python3 `fcntl` helper: byte-identical passthrough under transient
 EAGAIN pressure, the no-trailing-newline contract under retry, bounded-exhaustion
 completing instead of hanging, the zero-`AGENT_PROGRESS_FILE` review-side path now
 protected the same way as the dev side, dead-reader (EPIPE) fast-fail, the whole-record
-(not per-slice) retry budget, and (TC-LEASE-030) a missing `awk` on `PATH` failing safe
-instead of retrying forever against the SAME never-draining-reader harness TC-LEASE-026
-uses.
+(not per-slice) retry budget, (TC-LEASE-030) a missing `awk` on `PATH` failing safe instead
+of retrying forever against the SAME never-draining-reader harness TC-LEASE-026 uses, and
+(TC-LEASE-031) a bash with no `EPOCHREALTIME` AND a missing/broken `date` fallback — no
+usable clock at all — also failing safe against that same harness, distinct from
+TC-LEASE-030 because here `awk` itself runs fine; the bad input (an empty clock reading
+coerced to `0`) never produces a failing exit code for the round-3 fix to catch.
