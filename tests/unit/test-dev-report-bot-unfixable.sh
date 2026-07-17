@@ -217,6 +217,90 @@ _MOCK_COMMENTS_JSON='{"comments":[
 ]}'
 assert_rc "BU-016 prior same-HEAD 403 expires at the new dev token → NOT unfixable" 1 dev_report_bot_unfixable 100 "newsha"
 
+# --- #511: structured dev-blocked-403 marker + success-comment veto + legacy fallback ---
+
+echo ""
+echo "=== dev_report_bot_unfixable structured marker + success-veto (#511) ==="
+
+# BU-020 (#485-shape regression): a dev session that COMPLETED SUCCESSFULLY —
+# pushed a new commit (HEAD moved from `aaaa785` to `bbbb785` during the
+# attempt) and reported `Exit code: 0` — merely QUOTES the 403 signature about
+# an incidental courtesy action (retriggering a flaked third-party CI run via
+# `gh pr edit`/`gh run rerun`, which it cannot do). This must NOT be classified
+# bot-unfixable: the head-move + exit-0 success-veto overrides the legacy
+# substring match. Fails before the fix (old code returns unfixable here).
+_MOCK_COMMENTS_JSON='{"comments":[
+  {"createdAt":"2026-07-16T23:30:00Z","author":{"login":"kane-review-agent"},"body":"Review findings:\nReviewed HEAD: `aaaa785`\n1. [P1] fix the widget."},
+  {"createdAt":"2026-07-16T23:47:00Z","author":{"login":"my-claw"},"body":"<!-- dispatcher-token: r4tok01 at 2026-07-16T23:47:00Z mode=dev-resume -->\nResuming autonomous development..."},
+  {"createdAt":"2026-07-16T23:55:00Z","author":{"login":"dev-bot[bot]"},"body":"Fixed all review findings and pushed. I also tried gh run rerun and gh pr edit to retrigger a flaked third-party CI action, but got 403 Resource not accessible by integration on gh pr edit — that action is optional, please retrigger manually if needed."},
+  {"createdAt":"2026-07-17T00:00:00Z","author":{"login":"dev-bot[bot]"},"body":"**Agent Session Report (Dev)**\n- Dev Session ID: `s20`\n- Exit code: 0"}
+]}'
+assert_rc "BU-020 (#485 regression) success report + head moved + incidental 403 quote → NOT unfixable" 1 dev_report_bot_unfixable 100 "bbbb785"
+
+# BU-021: a structured `dev-blocked-403` marker, dev-authored, in the current
+# attempt window, with `head=` matching the caller-supplied current head →
+# Branch A fires (unfixable), even with no legacy substring context at all.
+_MOCK_COMMENTS_JSON='{"comments":[
+  {"createdAt":"2026-06-26T10:45:00Z","author":{"login":"my-claw"},"body":'"$DTOK"'},
+  {"createdAt":"2026-06-26T11:00:00Z","author":{"login":"dev-bot[bot]"},"body":"<!-- dev-blocked-403: head=newsha21 -->\nThis finding requires editing CODEOWNERS, which my scoped token cannot do."},
+  {"createdAt":"2026-06-26T11:10:00Z","author":{"login":"dev-bot[bot]"},"body":"**Agent Session Report (Dev)**\n- Dev Session ID: `s21`\n- Exit code: 1"}
+]}'
+assert_rc "BU-021 structured marker, matching head, in-window → unfixable" 0 dev_report_bot_unfixable 100 "newsha21"
+
+# BU-022: the ONLY marker present has a STALE head (≠ the current PR head) —
+# not unfixable. Presence of a (non-matching) marker also suppresses the
+# legacy substring fallback (design point 3); no legacy text exists here anyway.
+_MOCK_COMMENTS_JSON='{"comments":[
+  {"createdAt":"2026-06-26T10:45:00Z","author":{"login":"my-claw"},"body":'"$DTOK"'},
+  {"createdAt":"2026-06-26T11:00:00Z","author":{"login":"dev-bot[bot]"},"body":"<!-- dev-blocked-403: head=staleSHA -->\nBlocked on the old head."},
+  {"createdAt":"2026-06-26T11:10:00Z","author":{"login":"dev-bot[bot]"},"body":"**Agent Session Report (Dev)**\n- Dev Session ID: `s22`\n- Exit code: 1"}
+]}'
+assert_rc "BU-022 marker with stale head → NOT unfixable" 1 dev_report_bot_unfixable 100 "newsha22"
+
+# BU-023a: a marker with a MATCHING head, but authored by a NON-DEV login
+# (not the resolved dev agent author) → excluded by the existing author
+# allow-list scoping; no legacy text present → NOT unfixable.
+_MOCK_COMMENTS_JSON='{"comments":[
+  {"createdAt":"2026-06-26T10:45:00Z","author":{"login":"my-claw"},"body":'"$DTOK"'},
+  {"createdAt":"2026-06-26T11:00:00Z","author":{"login":"zxkane"},"body":"<!-- dev-blocked-403: head=newsha23 -->\nFYI I think this is blocked."},
+  {"createdAt":"2026-06-26T11:10:00Z","author":{"login":"dev-bot[bot]"},"body":"**Agent Session Report (Dev)**\n- Dev Session ID: `s23a`\n- Exit code: 1"}
+]}'
+assert_rc "BU-023a marker authored by non-dev login → NOT unfixable" 1 dev_report_bot_unfixable 100 "newsha23"
+
+# BU-023b: a dev-authored marker with a matching head, but posted BEFORE the
+# current dev-dispatch token (a prior attempt) → excluded by the existing
+# per-attempt lower-bound scoping; no legacy text present → NOT unfixable.
+_MOCK_COMMENTS_JSON='{"comments":[
+  {"createdAt":"2026-06-26T09:00:00Z","author":{"login":"dev-bot[bot]"},"body":"<!-- dev-blocked-403: head=newsha23b -->\nPrior-attempt marker."},
+  {"createdAt":"2026-06-26T09:10:00Z","author":{"login":"dev-bot[bot]"},"body":"**Agent Session Report (Dev)**\n- Dev Session ID: `s23b-prior`"},
+  {"createdAt":"2026-06-26T10:45:00Z","author":{"login":"my-claw"},"body":'"$DTOK"'},
+  {"createdAt":"2026-06-26T11:10:00Z","author":{"login":"dev-bot[bot]"},"body":"**Agent Session Report (Dev)**\n- Dev Session ID: `s23b`\n- Exit code: 1"}
+]}'
+assert_rc "BU-023b dev-authored marker before current dispatch token → NOT unfixable" 1 dev_report_bot_unfixable 100 "newsha23b"
+
+# BU-024 (legacy fallback preserved): NO marker anywhere in the window, a
+# legacy 403-on-PR-edit substring IS present, and there is NO success-veto
+# evidence (no `Exit code: 0` report at all) → still unfixable — INV-85
+# protection for genuinely-blocked legacy sessions is preserved.
+_MOCK_COMMENTS_JSON='{"comments":[
+  {"createdAt":"2026-06-26T10:45:00Z","author":{"login":"my-claw"},"body":'"$DTOK"'},
+  {"createdAt":"2026-06-26T11:00:00Z","author":{"login":"dev-bot[bot]"},"body":"403 Resource not accessible by integration on gh pr edit (PR body) — cannot proceed"},
+  {"createdAt":"2026-06-26T11:10:00Z","author":{"login":"dev-bot[bot]"},"body":"**Agent Session Report (Dev)**\n- Dev Session ID: `s24`\n- Exit code: 1"}
+]}'
+assert_rc "BU-024 legacy fallback, no marker, no success-veto evidence → unfixable" 0 dev_report_bot_unfixable 100 "newsha24"
+
+# BU-025 (success-veto specifics): `Exit code: 0` IS present, but the HEAD did
+# NOT move during the attempt (the pre-attempt `Reviewed HEAD:` trailer equals
+# the caller-supplied current head) → the veto does NOT apply; a no-commit
+# session that quotes a legacy 403 may genuinely be blocked → still unfixable.
+_MOCK_COMMENTS_JSON='{"comments":[
+  {"createdAt":"2026-06-26T10:30:00Z","author":{"login":"kane-review-agent"},"body":"Review findings:\nReviewed HEAD: `cccc2500`\n1. [P1] fix it."},
+  {"createdAt":"2026-06-26T10:45:00Z","author":{"login":"my-claw"},"body":'"$DTOK"'},
+  {"createdAt":"2026-06-26T11:00:00Z","author":{"login":"dev-bot[bot]"},"body":"403 Resource not accessible by integration on gh pr edit (PR body) — cannot make the required metadata change"},
+  {"createdAt":"2026-06-26T11:10:00Z","author":{"login":"dev-bot[bot]"},"body":"**Agent Session Report (Dev)**\n- Dev Session ID: `s25`\n- Exit code: 0"}
+]}'
+assert_rc "BU-025 exit-0 report but HEAD unmoved → veto does NOT apply → unfixable" 0 dev_report_bot_unfixable 100 "cccc2500"
+
 echo ""
 echo "=== Summary ==="
 echo "  PASS: $PASS"
