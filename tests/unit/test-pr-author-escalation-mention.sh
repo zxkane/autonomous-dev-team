@@ -356,29 +356,29 @@ DISPATCH_SRC=$(cat "$DISPATCH_LIB")
 WRAPPER_SRC=$(cat "$WRAPPER")
 
 # --- Converted sites (lib-dispatch.sh) ---
-assert_contains "TC-PAEM-030 INV-92 403-stall report calls resolve_pr_author_mention" \
-  "$DISPATCH_SRC" 'its scoped token hit \`Resource not accessible by integration\` on a PR-metadata edit, or the finding requires a maintainer / post-merge action. Marking stalled — no further \`dev-new\` will be dispatched. $(resolve_pr_author_mention "$_np_pr_number")'
+assert_contains "TC-PAEM-030 INV-92 403-stall report calls resolve_escalation_mention" \
+  "$DISPATCH_SRC" 'its scoped token hit \`Resource not accessible by integration\` on a PR-metadata edit, or the finding requires a maintainer / post-merge action. Marking stalled — no further \`dev-new\` will be dispatched. $(resolve_escalation_mention "$issue_num" "$_np_pr_number")'
 
-assert_contains "TC-PAEM-031 INV-85 no-progress stall report calls resolve_pr_author_mention" \
-  "$DISPATCH_SRC" 'The finding appears un-actionable by the dev agent. Marking stalled — no further \`dev-new\` will be dispatched. $(resolve_pr_author_mention "$_np_pr_number")'
+assert_contains "TC-PAEM-031 INV-85 no-progress stall report calls resolve_escalation_mention" \
+  "$DISPATCH_SRC" 'The finding appears un-actionable by the dev agent. Marking stalled — no further \`dev-new\` will be dispatched. $(resolve_escalation_mention "$issue_num" "$_np_pr_number")'
 
-assert_contains "TC-PAEM-032 INV-92 non-actionable stall report calls resolve_pr_author_mention" \
-  "$DISPATCH_SRC" 'Marking stalled — no \`dev-new\` will be dispatched (\`reason=non_actionable_finding\`). $(resolve_pr_author_mention "$_np_pr_number")'
+assert_contains "TC-PAEM-032 INV-92 non-actionable stall report calls resolve_escalation_mention" \
+  "$DISPATCH_SRC" 'Marking stalled — no \`dev-new\` will be dispatched (\`reason=non_actionable_finding\`). $(resolve_escalation_mention "$issue_num" "$_np_pr_number")'
 
-assert_contains "TC-PAEM-033 INV-105 convergence-breaker report calls resolve_pr_author_mention" \
-  "$DISPATCH_SRC" $'removal re-arms the pipeline and resets the retry counter, INV-05).**\n$(resolve_pr_author_mention "$_np_pr_number")'
+assert_contains "TC-PAEM-033 INV-105 convergence-breaker report calls resolve_escalation_mention" \
+  "$DISPATCH_SRC" $'removal re-arms the pipeline and resets the retry counter, INV-05).**\n$(resolve_escalation_mention "$issue_num" "$_np_pr_number")'
 
-assert_contains "TC-PAEM-034a _same_head_verdict_aware_recovery INV-92 branch calls resolve_pr_author_mention(pr_num)" \
-  "$DISPATCH_SRC" 'Marking stalled — no \`dev-new\` will be dispatched. $(resolve_pr_author_mention "$pr_num") please apply the change manually.'
+assert_contains "TC-PAEM-034a _same_head_verdict_aware_recovery INV-92 branch calls resolve_escalation_mention(issue_num, pr_num)" \
+  "$DISPATCH_SRC" 'Marking stalled — no \`dev-new\` will be dispatched. $(resolve_escalation_mention "$issue_num" "$pr_num") please apply the change manually.'
 
-assert_contains "TC-PAEM-034b _same_head_verdict_aware_recovery non-substantive-budget-spent branch calls resolve_pr_author_mention(pr_num)" \
-  "$DISPATCH_SRC" 'with no progress. Marking stalled rather than parking indefinitely. $(resolve_pr_author_mention "$pr_num") please investigate."
+assert_contains "TC-PAEM-034b _same_head_verdict_aware_recovery non-substantive-budget-spent branch calls resolve_escalation_mention(issue_num, pr_num)" \
+  "$DISPATCH_SRC" 'with no progress. Marking stalled rather than parking indefinitely. $(resolve_escalation_mention "$issue_num" "$pr_num") please investigate."
     mark_stalled "$issue_num"
     return 0
     ;;'
 
-assert_contains "TC-PAEM-034c _same_head_verdict_aware_recovery self-heal/crash-budget-spent branch calls resolve_pr_author_mention(pr_num)" \
-  "$DISPATCH_SRC" 'self-heal/crash-recovery \`dev-new\` for this HEAD with no progress. Marking stalled rather than parking indefinitely. $(resolve_pr_author_mention "$pr_num") please investigate."'
+assert_contains "TC-PAEM-034c _same_head_verdict_aware_recovery self-heal/crash-budget-spent branch calls resolve_escalation_mention(issue_num, pr_num)" \
+  "$DISPATCH_SRC" 'self-heal/crash-recovery \`dev-new\` for this HEAD with no progress. Marking stalled rather than parking indefinitely. $(resolve_escalation_mention "$issue_num" "$pr_num") please investigate."'
 
 assert_contains "TC-PAEM-034d _same_head_verdict_aware_recovery signature carries pr_num as 5th positional" \
   "$DISPATCH_SRC" 'local issue_num="$1" pr_ref="$2" current_head="$3" cause="$4" pr_num="${5:-}"'
@@ -387,11 +387,11 @@ assert_contains "TC-PAEM-034e caller passes pr_num to _same_head_verdict_aware_r
   "$DISPATCH_SRC" '_same_head_verdict_aware_recovery "$issue_num" "$pr_ref" "$current_head" "$_recovery_cause" "$pr_num" && return 0'
 
 # --- Converted site (autonomous-review.sh) ---
-assert_contains "TC-PAEM-035 INV-127 round-cap report calls resolve_pr_author_mention(PR_NUMBER)" \
-  "$WRAPPER_SRC" $'removal re-arms the pipeline).\n$(resolve_pr_author_mention "$PR_NUMBER")\nROUNDCAPREPORT'
+assert_contains "TC-PAEM-035 INV-127 round-cap report calls resolve_escalation_mention(ISSUE_NUMBER, PR_NUMBER)" \
+  "$WRAPPER_SRC" $'removal re-arms the pipeline).\n$(resolve_escalation_mention "$ISSUE_NUMBER" "$PR_NUMBER")\nROUNDCAPREPORT'
 
-assert_contains "TC-PAEM-036 [#453] same-HEAD E2E-gate breaker report calls resolve_pr_author_mention(PR_NUMBER)" \
-  "$WRAPPER_SRC" $'the pipeline).**\n$(resolve_pr_author_mention "$PR_NUMBER")\nGATEBREAKREPORT'
+assert_contains "TC-PAEM-036 [#453] same-HEAD E2E-gate breaker report calls resolve_escalation_mention(ISSUE_NUMBER, PR_NUMBER)" \
+  "$WRAPPER_SRC" $'the pipeline).**\n$(resolve_escalation_mention "$ISSUE_NUMBER" "$PR_NUMBER")\nGATEBREAKREPORT'
 
 # TC-PAEM-037/038 — end-to-end resolver behavior on the INV-85 no-progress
 # path is covered functionally by TC-PAEM-010/011 above (same resolver, same
@@ -403,12 +403,12 @@ assert_contains "TC-PAEM-036 [#453] same-HEAD E2E-gate breaker report calls reso
 # interpolation — #495 review round 4 finding #1) ---
 assert_contains "TC-PAEM-040 approval-failed fallback calls resolve_operator_mention" \
   "$WRAPPER_SRC" 'Review PASSED but formal PR approval failed (permission issue?). $(resolve_operator_mention) please approve and merge PR #${PR_NUMBER} manually.'
-assert_not_contains "TC-PAEM-040b approval-failed fallback never calls resolve_pr_author_mention" \
+assert_not_contains "TC-PAEM-040b approval-failed fallback never calls resolve_escalation_mention" \
   "$WRAPPER_SRC" 'approval failed (permission issue?). $(resolve_pr_author_mention'
 
 assert_contains "TC-PAEM-041 no-auto-close notice calls resolve_operator_mention" \
   "$WRAPPER_SRC" "Review PASSED — this issue has the 'no-auto-close' label. "'$(resolve_operator_mention) please review and merge PR #${PR_NUMBER} when ready.'
-assert_not_contains "TC-PAEM-041b no-auto-close notice never calls resolve_pr_author_mention" \
+assert_not_contains "TC-PAEM-041b no-auto-close notice never calls resolve_escalation_mention" \
   "$WRAPPER_SRC" "no-auto-close' label. \$(resolve_pr_author_mention"
 
 # --- Operator-target sites (validated via resolve_operator_mention, no
@@ -483,6 +483,79 @@ assert_contains "TC-PAEM-091 autonomous-review.sh sources lib-review-resolve-aut
   "$WRAPPER_SRC" 'source "${LIB_DIR}/lib-review-resolve-author.sh"'
 
 echo
+
+# ============================================================================
+# R5 ([INV-138], #492 integration) — resolve_escalation_mention composed chain
+# (issue author first, PR author second, operator target last) + the
+# three-state HUMAN_ESCALATION_LOGIN semantics (unset / set / set-EMPTY=mute).
+# ============================================================================
+echo
+echo "=== R5: resolve_escalation_mention composed chain + three-state mute ==="
+
+_run_chain() (
+  set -uo pipefail
+  export REPO_OWNER="the-owner"
+  chp_pr_view() {
+    case "${_RPAM_MODE:-ok}" in
+      fail) return 1 ;;
+      *) printf '{"author": %s}' "${_RPAM_AUTHOR:-null}" ;;
+    esac
+  }
+  issue_mention_login() { printf '%s' "${_REM_ISSUE_AUTHOR:-}"; }
+  export -f chp_pr_view issue_mention_login
+  # shellcheck source=../../skills/autonomous-dispatcher/scripts/lib-review-resolve-author.sh
+  source "$RESOLVE_LIB"
+  "$@"
+)
+
+# 1) human issue author wins over everything (the #492 primary signal)
+out=$(_REM_ISSUE_AUTHOR="filer-jane" _RPAM_MODE=ok _RPAM_AUTHOR='"alice"' _run_chain resolve_escalation_mention 7 42 2>/dev/null); rc=$?
+assert_rc_eq "TC-PAEM-170 chain: human issue author rc" "0" "$rc"
+assert_eq "TC-PAEM-170 chain: human issue author wins" "@filer-jane" "$out"
+
+# 2) BOT issue author (dispatcher-filed follow-up) falls to the PR author
+out=$(_REM_ISSUE_AUTHOR="my-claw[bot]" _RPAM_MODE=ok _RPAM_AUTHOR='"alice"' _run_chain resolve_escalation_mention 7 42 2>/dev/null)
+assert_eq "TC-PAEM-171 chain: bot issue author falls to human PR author" "@alice" "$out"
+
+# 3) bot issue author + bot PR author → operator fallback
+out=$(_REM_ISSUE_AUTHOR="app/filer-bot" _RPAM_MODE=ok _RPAM_AUTHOR='"app/dev-bot"' _run_chain resolve_escalation_mention 7 42 2>/dev/null)
+assert_eq "TC-PAEM-172 chain: both authors bots → REPO_OWNER" "@the-owner" "$out"
+
+# 4) unresolved issue author (empty) + no PR arg → operator fallback
+out=$(_REM_ISSUE_AUTHOR="" _run_chain resolve_escalation_mention 7 2>/dev/null)
+assert_eq "TC-PAEM-173 chain: empty issue author, no PR → REPO_OWNER" "@the-owner" "$out"
+
+# 5) malformed issue author (embedded @) is rejected, falls to PR author
+out=$(_REM_ISSUE_AUTHOR="alice@evil" _RPAM_MODE=ok _RPAM_AUTHOR='"bob"' _run_chain resolve_escalation_mention 7 42 2>/dev/null)
+assert_eq "TC-PAEM-174 chain: malformed issue author falls to PR author" "@bob" "$out"
+
+# 6) non-numeric issue arg skips the issue step entirely
+out=$(_REM_ISSUE_AUTHOR="filer-jane" _RPAM_MODE=ok _RPAM_AUTHOR='"alice"' _run_chain resolve_escalation_mention "" 42 2>/dev/null)
+assert_eq "TC-PAEM-175 chain: empty issue arg skips to PR author" "@alice" "$out"
+
+# --- three-state HUMAN_ESCALATION_LOGIN ([INV-138]) ---
+# set EMPTY = explicit mute: NO mention at all, even on github
+out=$(HUMAN_ESCALATION_LOGIN="" _run_chain resolve_operator_mention 2>/dev/null); rc=$?
+assert_rc_eq "TC-PAEM-180 mute: rc stays 0" "0" "$rc"
+assert_eq "TC-PAEM-180 mute: set-EMPTY HUMAN_ESCALATION_LOGIN emits NOTHING" "" "$out"
+
+# mute applies at the end of the full chain too (both authors bots)
+out=$(HUMAN_ESCALATION_LOGIN="" _REM_ISSUE_AUTHOR="app/a" _RPAM_MODE=ok _RPAM_AUTHOR='"app/b"' _run_chain resolve_escalation_mention 7 42 2>/dev/null)
+assert_eq "TC-PAEM-181 mute: chain terminal is silent under set-EMPTY" "" "$out"
+
+# ...but a resolvable HUMAN target still wins over mute-position fallback
+out=$(HUMAN_ESCALATION_LOGIN="" _REM_ISSUE_AUTHOR="filer-jane" _run_chain resolve_escalation_mention 7 42 2>/dev/null)
+assert_eq "TC-PAEM-182 mute: does not suppress a resolved human author" "@filer-jane" "$out"
+
+# unset on a NON-github provider: default chain emits nothing (no group blast)
+out=$(ISSUE_PROVIDER=gitlab _run_chain resolve_operator_mention 2>/dev/null); rc=$?
+assert_rc_eq "TC-PAEM-183 gitlab default: rc stays 0" "0" "$rc"
+assert_eq "TC-PAEM-183 gitlab default: unset + gitlab emits NOTHING (no group blast)" "" "$out"
+
+# unset on github: REPO_OWNER preserved (byte-compat with pre-change behavior)
+out=$(ISSUE_PROVIDER=github _run_chain resolve_operator_mention 2>/dev/null)
+assert_eq "TC-PAEM-184 github default: unset falls back to @REPO_OWNER" "@the-owner" "$out"
+
 echo "=== Summary ==="
 echo "Passed: $PASS"
 echo "Failed: $FAIL"

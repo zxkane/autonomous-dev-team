@@ -113,21 +113,47 @@ _rpam_malformed_mention_token() {
 # already enforced by every caller's own top-level `: "${REPO_OWNER:?...}"` /
 # required-env loop, so this never emits an empty token in production.
 #
+# THREE-STATE `HUMAN_ESCALATION_LOGIN` semantics ([INV-138]; mirrors
+# `REVIEW_PROTECTED_PATHS`' no-colon `${VAR-default}` unset-vs-empty
+# distinction):
+#   - UNSET        → default chain: `@REPO_OWNER` on github;
+#                    NO MENTION (empty output) on a non-github provider,
+#                    where `REPO_OWNER` is a group/namespace and mentioning
+#                    it blasts every member (#492's no-group-ping decision).
+#   - SET NON-EMPTY→ `@<login>` (validated single token).
+#   - SET EMPTY    → MUTE: emit nothing. The operator has explicitly said
+#                    "no mention on escalations" — repo config decides.
+#
+# Callers embed `$(resolve_…_mention …)` directly in comment bodies, so an
+# empty emission renders cleanly (no dangling bare `@`).
+#
 # A configured `HUMAN_ESCALATION_LOGIN` that fails
 # `_rpam_malformed_mention_token` (round 3 finding: printed VERBATIM, it
 # could carry whitespace/`@` into the mention and break the exactly-one-
-# token contract R2 requires) is treated as absent — falls through to
-# `REPO_OWNER` — rather than aborting or emitting the bad value.
+# token contract R2 requires) is treated as UNSET — falls through to the
+# default chain — rather than aborting or emitting the bad value.
 _rpam_fallback() {
-  local human="${HUMAN_ESCALATION_LOGIN:-}"
-  if [ -n "$human" ] && ! _rpam_malformed_mention_token "$human"; then
-    printf '@%s' "$human"
-    return 0
+  # Distinguish set-empty (mute) from unset (default chain): `${VAR+x}` is
+  # non-empty iff the var is SET (even to "").
+  if [ -n "${HUMAN_ESCALATION_LOGIN+x}" ]; then
+    local human="${HUMAN_ESCALATION_LOGIN}"
+    if [ -z "$human" ]; then
+      # Explicit mute — the operator opted out of escalation mentions.
+      return 0
+    fi
+    if ! _rpam_malformed_mention_token "$human"; then
+      printf '@%s' "$human"
+      return 0
+    fi
+    echo "WARN: resolve mention: configured HUMAN_ESCALATION_LOGIN '${human}' is not a valid single-token mention — treating as unset" >&2
   fi
-  if [ -n "$human" ]; then
-    echo "WARN: resolve_pr_author_mention: configured HUMAN_ESCALATION_LOGIN '${human}' is not a valid single-token mention — falling back to REPO_OWNER" >&2
+  # Default chain (unset / malformed): REPO_OWNER is a person on GitHub but a
+  # group/namespace on GitLab — mentioning a GitLab group notifies every
+  # member, worse than an un-mentioned notice ([INV-134]/#492).
+  if [ "${ISSUE_PROVIDER:-github}" = "github" ]; then
+    printf '@%s' "${REPO_OWNER:-}"
   fi
-  printf '@%s' "${REPO_OWNER:-}"
+  return 0
 }
 
 # resolve_operator_mention — the validated operator-target mention for sites
@@ -148,12 +174,61 @@ resolve_operator_mention() {
   _rpam_fallback
 }
 
+# resolve_escalation_mention <ISSUE_NUMBER> [PR_NUMBER]
+#
+# The COMPOSED mention chain for PR/issue-scoped escalation comments
+# ([INV-138]): ISSUE AUTHOR first, PR author second, operator target last.
+#
+#   1. Issue author (primary — #492's insight): this pipeline is issue-driven,
+#      so the issue author is the human owner of the work item (the AC/scope
+#      is theirs to fix when a loop stalls). Resolved via the raw
+#      `issue_mention_login` read (lib-issue-provider.sh), then run through
+#      the SAME bot-detection + malformed-token validation as every other
+#      candidate — a dispatcher-created follow-up issue's author IS a bot,
+#      and must not short-circuit the chain.
+#   2. PR author (secondary — #495's resolver): normally the dev-agent bot on
+#      autonomous PRs (so normally skipped by its own bot check), but a HUMAN
+#      PR author — an external contribution linked to a bot-filed issue —
+#      is exactly who should hear about that PR's stall.
+#   3. `_rpam_fallback` (terminal): HUMAN_ESCALATION_LOGIN's three-state
+#      semantics (unset → provider-scoped default; set → that login; set
+#      EMPTY → mute), then `@REPO_OWNER` on github / no mention on gitlab.
+#
+# Same contract as the sibling resolvers: ALWAYS rc 0; at most one mention
+# token on stdout (possibly EMPTY under mute/gitlab-default); diagnostics to
+# stderr only. `issue_mention_login` may be unavailable in a caller that
+# sourced only this lib — the declare -F guard degrades to step 2.
+resolve_escalation_mention() {
+  local issue="${1:-}" pr="${2:-}"
+  if [[ "$issue" =~ ^[0-9]+$ ]] && declare -F issue_mention_login >/dev/null 2>&1; then
+    local _rem_login
+    # `|| true`: a failed issue-author read degrades to EMPTY → the chain
+    # falls to the PR author / operator target (fail-toward-fallback, never
+    # an abort — same courtesy-read posture as issue_mention_login itself).
+    _rem_login="$(issue_mention_login "$issue" 2>/dev/null || true)"
+    if [ -n "$_rem_login" ] && ! _rpam_malformed_mention_token "$_rem_login" \
+       && ! _rpam_is_bot_login "$_rem_login"; then
+      printf '@%s' "$_rem_login"
+      return 0
+    fi
+    [ -n "$_rem_login" ] && \
+      echo "INFO: resolve_escalation_mention: issue #${issue} author '${_rem_login}' is a bot or malformed — trying the PR author" >&2
+  fi
+  if [[ "$pr" =~ ^[0-9]+$ ]]; then
+    resolve_pr_author_mention "$pr"
+    return 0
+  fi
+  _rpam_fallback
+  return 0
+}
+
 # resolve_pr_author_mention <PR_NUMBER>
 #
 # ALWAYS exits 0 (never aborts a `set -e` caller — every internal failure path
-# routes to `_rpam_fallback` and returns rc 0, never `return 1`). Emits EXACTLY
-# ONE non-empty `@<login>` mention token on stdout; diagnostics only to
-# stderr.
+# routes to `_rpam_fallback` and returns rc 0, never `return 1`). Emits
+# AT MOST ONE `@<login>` mention token on stdout (possibly EMPTY when the
+# fallback chain resolves to mute / the gitlab no-group-ping default);
+# diagnostics only to stderr.
 #
 # Success path: `chp_pr_view PR author` resolves a non-null, non-empty,
 # single-token STRING, NOT-a-bot author → `@<login>`.

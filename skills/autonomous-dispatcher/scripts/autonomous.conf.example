@@ -106,19 +106,30 @@ REPO_OWNER="owner"
 REPO_NAME="repo-name"
 PROJECT_DIR="/path/to/project"
 
-# HUMAN_ESCALATION_LOGIN — individual login to mention on escalations;
-# defaults to REPO_OWNER; set this on GitLab where REPO_OWNER is a group
-# (issue #495). PR-scoped stall/escalation comments first try to mention the
-# PR's actual human author (via `resolve_pr_author_mention`, which detects and
-# skips bot authors — an autonomous PR's author is normally the dev-agent bot
-# itself); when that resolution isn't possible the comment falls back to this
-# login, then to REPO_OWNER. On GitHub, REPO_OWNER is usually an individual
-# account so the default is fine; on GitLab, REPO_OWNER is the project's
-# *group* namespace, so mentioning it fans out to every group member on every
-# stall — set HUMAN_ESCALATION_LOGIN to a specific maintainer to avoid that.
+# HUMAN_ESCALATION_LOGIN — the escalation-mention target, with THREE-STATE
+# semantics ([INV-138]; mirrors REVIEW_PROTECTED_PATHS' unset-vs-empty
+# distinction):
 #
-#   HUMAN_ESCALATION_LOGIN="maintainer-username"
-HUMAN_ESCALATION_LOGIN=""
+#   - UNSET (leave this line commented out)  → default chain: escalation
+#     comments mention @REPO_OWNER on GitHub; on GitLab they post with NO
+#     mention (REPO_OWNER there is the *group* namespace — mentioning it
+#     fans out to every member on every stall).
+#   - SET to a login                          → that individual is mentioned.
+#   - SET to "" (explicitly empty)            → MUTE: escalation comments
+#     post with no mention at all. Use this when notification routing is
+#     handled elsewhere (e.g. a webhook/chat integration watching the repo).
+#
+# This is the TERMINAL fallback of the composed mention chain
+# (resolve_escalation_mention, [INV-138]): PR/issue-scoped stall comments
+# first try the ISSUE author (the human who filed the work item), then the
+# PR author — both with bot-detection, since autonomous PRs (and
+# dispatcher-filed follow-up issues) are bot-authored — and only then this
+# value. The two maintainer-action sites ("please approve and merge") skip
+# the author steps and use this target (or its default) directly.
+#
+#   HUMAN_ESCALATION_LOGIN="maintainer-username"   # ping that person
+#   HUMAN_ESCALATION_LOGIN=""                      # mute all escalation pings
+# (leave unset for the provider-scoped default)
 
 # DEV_BOT_LOGIN — the dev-agent's login/username, for the dispatcher-side
 # half of resolve_pr_author_mention's bot-detection rule (issue #495 review

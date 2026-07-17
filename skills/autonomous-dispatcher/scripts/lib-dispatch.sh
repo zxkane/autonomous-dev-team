@@ -1846,7 +1846,7 @@ handle_completed_session_routing() {
             | jq -r "[.[].body | select(contains(\"${_np_notice_marker}\"))] | length" \
             2>/dev/null | grep -q '^0$'; then
           itp_post_comment "$issue_num" \
-            "Substantive review failure on completed session \`${session_id}\` is **not resolvable by the autonomous dev agent**: its scoped token hit \`Resource not accessible by integration\` on a PR-metadata edit, or the finding requires a maintainer / post-merge action. Marking stalled — no further \`dev-new\` will be dispatched. $(resolve_pr_author_mention "$_np_pr_number") please apply the PR-body / metadata change manually, or split the post-merge criterion into a follow-up. (\`${_np_notice_marker}\`)"
+            "Substantive review failure on completed session \`${session_id}\` is **not resolvable by the autonomous dev agent**: its scoped token hit \`Resource not accessible by integration\` on a PR-metadata edit, or the finding requires a maintainer / post-merge action. Marking stalled — no further \`dev-new\` will be dispatched. $(resolve_escalation_mention "$issue_num" "$_np_pr_number") please apply the PR-body / metadata change manually, or split the post-merge criterion into a follow-up. (\`${_np_notice_marker}\`)"
         fi
         mark_stalled "$issue_num"
         return 0
@@ -1866,7 +1866,7 @@ handle_completed_session_routing() {
             | jq -r "[.[].body | select(contains(\"${_np_notice_marker}\"))] | length" \
             2>/dev/null | grep -q '^0$'; then
           itp_post_comment "$issue_num" \
-            "Substantive review failure on completed session \`${session_id}\`, but PR HEAD \`${_np_current_head}\` is unchanged since the last review and a prior fresh dev session already ran against it without producing a new commit. The finding appears un-actionable by the dev agent. Marking stalled — no further \`dev-new\` will be dispatched. $(resolve_pr_author_mention "$_np_pr_number") please investigate. (\`${_np_notice_marker}\`)"
+            "Substantive review failure on completed session \`${session_id}\`, but PR HEAD \`${_np_current_head}\` is unchanged since the last review and a prior fresh dev session already ran against it without producing a new commit. The finding appears un-actionable by the dev agent. Marking stalled — no further \`dev-new\` will be dispatched. $(resolve_escalation_mention "$issue_num" "$_np_pr_number") please investigate. (\`${_np_notice_marker}\`)"
         fi
         mark_stalled "$issue_num"
         return 0
@@ -1912,7 +1912,7 @@ handle_completed_session_routing() {
             _na_pat_sentence=" Matched \`REVIEW_PROTECTED_PATHS\` pattern(s): ${_na_patterns}."
           fi
           itp_post_comment "$issue_num" \
-            "Substantive review failure on completed session \`${session_id}\` is **not resolvable by the autonomous dev agent**: the review classified every blocking finding as requiring a human or a privileged token the agent's scoped token lacks (e.g. a \`.github/workflows\` edit needs the \`workflows\` scope, or a CODEOWNERS / maintainer-owned change — [INV-92]).${_na_pat_sentence} Marking stalled — no \`dev-new\` will be dispatched (\`reason=non_actionable_finding\`). $(resolve_pr_author_mention "$_np_pr_number") please apply the change manually, grant the required scope, or split the criterion into a maintainer follow-up. (\`${_na_marker}\`)"
+            "Substantive review failure on completed session \`${session_id}\` is **not resolvable by the autonomous dev agent**: the review classified every blocking finding as requiring a human or a privileged token the agent's scoped token lacks (e.g. a \`.github/workflows\` edit needs the \`workflows\` scope, or a CODEOWNERS / maintainer-owned change — [INV-92]).${_na_pat_sentence} Marking stalled — no \`dev-new\` will be dispatched (\`reason=non_actionable_finding\`). $(resolve_escalation_mention "$issue_num" "$_np_pr_number") please apply the change manually, grant the required scope, or split the criterion into a maintainer follow-up. (\`${_na_marker}\`)"
         fi
         mark_stalled "$issue_num"
         return 0
@@ -2106,7 +2106,7 @@ $(if [ -n "$_cb_verdict_body" ]; then printf '  > %s\n' "${_cb_verdict_body:0:60
 - [ ] Close the issue, or split the un-satisfiable part into a maintainer follow-up.
 
 **To resume: fix per the checklist above, then REMOVE the \`stalled\` label (the \`autonomous\` label is retained; removal re-arms the pipeline and resets the retry counter, INV-05).**
-$(resolve_pr_author_mention "$_np_pr_number")
+$(resolve_escalation_mention "$issue_num" "$_np_pr_number")
 CBREPORT
 )"
         return 0
@@ -3922,7 +3922,7 @@ _same_head_verdict_aware_recovery() {
         _na_pat_sentence=" Matched \`REVIEW_PROTECTED_PATHS\` pattern(s): ${_na_patterns}."
       fi
       itp_post_comment "$issue_num" \
-        "PR ${pr_ref} HEAD \`${current_head}\` was reviewed with a FAILED verdict that classified every blocking finding as **not resolvable by the autonomous dev agent** (requires a human or a privileged token the agent's scoped token lacks, [INV-92]), and ${_cause_desc}.${_na_pat_sentence} Marking stalled — no \`dev-new\` will be dispatched. $(resolve_pr_author_mention "$pr_num") please apply the change manually. (\`${_na_marker}\`)"
+        "PR ${pr_ref} HEAD \`${current_head}\` was reviewed with a FAILED verdict that classified every blocking finding as **not resolvable by the autonomous dev agent** (requires a human or a privileged token the agent's scoped token lacks, [INV-92]), and ${_cause_desc}.${_na_pat_sentence} Marking stalled — no \`dev-new\` will be dispatched. $(resolve_escalation_mention "$issue_num" "$pr_num") please apply the change manually. (\`${_na_marker}\`)"
     fi
     mark_stalled "$issue_num"
     return 0
@@ -3955,7 +3955,7 @@ _same_head_verdict_aware_recovery() {
     # freeze count_retries forever with no way for MAX_RETRIES to trip).
     log "  issue #${issue_num} ${cause} same-HEAD branch: non-substantive re-review budget already spent for HEAD ${current_head} — marking stalled ([INV-125])"
     itp_post_comment "$issue_num" \
-      "PR ${pr_ref} HEAD \`${current_head}\` already consumed its one bounded non-substantive re-review for this HEAD (\`${_ns_marker}\`) with no progress. Marking stalled rather than parking indefinitely. $(resolve_pr_author_mention "$pr_num") please investigate."
+      "PR ${pr_ref} HEAD \`${current_head}\` already consumed its one bounded non-substantive re-review for this HEAD (\`${_ns_marker}\`) with no progress. Marking stalled rather than parking indefinitely. $(resolve_escalation_mention "$issue_num" "$pr_num") please investigate."
     mark_stalled "$issue_num"
     return 0
     ;;
@@ -3976,7 +3976,7 @@ _same_head_verdict_aware_recovery() {
       # [INV-125] Part 2: budget already spent — mark_stalled, never the park.
       log "  issue #${issue_num} ${cause} same-HEAD branch: dev-new recovery budget already spent for HEAD ${current_head} — marking stalled ([INV-125])"
       itp_post_comment "$issue_num" \
-        "PR ${pr_ref} HEAD \`${current_head}\` already consumed its one bounded self-heal/crash-recovery \`dev-new\` for this HEAD with no progress. Marking stalled rather than parking indefinitely. $(resolve_pr_author_mention "$pr_num") please investigate."
+        "PR ${pr_ref} HEAD \`${current_head}\` already consumed its one bounded self-heal/crash-recovery \`dev-new\` for this HEAD with no progress. Marking stalled rather than parking indefinitely. $(resolve_escalation_mention "$issue_num" "$pr_num") please investigate."
       mark_stalled "$issue_num"
       return 0
     fi

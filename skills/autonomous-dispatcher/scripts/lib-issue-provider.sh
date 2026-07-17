@@ -120,3 +120,44 @@ itp_label_event_ts()       { itp_${ISSUE_PROVIDER}_label_event_ts "$@"; }
 itp_caps() {
   _provider_read_cap "${_LIB_ITP_PROVIDERS_DIR}/itp-${ISSUE_PROVIDER}.caps" "$@"
 }
+
+# issue_mention_login ISSUE — resolve the ISSUE AUTHOR's raw LOGIN ([INV-138]).
+#
+# Returns a single-user handle only (GitHub `.author.login` / GitLab
+# `.author.username`), never a display name or email, resolved via the
+# abstract `itp_read_task ISSUE author` seam — provider-portable. Emits EMPTY
+# when the author is unresolved (absent field or a read_task failure).
+#
+# Deliberately NO fallback policy here (an earlier draft collapsed
+# "unresolved on github" into `$REPO_OWNER`, which made it impossible for the
+# composed mention chain to distinguish a real author from a fallback):
+# fallback ordering — bot-detection, `HUMAN_ESCALATION_LOGIN`'s three-state
+# semantics, the provider-scoped `REPO_OWNER`/no-mention default — lives in
+# ONE place, `lib-review-resolve-author.sh::resolve_escalation_mention`, which
+# consumes this raw read as its primary signal — production sites call THAT
+# chain, never this helper directly; an empty chain result renders cleanly
+# (at most a collapsed double-space in the comment body).
+#
+# An empty resolution emits ONE debug line (when `log` is defined — the two
+# non-dispatcher sourcers `status.sh` / `mark-issue-checkbox.sh` do not define
+# it and never call this helper anyway) so an operator debugging a
+# recipient-less escalation has a trail correlating the missing ping to this
+# resolution path, rather than mistaking it for "the mention code never ran".
+#
+# Never aborts: a read_task failure degrades to the same path as an absent
+# author (this is a courtesy notify target, not a correctness gate). Runs under
+# the caller's `set -euo pipefail`, so the read is guarded with `|| true`.
+issue_mention_login() {
+  local issue="$1" author=""
+  author="$(itp_read_task "$issue" author 2>/dev/null | jq -r '.author // empty' 2>/dev/null || true)"
+  if [[ -z "$author" ]]; then
+    # MUST go to stderr: this helper's STDOUT is captured by the callers'
+    # `_mention="$(issue_mention_login …)"` substitution, and the codebase's
+    # `log()` writes to stdout — an un-redirected `log` here would land the
+    # breadcrumb text INSIDE `_mention` and render it into the comment body.
+    # `>&2` forces stderr regardless of `log`'s own channel.
+    declare -F log >/dev/null 2>&1 \
+      && log "  issue #${issue}: no issue-author @-mention target resolved (provider=${ISSUE_PROVIDER:-github}) [INV-138]" >&2
+  fi
+  printf '%s' "$author"
+}

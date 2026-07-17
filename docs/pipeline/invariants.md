@@ -8507,3 +8507,31 @@ _Triage (issue #236): [machine-checked: tests/unit/test-review-classify.sh]_
 - [`review-agent-flow.md`](review-agent-flow.md) — the per-finding classification step, updated with the capability-aware default + D4 marker.
 
 ---
+
+## INV-138: escalation mentions resolve through ONE composed chain — issue author (bot-checked) first, PR author second, `HUMAN_ESCALATION_LOGIN`'s three-state semantics last — and an explicit-EMPTY `HUMAN_ESCALATION_LOGIN` is a MUTE, never a fall-through
+
+_Triage (issue #236): [machine-checked: tests/unit/test-pr-author-escalation-mention.sh, tests/unit/test-issue-mention-login.sh]_
+
+**Rule**: every PR/issue-scoped human-escalation comment (the stall/breaker reports previously converted to `resolve_pr_author_mention` by #495) resolves its `@`-mention through `resolve_escalation_mention <issue> [pr]` (`lib-review-resolve-author.sh`), which composes exactly this chain:
+
+1. **Issue author** (primary — #492): the raw `issue_mention_login` read (`lib-issue-provider.sh`, the `itp_read_task ISSUE author` seam), validated by the SAME `_rpam_is_bot_login` + `_rpam_malformed_mention_token` rules as every other candidate. The pipeline is issue-driven — the issue author is the human owner of the work item; but a dispatcher-filed follow-up issue's author IS a bot and must not short-circuit the chain.
+2. **PR author** (secondary — #495's `resolve_pr_author_mention`, unchanged semantics): normally the dev-agent bot on autonomous PRs (self-skipping via its own bot check), but a human PR author — an external contribution — is exactly who should hear about that PR's stall.
+3. **`_rpam_fallback`** (terminal, shared with `resolve_operator_mention`): `HUMAN_ESCALATION_LOGIN` is **three-state**, mirroring `REVIEW_PROTECTED_PATHS`' no-colon unset-vs-empty distinction:
+   - **UNSET** → provider-scoped default: `@REPO_OWNER` on github; **no mention** on a non-github provider (`REPO_OWNER` there is a group/namespace — mentioning it blasts every member, #492's no-group-ping decision, now enforced in the shared fallback rather than per-helper).
+   - **SET non-empty** → `@<login>` (validated single token; malformed → treated as unset, WARN).
+   - **SET EMPTY** → **MUTE**: the operator has explicitly opted out of escalation mentions — the comment posts un-mentioned. Repo config decides; the resolver never "helpfully" substitutes a target.
+
+`issue_mention_login` itself is a RAW read — it emits the author login or empty, with **no fallback policy of its own** (an earlier draft's github-side `REPO_OWNER` fallback inside the helper made a real author indistinguishable from a fallback at the chain layer; policy lives in exactly one place, `_rpam_fallback`).
+
+**Why**: #492 and #495 solved the same GitLab group-blast problem with complementary halves — #495 built the validated resolver/bot-detection/conf-var infrastructure but keyed on the PR author, which on this pipeline is almost always the dev-agent bot (so the resolver nearly always fell through); #492 keyed on the issue author (almost always a human) but lacked bot detection (a dispatcher-filed follow-up would mention a bot) and validation. The composed chain keeps #492's signal with #495's guards. The mute state exists because the maintainer-target sites ("please approve and merge") are a repo-operations preference: some installs want a named maintainer, some want the github default, and some want silence — that is config, not code policy.
+
+**Contract** (all three entry points — `resolve_escalation_mention`, `resolve_pr_author_mention`, `resolve_operator_mention`): ALWAYS rc 0 under `set -euo pipefail`; AT MOST one `@<token>` on stdout (possibly EMPTY under mute / the non-github default); diagnostics to stderr only.
+
+**Status**: **ENFORCED** (supersedes the mention-target half of the #495 entry; the #495 resolver/validation infrastructure is unchanged underneath).
+**Test**: `tests/unit/test-pr-author-escalation-mention.sh` TC-PAEM-070..075 (chain ordering: human issue author wins; bot issue author falls to human PR author; both-bots falls to operator; empty-author + no-PR falls through; malformed issue author rejected; empty issue arg skips), TC-PAEM-080..084 (three-state: set-EMPTY mutes the operator target and the full chain's terminal, but never suppresses a resolved human author; unset+gitlab emits nothing; unset+github preserves `@REPO_OWNER`), plus the pre-existing TC-PAEM-01x/02x resolver rows unchanged. `tests/unit/test-issue-mention-login.sh` (raw read: author/empty on both providers, no-abort on read failure, no helper-level fallback).
+
+**Cross-references**:
+- The provider-leaf `author` field (provider-spec.md §3.1 `read_task` row) this chain's primary signal reads — added by #492's provider-leaf work and folded into THIS invariant (no standalone invariant number; the base work predated the INV-134 CI-rollup entry claiming that number).
+- The #495 resolver entry — bot-detection rules, malformed-token validation, `DEV_BOT_LOGIN`, all consumed unchanged.
+
+---

@@ -460,6 +460,24 @@ out=$(itp_gitlab_read_task 42 "body") || true
 assert_eq "TC-WB-041 absent body → empty string" "" "$(jq -r '.body' <<<"$out")"
 rm -f "$pl"
 
+# TC-WB-041b [INV-138] author → .author.username, absent → "".
+_gl_stub_reset
+pl=$(mktemp); cat > "$pl" <<'JSON'
+{"iid": 42, "title": "t", "description": "b", "state": "opened", "labels": [], "author": {"username": "gl-filer"}}
+JSON
+_GL_STUB_PAYLOAD="$pl"
+out=$(itp_gitlab_read_task 42 "author") || true
+assert_eq "TC-WB-041b author → .author.username" "gl-filer" "$(jq -r '.author' <<<"$out")"
+rm -f "$pl"
+_gl_stub_reset
+pl=$(mktemp); cat > "$pl" <<'JSON'
+{"iid": 42, "title": "t", "state": "opened", "labels": []}
+JSON
+_GL_STUB_PAYLOAD="$pl"
+out=$(itp_gitlab_read_task 42 "author") || true
+assert_eq "TC-WB-041b absent author → empty string" "" "$(jq -r '.author' <<<"$out")"
+rm -f "$pl"
+
 # TC-WB-042 comments requested → same-tick list_comments folds INV-90 array.
 _gl_stub_reset
 notes=$(mktemp); cat > "$notes" <<'JSON'

@@ -177,12 +177,14 @@ itp_github_list_forbidden_combos() {
 # itp_github_read_task ISSUE FIELDS_CSV — single-task ABSTRACT field read
 # ([W1b], #396, #347 phase-2).
 #
-# Spec §3.1: FIELDS_CSV ⊆ title,body,state,labels,comments. Returns a single
-# JSON object with EXACTLY the requested fields, normalized: title/body as
-# strings (absent body → ""), state passed through as GitHub's own OPEN/CLOSED
-# token (already the provider-neutral vocabulary — deliberate, so status.sh's
-# `_next_action` gate ships byte-unchanged), labels as an array of NAME
-# strings (not `{name}` objects), comments as the [INV-90] normalized array.
+# Spec §3.1: FIELDS_CSV ⊆ title,body,state,labels,comments,author. Returns a
+# single JSON object with EXACTLY the requested fields, normalized: title/body
+# as strings (absent body → ""), state passed through as GitHub's own
+# OPEN/CLOSED token (already the provider-neutral vocabulary — deliberate, so
+# status.sh's `_next_action` gate ships byte-unchanged), labels as an array of
+# NAME strings (not `{name}` objects), comments as the [INV-90] normalized
+# array, author as the issue-CREATOR login string ([INV-138]; `.author.login`,
+# absent → "") — the @-mention target for human-notice comments.
 # No gh flags / jq programs cross the seam — this leaf owns the `--json` field
 # mapping AND the normalization jq internally (unlike the pre-#396
 # byte-identical passthrough this replaces). Fail-closed: a `gh` failure or
@@ -197,11 +199,19 @@ itp_github_list_forbidden_combos() {
 itp_github_read_task() {
   local issue="$1" fields_csv="$2" fields_json raw comments_json='[]'
   fields_json=$(printf '%s' "$fields_csv" | jq -R -s -c 'split(",") | map(select(length > 0))')
+  # `author` is appended to the GraphQL field set ONLY when requested ([INV-138]),
+  # exactly like `comments` below — so the argv for the pre-[INV-138] callers
+  # (`title,body,state,labels`) stays byte-identical and their golden traces
+  # ship unchanged. `,author,` match tolerates leading/trailing/middle position.
+  local _view_fields="title,body,state,labels"
+  case ",${fields_csv}," in
+    *,author,*) _view_fields="title,body,state,labels,author" ;;
+  esac
   # Fail-closed: capture-then-check. `gh` emitting empty stdout with rc 0
   # (stub drift, transport oddity) must NOT normalize to `{}` rc 0 — jq on
   # empty input runs the program zero times and exits 0, which would turn a
   # failed read into a silent empty object (fail-OPEN at the dep gate).
-  raw=$(gh issue view "$issue" --repo "$REPO" --json title,body,state,labels) || return 1
+  raw=$(gh issue view "$issue" --repo "$REPO" --json "$_view_fields") || return 1
   [[ -n "$raw" ]] || return 1
   case ",${fields_csv}," in
     *,comments,*)
@@ -215,7 +225,8 @@ itp_github_read_task() {
           body: (.body // ""),
           state: (.state // ""),
           labels: [ (.labels // [])[].name ],
-          comments: $comments
+          comments: $comments,
+          author: (.author.login // "")
         } as $norm
         | ($fields | map({(.): $norm[.]}) | add // {})
       ' <<<"$raw"

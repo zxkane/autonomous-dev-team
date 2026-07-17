@@ -228,7 +228,11 @@ tick_inline_project() {
     # keys work correctly for a local (path-entry) project, whose
     # autonomous.conf is sourced directly. Charset-restricted by
     # validate_inline_block above like every other inline RHS.
-    [[ -n "${HUMAN_ESCALATION_LOGIN:-}" ]] && export HUMAN_ESCALATION_LOGIN
+    # `${VAR+x}` (SET test, not non-empty test): HUMAN_ESCALATION_LOGIN is
+    # three-state ([INV-138]) — set-EMPTY is an explicit MUTE and must
+    # propagate to the tick subprocess just like a set login; only a
+    # genuinely UNSET var falls through to the provider-scoped default.
+    [[ -n "${HUMAN_ESCALATION_LOGIN+x}" ]] && export HUMAN_ESCALATION_LOGIN
     [[ -n "${DEV_BOT_LOGIN:-}" ]]          && export DEV_BOT_LOGIN
     # Inline projects don't have a dispatcher-side PROJECT_DIR (the source
     # lives on the remote box). dispatcher-tick.sh validates PROJECT_DIR is
