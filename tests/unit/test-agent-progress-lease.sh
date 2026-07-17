@@ -1293,6 +1293,50 @@ else
   echo "  SKIP: TC-LEASE-032/033 (python3 not available)"
 fi
 
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-LEASE-034: closed-reader SIGPIPE classified as terminal, not retried as EAGAIN (issue #510 round-1 review) ==="
+# ---------------------------------------------------------------------------
+# Drives the REAL _agent_progress_recorder_fastpath_write against a reader
+# that has ALREADY EXITED (a genuinely dead reader, not a merely-stalled
+# one) — the SIGPIPE case the round-1 review flagged: printf's command
+# substitution is killed outright by an un-ignored SIGPIPE (exit 141, EMPTY
+# captured stderr) rather than catching the error in-process and printing
+# "write error: Broken pipe" itself. Before the fix, the bare exit-code
+# check only compared against 0 and then string-matched "Broken pipe" in
+# the (empty) captured err, so a 141 fell through every time to the EAGAIN
+# retry branch and burned the whole ~2s budget against a reader that could
+# never drain. Bounded via `timeout` so a regression hangs the test run
+# instead of the whole suite.
+CLOSED_READER_ERR="$TMPROOT/closed-reader-err.log"
+closed_reader_start=$(date +%s.%N 2>/dev/null || date +%s)
+closed_reader_out=$(
+  timeout 10 bash -c '
+    set -uo pipefail
+    source "'"$LIB"'"
+    exec {write_fd}> >(exit 0)
+    sleep 0.3
+    _agent_progress_recorder_fastpath_write "this record is long enough to force a real write attempt against the closed pipe end" 1>&"$write_fd"
+    echo "rc=$?"
+  ' 2>"$CLOSED_READER_ERR"
+)
+closed_reader_end=$(date +%s.%N 2>/dev/null || date +%s)
+closed_reader_elapsed=$(awk -v s="$closed_reader_start" -v e="$closed_reader_end" 'BEGIN{d=e-s; if (d<0) d=0; print d}' 2>/dev/null || echo 0)
+
+assert_contains "TC-LEASE-034 write helper returns non-zero (record dropped) against a closed reader" "rc=1" "$closed_reader_out"
+
+# 1.5s is comfortably under the ~2s EAGAIN retry budget: a regression that
+# falls through to the retry branch burns the full budget (>=2s); the fix
+# drops within milliseconds of the single failed write attempt.
+closed_reader_fast=$(awk -v d="$closed_reader_elapsed" 'BEGIN{exit !(d < 1.5)}'; echo $?)
+if [[ "$closed_reader_fast" -eq 0 ]]; then
+  ok "TC-LEASE-034 dead-reader write drops immediately (${closed_reader_elapsed}s), not after burning the EAGAIN retry budget"
+else
+  bad "TC-LEASE-034 dead-reader write took ${closed_reader_elapsed}s — fell through to the EAGAIN retry budget instead of dropping immediately"
+fi
+
+assert_contains "TC-LEASE-034 dead-reader drop is diagnosed as Broken pipe on stderr" "Broken pipe" "$(cat "$CLOSED_READER_ERR" 2>/dev/null)"
+
 echo ""
 echo "=== Summary ==="
 echo "  PASS: $PASS"

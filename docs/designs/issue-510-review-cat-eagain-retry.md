@@ -63,10 +63,19 @@ byte-for-byte unchanged; this PR does not touch it, so it stays entirely
   itself perform a genuine partial write before erroring, and a
   `PIPE_BUF`-sized pipe write is POSIX-atomic, so no chunk is ever resent
   after a success).
-- On a failed slice, classifies the error: "Broken pipe" (EPIPE, a dead
-  reader) drops immediately with a diagnostic; anything else (EAGAIN-shaped)
-  retries with a bounded ~2s whole-record budget (`sleep 0.05` between
-  attempts), then drops with a diagnostic on exhaustion.
+- On a failed slice, classifies the error: EPIPE (a dead reader) drops
+  immediately with a diagnostic; anything else (EAGAIN-shaped) retries with
+  a bounded ~2s whole-record budget (`sleep 0.05` between attempts), then
+  drops with a diagnostic on exhaustion. EPIPE is detected two ways, since a
+  dead reader's failure surfaces in either shape: `printf` catching the
+  error in-process and reporting "write error: Broken pipe" on its own
+  stderr (rc 1, non-empty `err`), OR an un-ignored `SIGPIPE` killing the
+  `printf ... 2>&1 1>&"$write_fd"` command substitution outright (rc
+  128+`SIGPIPE`, i.e. 141 on Linux/macOS, with an EMPTY `err` — the process
+  dies before it can print anything). Round-1 review caught that the first
+  cut of this fix only checked the string, so a signal-killed write fell
+  through to the EAGAIN retry branch every time and burned the whole
+  retry budget against a reader that could never drain.
 - A missing/broken `awk` or clock reading fails safe (treated as immediate
   exhaustion), not as an unbounded retry loop — same posture #508 adopted
   for the dev-side helper, needed here for the same reason (a spinning
@@ -106,6 +115,12 @@ then drains slowly), driving the REAL `_agent_progress_recorder` with
   bare `cat`), green after.
 - **TC-LEASE-033**: the existing NORMAL-conditions fast-path passthrough
   stays byte-identical (no regression to the non-adversarial happy path).
+- **TC-LEASE-034** (round-1 review finding): drives the write helper
+  against a reader that has ALREADY EXITED (not merely stalled) and
+  asserts the dead-reader failure is classified as terminal and dropped
+  immediately (well under the ~2s retry budget) — red before the SIGPIPE
+  classification fix (fell through to the EAGAIN retry loop, taking the
+  full budget), green after.
 
 ## Invariants
 

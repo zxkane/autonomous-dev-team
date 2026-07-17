@@ -172,10 +172,16 @@ fixture-driven; no real sleeps.
 **When** piped through the fast path
 **Then** output is byte-identical — the non-adversarial happy path this fix must preserve.
 
+## TC-LEASE-034: closed-reader `SIGPIPE` is classified as terminal, not retried as EAGAIN (issue #510 round-1 review regression)
+
+**Given** the fast path's write helper (`_agent_progress_recorder_fastpath_write`) writing to a pipe whose reader has already exited (a genuinely dead reader, not a merely-stalled one)
+**When** the write's underlying `printf` is killed outright by an un-ignored `SIGPIPE` (exit 141, empty captured stderr) rather than catching the error in-process and printing "write error: Broken pipe" itself
+**Then** the helper still classifies the failure as terminal and drops the record immediately (well under the ~2s retry budget, in particular under 500ms) with a "Broken pipe" diagnostic on stderr — before the fix, a bare exit-code check for 141 fell through every time to the EAGAIN retry branch (the captured `err` was empty, so the `"Broken pipe"` substring match never fired), burning the entire retry budget against a reader that could never drain.
+
 ## Acceptance mapping
 
 - R1 → TC-LEASE-001, 004-010, 018, 022, 023
 - R2 → TC-LEASE-001, 003, 018
 - R3 → TC-LEASE-011, 016, 017, 019, 020, 020b, 021
 - R4 → TC-LEASE-011, 012, 013, 014, 015
-- Issue #510 (review-side fast path EAGAIN retry) → TC-LEASE-032, 033
+- Issue #510 (review-side fast path EAGAIN retry) → TC-LEASE-032, 033, 034

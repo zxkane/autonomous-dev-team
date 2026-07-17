@@ -1331,13 +1331,15 @@ _agent_progress_cleanup() {
 # fixture through GNU cat 9.7 under this exact pressure landed only 233 of
 # 500 lines, `write error: Resource temporarily unavailable` on stderr.
 #
-# A genuinely dead reader raises EPIPE, not EAGAIN. bash's `printf` builtin
-# does not die to SIGPIPE the way a raw write(2) caller might; it catches
-# the failure internally and reports non-zero with "write error: Broken
-# pipe" on its OWN stderr — the same shape as EAGAIN's "Resource temporarily
-# unavailable". Classifying "Broken pipe" as terminal (drop immediately,
-# don't retry) avoids burning the whole retry budget against a reader that
-# will never drain.
+# A genuinely dead reader raises EPIPE, not EAGAIN. Whether that surfaces as
+# an in-process "write error: Broken pipe" on printf's own stderr, or kills
+# the `printf ... 2>&1 1>&"$write_fd"` command substitution outright via an
+# un-ignored SIGPIPE (exit 128+13=141, with an EMPTY captured err since the
+# process dies before it can print anything), both are the SAME dead-reader
+# condition and both must be classified as terminal (drop immediately,
+# don't retry) — treating a 141 as EAGAIN-shaped would burn the whole ~2s
+# retry budget against a reader that will never drain (review finding,
+# issue #510 round 1).
 #
 # Bytes already accepted by a partial write must never be resent — bash's
 # printf can itself return a short count before erroring, and a
@@ -1362,10 +1364,14 @@ _agent_progress_recorder_fastpath_clock_ok() {
 }
 _agent_progress_recorder_fastpath_write() {
   local LC_ALL=C
-  local data="$1" total wrote=0 off=0 chunk=4096 take piece err
-  local write_fd deadline now now0 attempts=0 awk_rc
+  local data="$1" total wrote=0 off=0 chunk=4096 take piece err write_rc
+  local write_fd deadline now now0 attempts=0 awk_rc sigpipe_rc
   total=${#data}
   [[ "$total" -eq 0 ]] && return 0
+  # SIGPIPE's own signal number, not a hardcoded 13 — portable across
+  # platforms where it could differ; falls back to the POSIX/Linux/macOS
+  # value of 13 (rc 141) if `kill -l` itself is unavailable or unexpected.
+  sigpipe_rc=$(( 128 + $(kill -l PIPE 2>/dev/null || echo 13) ))
   exec {write_fd}>&1
   now0=$(_agent_progress_recorder_fastpath_now_seconds)
   if ! _agent_progress_recorder_fastpath_clock_ok "$now0"; then
@@ -1381,12 +1387,19 @@ _agent_progress_recorder_fastpath_write() {
     piece="${data:off:take}"
     while :; do
       err=$(printf '%s' "$piece" 2>&1 1>&"$write_fd")
-      if [[ $? -eq 0 ]]; then
+      write_rc=$?
+      if [[ $write_rc -eq 0 ]]; then
         off=$(( off + take ))
         wrote=$(( wrote + take ))
         break
       fi
-      if [[ "$err" == *"Broken pipe"* ]]; then
+      # Terminal (dead-reader) EPIPE surfaces two ways: printf catches it
+      # in-process and reports "write error: Broken pipe" on its own
+      # stderr (write_rc=1, err non-empty), OR an un-ignored SIGPIPE kills
+      # the command substitution outright before it can print anything
+      # (write_rc=$sigpipe_rc i.e. 141, err EMPTY). Both mean the reader is
+      # gone for good — treat both as terminal, not EAGAIN-shaped.
+      if [[ "$err" == *"Broken pipe"* || "$write_rc" -eq "$sigpipe_rc" ]]; then
         printf 'lib-agent.sh: _agent_progress_recorder: dropping output record (%d of %d bytes written) — write error: Broken pipe\n' \
           "$wrote" "$total" >&2 || true  # best-effort diagnostic; a failed write to a full pipe must not itself abort the record-drop path
         exec {write_fd}>&-
