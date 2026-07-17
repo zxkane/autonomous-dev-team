@@ -1305,6 +1305,114 @@ _agent_progress_cleanup() {
   return 0
 }
 
+# _agent_progress_recorder_fastpath_now_seconds / _..._clock_ok /
+# _agent_progress_recorder_fastpath_write — bounded-EAGAIN-retry write helper
+# for the zero-AGENT_PROGRESS_FILE fast path ONLY (issue #510). The dev-side
+# (AGENT_PROGRESS_FILE set) branch below is untouched by this fix — issue
+# #508 owns that write path and, as of this writing, is still an open,
+# unmerged PR; main has no shared retry helper yet, so this is a small,
+# self-contained duplicate of the same bounded-retry shape rather than a
+# dependency on #508's in-flight work. When #508 lands, the two call sites
+# can be unified in a follow-up if desired — not required for correctness.
+#
+# Root cause: the wrapper's stdout is `exec > >(tee -a run.log) 2>&1`, the
+# SAME open file description the CLI child (e.g. Claude's Node.js process)
+# inherits as its own stdio. Node sets O_NONBLOCK on that shared pipe (the
+# flag lives on the open file description, not per-fd), so once the CLI's
+# own writes fill the pipe buffer, this recorder's write can get EAGAIN.
+# Unlike the dev-side case (a bash `printf` builtin, which also does not
+# retry EAGAIN), the review-side fast path historically ran the whole
+# passthrough through an EXTERNAL `cat` process — bash cannot intercept or
+# retry a syscall made inside another process's own binary, so the fix here
+# is a read/write loop in bash (like the dev-side branch below), not a
+# wrapper around `cat`. GNU coreutils `cat` (confirmed: this project's CI
+# runner, `ubuntu-latest`) does not retry EAGAIN either and silently drops
+# data past the pipe buffer boundary — reproduced empirically: a 500-line
+# fixture through GNU cat 9.7 under this exact pressure landed only 233 of
+# 500 lines, `write error: Resource temporarily unavailable` on stderr.
+#
+# A genuinely dead reader raises EPIPE, not EAGAIN. bash's `printf` builtin
+# does not die to SIGPIPE the way a raw write(2) caller might; it catches
+# the failure internally and reports non-zero with "write error: Broken
+# pipe" on its OWN stderr — the same shape as EAGAIN's "Resource temporarily
+# unavailable". Classifying "Broken pipe" as terminal (drop immediately,
+# don't retry) avoids burning the whole retry budget against a reader that
+# will never drain.
+#
+# Bytes already accepted by a partial write must never be resent — bash's
+# printf can itself return a short count before erroring, and a
+# PIPE_BUF-sized (4096) pipe write is POSIX-atomic, so slicing the record
+# into 4096-byte pieces under LC_ALL=C (byte-, not character-, boundaries)
+# and never re-sending a slice that reported success avoids duplicating any
+# byte. The retry budget (~2s default, AGENT_PROGRESS_FASTPATH_RETRY_
+# BUDGET_SECONDS) is tracked ONCE for the whole record, not reset per slice,
+# so a record spanning multiple slices still has a single bounded total
+# retry window. A missing/broken `awk` or clock reading fails SAFE
+# (treated as immediate exhaustion) rather than spinning forever — the same
+# posture issue #508 documents needing for its own dev-side helper.
+_agent_progress_recorder_fastpath_now_seconds() {
+  if [[ -n "${EPOCHREALTIME:-}" ]]; then
+    printf '%s\n' "$EPOCHREALTIME"
+  else
+    date +%s.%N 2>/dev/null || date +%s
+  fi
+}
+_agent_progress_recorder_fastpath_clock_ok() {
+  [[ "$1" =~ ^[0-9]+(\.[0-9]+)?$ ]]
+}
+_agent_progress_recorder_fastpath_write() {
+  local LC_ALL=C
+  local data="$1" total wrote=0 off=0 chunk=4096 take piece err
+  local write_fd deadline now now0 attempts=0 awk_rc
+  total=${#data}
+  [[ "$total" -eq 0 ]] && return 0
+  exec {write_fd}>&1
+  now0=$(_agent_progress_recorder_fastpath_now_seconds)
+  if ! _agent_progress_recorder_fastpath_clock_ok "$now0"; then
+    printf 'lib-agent.sh: _agent_progress_recorder: dropping output record (%d of %d bytes written) — write error: clock unavailable (no EPOCHREALTIME, date missing or broken)\n' \
+      "$wrote" "$total" >&2 || true  # best-effort diagnostic; a failed write to a full pipe must not itself abort the record-drop path
+    exec {write_fd}>&-
+    return 1
+  fi
+  deadline=$(LC_ALL=C awk -v n="$now0" -v b="${AGENT_PROGRESS_FASTPATH_RETRY_BUDGET_SECONDS:-2}" 'BEGIN{printf "%.6f", n + b}')
+  [[ $? -eq 0 && -n "$deadline" ]] || deadline="$now0"
+  while (( off < total )); do
+    take=$(( total - off < chunk ? total - off : chunk ))
+    piece="${data:off:take}"
+    while :; do
+      err=$(printf '%s' "$piece" 2>&1 1>&"$write_fd")
+      if [[ $? -eq 0 ]]; then
+        off=$(( off + take ))
+        wrote=$(( wrote + take ))
+        break
+      fi
+      if [[ "$err" == *"Broken pipe"* ]]; then
+        printf 'lib-agent.sh: _agent_progress_recorder: dropping output record (%d of %d bytes written) — write error: Broken pipe\n' \
+          "$wrote" "$total" >&2 || true  # best-effort diagnostic; a failed write to a full pipe must not itself abort the record-drop path
+        exec {write_fd}>&-
+        return 1
+      fi
+      attempts=$(( attempts + 1 ))
+      now=$(_agent_progress_recorder_fastpath_now_seconds)
+      if ! _agent_progress_recorder_fastpath_clock_ok "$now"; then
+        awk_rc=2
+      else
+        LC_ALL=C awk -v n="$now" -v d="$deadline" 'BEGIN{exit !(n >= d)}'
+        awk_rc=$?
+      fi
+      if [[ $awk_rc -ne 1 ]]; then
+        printf 'lib-agent.sh: _agent_progress_recorder: dropping output record (%d of %d bytes written) after %d retries — write error: Resource temporarily unavailable\n' \
+          "$wrote" "$total" "$attempts" >&2 || true  # best-effort diagnostic; a failed write to a full pipe must not itself abort the record-drop path
+        exec {write_fd}>&-
+        return 1
+      fi
+      sleep 0.05
+    done
+  done
+  exec {write_fd}>&-
+  return 0
+}
+
 # _agent_progress_recorder <framing> — shared pass-through progress recorder
 # (R2/R3), composed into every dev launch path's pipeline. Streams stdin to
 # stdout with NO buffering/modification (byte-identical, including a final
@@ -1324,13 +1432,16 @@ _agent_progress_cleanup() {
 #     validation only on a box with no jq is preferable to refusing to
 #     progress-track at all.
 #   anything else ("line" framing) — every non-empty line counts.
-# No-op passthrough (bare `cat`) when AGENT_PROGRESS_FILE is unset — the
-# review side never sets it, so composing this into every adapter is always
-# safe there. Never swallows/buffers stdout, never touches stderr, and never
-# affects the pipeline's exit-status propagation — callers read the CLI's own
-# rc via PIPESTATUS at the SAME index it already used before this stage was
-# inserted (recorder is appended strictly AFTER the CLI's own
-# _run_with_timeout stage, so that index never shifts).
+# Bounded-EAGAIN-retry passthrough (issue #510) when AGENT_PROGRESS_FILE is
+# unset — the review side never sets it, so composing this into every
+# adapter is always safe there. Never a lease refresh on this branch (there
+# is no lease to refresh here — unchanged from before this fix). Never
+# swallows/buffers stdout, never touches stderr beyond the retry helper's own
+# best-effort diagnostic on exhaustion, and never affects the pipeline's
+# exit-status propagation — callers read the CLI's own rc via PIPESTATUS at
+# the SAME index it already used before this stage was inserted (recorder is
+# appended strictly AFTER the CLI's own _run_with_timeout stage, so that
+# index never shifts).
 #
 # A bash read-loop, not an awk filter like the codex/opencode capture
 # filters below: _agent_progress_refresh is a real function call per record,
@@ -1344,7 +1455,26 @@ _agent_progress_cleanup() {
 _agent_progress_recorder() {
   local framing="${1:-line}"
   if [[ -z "${AGENT_PROGRESS_FILE:-}" ]]; then
-    cat
+    local fp_line fp_rc fp_out
+    while :; do
+      fp_rc=0
+      IFS= read -r fp_line || fp_rc=$?
+      if [[ $fp_rc -ne 0 && -z "$fp_line" ]]; then
+        break
+      fi
+      if [[ $fp_rc -eq 0 ]]; then
+        fp_out="$fp_line
+"
+      else
+        fp_out="$fp_line"
+      fi
+      # `|| true`: a non-zero return means retry-budget exhaustion (the
+      # record was dropped after the diagnostic inside the retry helper
+      # already fired) — never let that abort the whole read loop under a
+      # caller's `set -e`, same rationale as the `read` guard above.
+      _agent_progress_recorder_fastpath_write "$fp_out" || true
+      [[ $fp_rc -ne 0 ]] && break
+    done
     return 0
   fi
   local line rc
