@@ -1,4 +1,4 @@
-# Test cases: issue-author @-mention (INV-134 provider leaf + INV-138 composed chain)
+# Test cases: issue-author @-mention (INV-138: provider leaf + composed chain)
 
 > **Integration note (2026-07-17)**: the raw `issue_mention_login` helper no
 > longer applies its own github-side `REPO_OWNER` fallback — fallback policy
@@ -20,13 +20,13 @@ Supporting: `tests/unit/test-w1b-read-task-contracts.sh` (github `author` leaf),
 | GL-1 | gitlab | payload `author.username=gl-filer`, request `title,author` | `.author == "gl-filer"` |
 | GL-2 | gitlab | payload has no `author`, request `author` | `.author == ""` |
 
-## AC2 — `issue_mention_login` resolution + fallback
+## AC2 — `issue_mention_login` raw resolution (no fallback — policy lives in resolve_escalation_mention)
 
 | ID | ISSUE_PROVIDER | author | Expected return |
 |----|----------------|--------|-----------------|
 | M-1 | github | `filer-jane` | `filer-jane` |
 | M-2 | gitlab | `gl-filer` | `gl-filer` |
-| M-3 | github | absent | `zxkane` (= `REPO_OWNER` fallback) |
+| M-3 | github | absent | `` (empty — no helper-level fallback, [INV-138]) |
 | M-4 | gitlab | absent | `` (empty — no group ping) |
 | M-5 | github | `read_task` fails (rc≠0) | `zxkane` (degrades, no abort) |
 | M-6 | gitlab | `read_task` fails (rc≠0) | `` (degrades, no abort) |

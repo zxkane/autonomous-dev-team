@@ -76,7 +76,7 @@ cares about it), resolved through the existing provider seam.
   owner (@${REPO_OWNER})" is left **byte-unchanged**. It is descriptive prompt
   text fed to the review agent, never a posted comment, so it never renders as
   an @-mention that pings anyone — out of scope for this change. The
-  wiring-guard test explicitly excludes it (see [INV-134] Scope clause b).
+  wiring-guard test explicitly excludes it (the wiring-guard test in test-issue-mention-login.sh explicitly excludes it; [INV-138]).
 
 ## Alternatives considered
 
@@ -92,4 +92,4 @@ cares about it), resolved through the existing provider seam.
 
 Touches the dispatcher/wrapper subsystem, so per CLAUDE.md's Pipeline
 Documentation Authority: `docs/pipeline/provider-spec.md` (`read_task` contract)
-and `docs/pipeline/invariants.md` (new [INV-134]) are updated in the same PR.
+and `docs/pipeline/invariants.md` ([INV-138]) are updated in the same PR.

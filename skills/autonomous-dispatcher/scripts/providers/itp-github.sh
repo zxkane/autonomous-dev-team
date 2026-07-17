@@ -183,7 +183,7 @@ itp_github_list_forbidden_combos() {
 # OPEN/CLOSED token (already the provider-neutral vocabulary — deliberate, so
 # status.sh's `_next_action` gate ships byte-unchanged), labels as an array of
 # NAME strings (not `{name}` objects), comments as the [INV-90] normalized
-# array, author as the issue-CREATOR login string ([INV-134]; `.author.login`,
+# array, author as the issue-CREATOR login string ([INV-138]; `.author.login`,
 # absent → "") — the @-mention target for human-notice comments.
 # No gh flags / jq programs cross the seam — this leaf owns the `--json` field
 # mapping AND the normalization jq internally (unlike the pre-#396
@@ -199,8 +199,8 @@ itp_github_list_forbidden_combos() {
 itp_github_read_task() {
   local issue="$1" fields_csv="$2" fields_json raw comments_json='[]'
   fields_json=$(printf '%s' "$fields_csv" | jq -R -s -c 'split(",") | map(select(length > 0))')
-  # `author` is appended to the GraphQL field set ONLY when requested ([INV-134]),
-  # exactly like `comments` below — so the argv for the pre-#INV-134 callers
+  # `author` is appended to the GraphQL field set ONLY when requested ([INV-138]),
+  # exactly like `comments` below — so the argv for the pre-[INV-138] callers
   # (`title,body,state,labels`) stays byte-identical and their golden traces
   # ship unchanged. `,author,` match tolerates leading/trailing/middle position.
   local _view_fields="title,body,state,labels"

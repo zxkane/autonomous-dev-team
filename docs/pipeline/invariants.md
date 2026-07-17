@@ -8503,7 +8503,7 @@ _Triage (issue #236): [machine-checked: tests/unit/test-pr-author-escalation-men
 **Test**: `tests/unit/test-pr-author-escalation-mention.sh` TC-PAEM-070..075 (chain ordering: human issue author wins; bot issue author falls to human PR author; both-bots falls to operator; empty-author + no-PR falls through; malformed issue author rejected; empty issue arg skips), TC-PAEM-080..084 (three-state: set-EMPTY mutes the operator target and the full chain's terminal, but never suppresses a resolved human author; unset+gitlab emits nothing; unset+github preserves `@REPO_OWNER`), plus the pre-existing TC-PAEM-01x/02x resolver rows unchanged. `tests/unit/test-issue-mention-login.sh` (raw read: author/empty on both providers, no-abort on read failure, no helper-level fallback).
 
 **Cross-references**:
-- [INV-134] — the `itp_read_task` `author` field this chain's primary signal reads (added by #492's provider-leaf work).
+- The provider-leaf `author` field (provider-spec.md §3.1 `read_task` row) this chain's primary signal reads — added by #492's provider-leaf work and folded into THIS invariant (no standalone invariant number; the base work predated the INV-134 CI-rollup entry claiming that number).
 - The #495 resolver entry — bot-detection rules, malformed-token validation, `DEV_BOT_LOGIN`, all consumed unchanged.
 
 ---

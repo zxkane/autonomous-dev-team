@@ -273,7 +273,7 @@ itp_gitlab_transition_state() {
 # Spec §3.1 [W1b]. `FIELDS_CSV ⊆ title,body,state,labels,comments,author`.
 # GitLab field renames: `description` → `body`; `state` `opened|closed` →
 # `OPEN|CLOSED` (uppercase — matches the §3.1 tokens `_next_action` consumes);
-# `author.username` → `author` (the issue-CREATOR login, [INV-134]; absent →
+# `author.username` → `author` (the issue-CREATOR login, [INV-138]; absent →
 # "") — the @-mention target for human-notice comments. GitLab's `author` is a
 # single user object, NOT the group/namespace that `REPO_OWNER` names.
 # Labels already name-strings in GitLab (no `.[].name` unwrap).

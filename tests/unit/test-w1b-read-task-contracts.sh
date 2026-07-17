@@ -245,7 +245,7 @@ _GH_VIEW_PAYLOAD='{"title":"T","state":"CLOSED","labels":[]}'
 out="$(itp_github_read_task 42 body)"
 assert_eq "absent body -> empty string (never null)" '{"body":""}' "$(jq -c . <<<"$out")"
 
-# [INV-134] author field — normalized from .author.login, absent → "".
+# [INV-138] author field — normalized from .author.login, absent → "".
 _GH_VIEW_PAYLOAD='{"title":"T","state":"OPEN","labels":[],"author":{"login":"issue-filer"}}'
 out="$(itp_github_read_task 42 author)"
 assert_eq "author -> .author.login as a plain string" '{"author":"issue-filer"}' "$(jq -c . <<<"$out")"

@@ -460,7 +460,7 @@ out=$(itp_gitlab_read_task 42 "body") || true
 assert_eq "TC-WB-041 absent body → empty string" "" "$(jq -r '.body' <<<"$out")"
 rm -f "$pl"
 
-# TC-WB-041b [INV-134] author → .author.username, absent → "".
+# TC-WB-041b [INV-138] author → .author.username, absent → "".
 _gl_stub_reset
 pl=$(mktemp); cat > "$pl" <<'JSON'
 {"iid": 42, "title": "t", "description": "b", "state": "opened", "labels": [], "author": {"username": "gl-filer"}}

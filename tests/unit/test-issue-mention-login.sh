@@ -1,5 +1,5 @@
 #!/bin/bash
-# test-issue-mention-login.sh — issue-author @-mention target ([INV-134]).
+# test-issue-mention-login.sh — issue-author @-mention target ([INV-138]).
 #
 # The pipeline's "a human needs to act" comments (stalled / hand-off / manual-
 # merge notices) historically @-mentioned `${REPO_OWNER}`. On GitHub a repo has
@@ -209,7 +209,7 @@ assert_eq "helper: empty-resolution breadcrumb goes to stderr, never pollutes ca
 #   - The review-agent PROMPT prose ("Corrections or clarifications from the repo
 #     owner (@${REPO_OWNER})") is descriptive text fed to the review agent, NOT a
 #     posted GitHub/GitLab comment — it never renders as an @-mention that pings
-#     anyone, so it is out of scope for [INV-134] and left byte-unchanged.
+#     anyone, so it is out of scope for [INV-138] and left byte-unchanged.
 # ===========================================================================
 echo "=== AC2 wiring: no @\${REPO_OWNER} mention literal in NOTIFICATION bodies ==="
 for f in "$SCRIPTS/lib-dispatch.sh" "$SCRIPTS/autonomous-review.sh"; do

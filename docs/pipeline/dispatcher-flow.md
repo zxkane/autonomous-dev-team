@@ -163,7 +163,7 @@ is genuinely PR-scoped:
    `lib-dispatch.sh` and `autonomous-review.sh` so the dispatcher and the
    review wrapper resolve the SAME target identically). The chain tries the
    **ISSUE author first** (the raw `issue_mention_login` read over the
-   `itp_read_task ISSUE author` seam, [INV-134] — the pipeline is
+   `itp_read_task ISSUE author` seam, [INV-138] — the pipeline is
    issue-driven, so the issue author is the human owner of the work item),
    then the **PR author** (`resolve_pr_author_mention`, reading
    `chp_pr_view <pr> author`, provider-spec.md §3.2.1's pr_view-only 15th
