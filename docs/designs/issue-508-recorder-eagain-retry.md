@@ -19,16 +19,23 @@ cleanly — observed live twice in the first 8 hours the recorder was on main.
 `_agent_progress_write_retry <bytes>` (`lib-agent.sh`) replaces both bare `printf` call
 sites in the recorder's read loop with a bounded-retry write:
 
-- **Slicing.** The record is split into fixed 4096-byte (`PIPE_BUF`) slices under
-  `LC_ALL=C` (byte-exact `${#s}`/`${s:off:len}`, immune to a slice boundary landing
-  mid-UTF-8-codepoint). Load-bearing, not cosmetic: bash's `printf` can itself perform a
-  genuine partial write before erroring (confirmed via `strace`: an `>PIPE_BUF`-sized
-  `printf` argument writes exactly one `write(2)` of up to 4096 bytes then fails `EAGAIN` on
-  the remainder, with no way for the caller to learn how many bytes actually landed).
-  Chunking to `PIPE_BUF` sidesteps this because a write of `PIPE_BUF` bytes or fewer to a
-  pipe is atomic (POSIX): it either fully lands or is fully rejected, so a slice that
-  reports success is never re-sent and a slice that fails is retried whole with no
-  duplication risk.
+- **Slicing.** The record is split into fixed 512-byte (`{_POSIX_PIPE_BUF}`, the POSIX
+  guaranteed floor) slices under `LC_ALL=C` (byte-exact `${#s}`/`${s:off:len}`, immune to a
+  slice boundary landing mid-UTF-8-codepoint). Load-bearing, not cosmetic: bash's `printf`
+  can itself perform a genuine partial write before erroring (confirmed via `strace`: an
+  `>PIPE_BUF`-sized `printf` argument writes exactly one `write(2)` of up to `PIPE_BUF` bytes
+  then fails `EAGAIN` on the remainder, with no way for the caller to learn how many bytes
+  actually landed). Chunking to `PIPE_BUF` sidesteps this because a write of `PIPE_BUF` bytes
+  or fewer to a pipe is atomic (POSIX): it either fully lands or is fully rejected, so a
+  slice that reports success is never re-sent and a slice that fails is retried whole with
+  no duplication risk. **512, not 4096 (round-10 review finding [P2])** — Linux's actual
+  `PIPE_BUF` is 4096, but POSIX only GUARANTEES `{_POSIX_PIPE_BUF} = 512`; macOS/BSD's
+  `PIPE_BUF` genuinely is 512. A 4096-byte slice is only atomic on platforms where the real
+  `PIPE_BUF` is >= 4096 — on a platform where it is 512, that slice size can itself receive a
+  partial write() below the slice boundary, reopening the exact resend-duplication risk
+  chunking exists to prevent, just one level down. 512 is safe everywhere (including Linux,
+  where it is merely smaller than strictly necessary, never unsafe) without needing a
+  runtime `PIPE_BUF` probe, which bash has no portable built-in way to perform anyway.
 - **EPIPE vs EAGAIN classification.** A genuinely dead reader raises `EPIPE`, not `EAGAIN`
   — but bash's `printf` builtin does not die to `SIGPIPE` the way a raw `write(2)` caller
   might expect; it catches the failure internally and returns non-zero with `write error:
@@ -81,6 +88,19 @@ sites in the recorder's read loop with a bounded-retry write:
   failure mid-loop must fail closed too, not just the initial read) — dropping the record
   immediately with a diagnostic that names the actual cause ("clock unavailable") instead of
   the generic exhaustion message.
+- **The `date +%s.%N` fallback validates its OWN output before trusting it (round-10 review
+  finding), distinct from round-4's missing-clock case.** BSD/macOS `date` does not support
+  `%N`, but — unlike an unsupported format that fails — it does not error: it exits 0 and
+  echoes the literal leftover character (`%` is consumed as the format-spec sigil, leaving
+  just `N`) appended after the seconds, e.g. `1700000000.N`. The pre-fix
+  `date +%s.%N 2>/dev/null || date +%s` fallback never reaches its `||` branch, because the
+  command "succeeded". That `.N`-suffixed string then fails
+  `_agent_progress_write_retry_clock_ok`'s numeric-decimal regex — correctly, since it is not
+  a number — so every BSD/macOS run misclassified a perfectly healthy clock as "clock
+  unavailable" and dropped every record, even though round-4's fix was working exactly as
+  designed. Fixed by validating the `%N` output is purely numeric BEFORE accepting it;
+  a non-numeric result now falls back to whole-second `date +%s` (portable on every
+  POSIX/BSD platform) instead of the unusable literal-`%N` string.
 - **No new pipeline stage.** The retry lives entirely inside `_agent_progress_recorder`'s
   existing read loop — an additional stage would itself be a new EAGAIN-vulnerable writer.
   `O_NONBLOCK` is never cleared from bash (no fcntl access). Both call sites' `|| true`
@@ -128,6 +148,8 @@ sites in the recorder's read loop with a bounded-retry write:
 | 5 | The literal issue text says the fix "must not change the zero-`AGENT_PROGRESS_FILE` fast path (`cat` short-circuit, review side)" — round 5 recognized a stricter reading was needed but only documented the round-2 removal as a deliberate deviation instead of reverting it | See "Review-side `cat` EAGAIN hazard" below: reverted the round-2 change; the bare `cat` fast path is restored byte-for-byte as it existed before this PR |
 | 6, 7 | Review rejected the round-5 "documented deviation" twice in a row: restore the fast path or obtain an owner-approved requirement change — a design-doc note is neither | Reverted the round-2 fast-path removal outright (this round); filed the underlying `cat`/EAGAIN hazard as #510 instead of fixing it inside #508's scope |
 | 9 (this round) | The exhaustion check bounds retries against a wall clock; if that clock steps backward after `deadline` is computed (e.g. an NTP correction), every later `now` reading is valid but never reaches `deadline` — the loop spins on `sleep 0.05` forever, a hang none of rounds 1–4's clock-validity/missing-`awk` fixes catch (they only guard a MISSING/malformed clock, not a valid non-advancing one) | Added `max_attempts`, a clock-independent bash integer ceiling checked before the wall-clock check on every attempt (see Decision above); TC-LEASE-032 |
+| 10 | The 4096-byte slice size is only atomic on platforms where the real `PIPE_BUF` is >= 4096; POSIX only guarantees 512, and macOS/BSD's `PIPE_BUF` genuinely is 512 — a hard-coded 4096-byte slice risks a sub-slice partial write on such platforms, reopening the resend-duplication hazard chunking exists to prevent | Slice size lowered to 512 (the POSIX floor, safe on every platform); TC-LEASE-034 verifies via `strace` that the recorder's own writes never exceed 512 bytes |
+| 10 | BSD/macOS `date +%s.%N` does not fail on the unsupported `%N` — it exits 0 and emits a non-numeric `.N`-suffixed string, so the `\|\|`-fallback never fires and a perfectly healthy BSD/macOS clock was misclassified as "clock unavailable" by the round-4 validation, dropping every record | `_agent_progress_write_retry_now_seconds` now validates the `%N` reading is purely numeric before accepting it, falling back to whole-second `date +%s` otherwise; TC-LEASE-033 |
 
 ## Review-side `cat` EAGAIN hazard (tracked separately, NOT fixed in this PR)
 
@@ -178,7 +200,7 @@ fixed here.
 
 ## Test plan
 
-See `docs/test-cases/agent-progress-lease.md` TC-LEASE-024..031 —
+See `docs/test-cases/agent-progress-lease.md` TC-LEASE-024..034 —
 `tests/unit/test-agent-progress-lease.sh`, driving the real recorder through a real
 `O_NONBLOCK` pipe via a python3 `fcntl` helper: byte-identical passthrough under transient
 EAGAIN pressure, the no-trailing-newline contract under retry, bounded-exhaustion
@@ -188,8 +210,15 @@ asserted lossless under EAGAIN pressure, since it provably is not for every `cat
 implementation and that hazard is explicitly out of scope), dead-reader (EPIPE) fast-fail,
 the whole-record (not per-slice) retry budget, (TC-LEASE-030) a missing `awk` on `PATH`
 failing safe instead of retrying forever against the SAME never-draining-reader harness
-TC-LEASE-026 uses, and (TC-LEASE-031) a bash with no `EPOCHREALTIME` AND a missing/broken
+TC-LEASE-026 uses, (TC-LEASE-031) a bash with no `EPOCHREALTIME` AND a missing/broken
 `date` fallback — no usable clock at all — also failing safe against that same harness,
 distinct from TC-LEASE-030 because here `awk` itself runs fine; the bad input (an empty
 clock reading coerced to `0`) never produces a failing exit code for the round-3 fix to
-catch.
+catch, (TC-LEASE-032) a clock that steps backward or freezes after `deadline` is computed
+also failing safe via the clock-independent `max_attempts` ceiling, (TC-LEASE-033) a
+BSD/macOS-shaped `date` stub (exit 0, non-numeric `%N` output) does NOT misclassify a
+healthy clock as unavailable — it falls back to `date +%s` and the record survives, and
+(TC-LEASE-034) an `strace`-verified assertion (skipped, not failed, if `strace` is
+unavailable) that the recorder's own `write(2)` calls to fd 1 never exceed 512 bytes for a
+multi-slice record, proving the portable slice size is genuinely enforced rather than
+merely happening to be safe on this box's own (4096) `PIPE_BUF`.

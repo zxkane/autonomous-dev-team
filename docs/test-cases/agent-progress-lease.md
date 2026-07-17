@@ -192,7 +192,7 @@ fixture-driven; no real sleeps.
 
 ## TC-LEASE-029: the retry budget is tracked once per RECORD, not reset per slice (round-2 review finding [P2])
 
-**Given** a single JSON record large enough to span several `PIPE_BUF` (4096-byte) write slices, and a reader that drains on a fixed interval chosen to be comfortably under any ONE slice's own retry allowance but that takes several such drains to clear the whole record
+**Given** a single JSON record large enough to span several `PIPE_BUF`-sized write slices, and a reader that drains on a fixed interval chosen to be comfortably under any ONE slice's own retry allowance but that takes several such drains to clear the whole record
 **When** the recorder writes the record
 **Then** total wall-clock time stays within one whole-record retry budget (`AGENT_PROGRESS_WRITE_RETRY_BUDGET_SECONDS`, default ~2s) regardless of how many slices the record took — proving the deadline is computed ONCE before the slice loop starts and shared across every slice's retry loop, not reset to a fresh allowance every time a new slice begins (the round-1 shipped shape's `attempts=0` reset inside the slice loop, which would let an N-slice record retry for up to N times the intended per-record bound). A characterization run of the retired per-slice-reset shape (isolated from `lib-agent.sh`, exercised standalone) against the identical drain pattern confirms it DOES exceed the bound for the same input, so this test is proven to discriminate the fix from the bug rather than passing either way.
 
@@ -214,9 +214,21 @@ fixture-driven; no real sleeps.
 **When** the recorder computes its retry deadline from an early clock reading and, on each retry attempt, re-checks a LATER clock reading against it
 **Then** the recorder process still exits within the same bounded wall-clock window as TC-LEASE-026/030/031 (not a hang), and the stderr diagnostic reports the GENERIC exhaustion message ("Resource temporarily unavailable"), not "clock unavailable" — proving a plain, clock-independent attempt-count ceiling (`max_attempts`), not the clock-validity check, is what terminates this case. This is distinct from TC-LEASE-031: every clock reading here is perfectly valid and well-formed (`_agent_progress_write_retry_clock_ok` passes every time), it simply never advances far enough to reach `deadline` — so the round-4 fix, which only guards a MISSING/malformed reading, does not catch it. Verified to discriminate fixed from broken: reverting the round-9 fix (removing the `max_attempts` counter and its check) makes this exact scenario hang past the test's wall-clock bound.
 
+## TC-LEASE-033: a BSD/macOS-shaped `date` (unsupported `%N`, but exit 0) does not misclassify a healthy clock as unavailable (round-10 review finding [P2])
+
+**Given** `date` stubbed (via a symlink farm, `EPOCHREALTIME` unset) to reproduce BSD/macOS's exact behavior for an unsupported `%N`: `date +%s.%N` exits 0 and echoes the literal leftover `%N`-as-`N` character appended after the seconds (e.g. `1700000000.N`), rather than failing — and a small, always-draining fixture (this test isolates the CLOCK reading, not EAGAIN pressure)
+**When** the recorder computes its retry deadline from this BSD-shaped reading
+**Then** the recorder's output is byte-identical to the input and NO "clock unavailable" diagnostic reaches stderr — proving `_agent_progress_write_retry_now_seconds` validates its OWN `%N` output is purely numeric before accepting it, falling back to whole-second `date +%s` instead of ever handing the unusable `.N`-suffixed string to `_agent_progress_write_retry_clock_ok`. Distinct from TC-LEASE-031: there, no usable clock exists at all; here, `date +%s.%N` "succeeds" but with output that is not actually a number, so the pre-fix `||`-fallback never triggers.
+
+## TC-LEASE-034: the write slice size never exceeds the portable 512-byte PIPE_BUF floor (round-10 review finding [P2])
+
+**Given** a single JSON record large enough to span several write slices, and `strace -ff -e trace=write` attached to the real recorder (line framing, to avoid an unrelated `jq` validation subprocess that also inherits fd 1 under json framing)
+**When** the recorder writes the record
+**Then** every `write(2)` the recorder itself issues to fd 1 is <= 512 bytes — proving the slice size is capped at `{_POSIX_PIPE_BUF}` (the POSIX-guaranteed floor on every platform, including macOS/BSD where the real `PIPE_BUF` is genuinely 512) rather than the earlier 4096, which is only atomic on platforms whose actual `PIPE_BUF` is >= 4096. Skipped (not failed) if `strace` is unavailable — there is no portable way to observe raw `write(2)` sizes from bash alone.
+
 ## Acceptance mapping
 
 - R1 → TC-LEASE-001, 004-010, 018, 022, 023
 - R2 → TC-LEASE-001, 003, 018
-- R3 → TC-LEASE-011, 016, 017, 019, 020, 020b, 021, 024, 025, 026, 027, 028, 029, 030, 031, 032
+- R3 → TC-LEASE-011, 016, 017, 019, 020, 020b, 021, 024, 025, 026, 027, 028, 029, 030, 031, 032, 033, 034
 - R4 → TC-LEASE-011, 012, 013, 014, 015

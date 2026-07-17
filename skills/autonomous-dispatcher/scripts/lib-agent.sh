@@ -1333,18 +1333,30 @@ _agent_progress_cleanup() {
 # exactly one 4096-byte chunk via its own internal write() then fails EAGAIN
 # on the remainder; a sub-PIPE_BUF write is atomic and either fully lands or
 # is fully rejected). Since bash exposes no return value for "how many bytes
-# did printf actually write", this helper writes fixed PIPE_BUF-sized (4096)
-# slices in a loop instead of one `printf` call for the whole string — each
-# slice attempt is retried on EAGAIN, but a slice that reports success is
-# NEVER re-sent, so no byte is ever duplicated. `LC_ALL=C` makes `${#s}` and
-# `${s:off:len}` operate on raw bytes (not multibyte characters), so a slice
-# boundary landing mid-UTF-8-codepoint still round-trips byte-for-byte.
+# did printf actually write", this helper writes fixed slices in a loop
+# instead of one `printf` call for the whole string — each slice attempt is
+# retried on EAGAIN, but a slice that reports success is NEVER re-sent, so no
+# byte is ever duplicated. `LC_ALL=C` makes `${#s}` and `${s:off:len}` operate
+# on raw bytes (not multibyte characters), so a slice boundary landing
+# mid-UTF-8-codepoint still round-trips byte-for-byte.
+#
+# The slice size (round-10 review finding [P2]) MUST NOT exceed the platform's
+# actual PIPE_BUF, or the atomicity guarantee above is void: Linux's PIPE_BUF
+# is 4096, but POSIX only guarantees {_POSIX_PIPE_BUF} = 512 — macOS/BSD's
+# PIPE_BUF genuinely is 512. A hard-coded 4096-byte slice on such a platform
+# can itself receive a partial write() below the slice boundary, and this
+# helper has no way to learn how many of THOSE bytes landed — reintroducing
+# the exact resend-duplication risk chunking exists to prevent, just one
+# level down. 512 is the POSIX floor on every conformant platform (including
+# Linux, where it is merely smaller than necessary, not unsafe), so using it
+# unconditionally is correct everywhere without needing a runtime PIPE_BUF
+# probe (`getconf`/`fcntl` are not portably available as plain shell builtins).
 #
 # The retry BUDGET is tracked ONCE for the WHOLE record, not reset per slice
 # (round-2 review finding [P2]): a per-slice `attempts=0` reset let a
-# slowly-draining reader hand each 4096-byte slice of a large record its own
-# fresh ~2s allowance, so a record with N slices could retry for N*2s with no
-# overall bound — the exact "bounded total" the issue's fix contract requires.
+# slowly-draining reader hand each slice of a large record its own fresh ~2s
+# allowance, so a record with N slices could retry for N*2s with no overall
+# bound — the exact "bounded total" the issue's fix contract requires.
 # The fix computes ONE deadline (via `_agent_progress_write_retry_now_seconds`
 # below) from AGENT_PROGRESS_WRITE_RETRY_BUDGET_SECONDS (default 2, overridable so
 # the regression test can force exhaustion in well under a second) BEFORE the
@@ -1353,12 +1365,30 @@ _agent_progress_cleanup() {
 # bounded to ~AGENT_PROGRESS_WRITE_RETRY_BUDGET_SECONDS regardless of how many
 # slices it took. `${EPOCHREALTIME:-}` (bash >=5.0, sub-second, this box's
 # shell) is preferred over `date` for a cheap per-attempt clock read inside a
-# tight retry loop; `date +%s.%N` is the portable fallback for older bash.
+# tight retry loop; `date +%s.%N` is the intended portable fallback for older
+# bash, BUT (round-10 review finding [P2]) BSD/macOS `date` does not support
+# `%N` and, unlike a genuinely unsupported format, does not fail — it exits 0
+# and echoes the literal characters `%N` (actually just `N`, since `%` is
+# consumed) appended to the seconds, e.g. `1700000000.N`. The `||` fallback
+# above never fires because the command "succeeded"; the result is fed into
+# `_agent_progress_write_retry_clock_ok`, whose numeric-decimal regex REJECTS
+# a `.N` suffix, so this looked identical to the round-4 "clock unavailable"
+# case on every BSD/macOS box even though the machine's clock is perfectly
+# fine and every record would be dropped needlessly. Fixed by validating the
+# `%N` output is purely numeric BEFORE accepting it; a non-numeric result
+# falls back to whole-second `date +%s` (POSIX/BSD-portable) instead of the
+# unusable literal-`%N` string.
 _agent_progress_write_retry_now_seconds() {
   if [[ -n "${EPOCHREALTIME:-}" ]]; then
     printf '%s\n' "$EPOCHREALTIME"
+    return
+  fi
+  local frac
+  frac=$(date +%s.%N 2>/dev/null)
+  if [[ "$frac" =~ ^[0-9]+\.[0-9]+$ ]]; then
+    printf '%s\n' "$frac"
   else
-    date +%s.%N 2>/dev/null || date +%s
+    date +%s 2>/dev/null
   fi
 }
 # _agent_progress_write_retry_clock_ok <value> — true iff <value> is a
@@ -1381,7 +1411,7 @@ _agent_progress_write_retry_clock_ok() {
 }
 _agent_progress_write_retry() {
   local LC_ALL=C
-  local data="$1" total wrote=0 off=0 chunk=4096 take piece err
+  local data="$1" total wrote=0 off=0 chunk=512 take piece err
   local write_fd deadline now now0 attempts=0 awk_rc max_attempts
   total=${#data}
   [[ "$total" -eq 0 ]] && return 0

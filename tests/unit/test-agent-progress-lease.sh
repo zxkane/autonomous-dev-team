@@ -1044,6 +1044,87 @@ SHEOF
     "Resource temporarily unavailable" "$(cat "$NOJUMP_ERR" 2>/dev/null)"
 
   # ---------------------------------------------------------------------
+  # TC-LEASE-033 (round-10 review finding [P2]): BSD/macOS `date` does not
+  # support `%N` but does NOT fail on it either — it exits 0 and echoes the
+  # literal leftover character (`%` is consumed as the format-spec sigil, so
+  # only `N` remains) appended after the seconds, e.g. "1700000000.N". The
+  # pre-fix `date +%s.%N 2>/dev/null || date +%s` fallback never triggers
+  # because the command "succeeds"; the unusable ".N"-suffixed string then
+  # fails `_agent_progress_write_retry_clock_ok`'s numeric-decimal regex,
+  # misclassifying a perfectly healthy BSD/macOS clock as "clock unavailable"
+  # and dropping every record needlessly. This test stubs `date` (symlink
+  # farm, no EPOCHREALTIME) to reproduce that EXACT BSD shape — succeeds,
+  # non-numeric `%N` output — and asserts the recorder falls back to
+  # whole-second `date +%s` instead of treating the clock as unavailable.
+  # ---------------------------------------------------------------------
+  BSDDATE_BIN=$(mktemp -d)
+  for _b in bash cat mkdir mktemp stat sh dirname readlink pwd printf tr grep sed ps sleep kill cp basename wc chmod mv rm head timeout setsid env awk; do
+    _bp="$(command -v "$_b" 2>/dev/null)" || continue
+    ln -sf "$_bp" "$BSDDATE_BIN/$_b"
+  done
+  cat > "$BSDDATE_BIN/date" <<'DATEEOF'
+#!/bin/bash
+# Reproduces BSD/macOS `date`'s handling of an unsupported `%N`: exits 0,
+# emits the literal leftover "N" appended after the seconds — NOT a command
+# failure, and NOT a plausible decimal number either.
+if [[ "$1" == "+%s.%N" ]]; then
+  printf '1700000000.N\n'
+elif [[ "$1" == "+%s" ]]; then
+  printf '1700000000\n'
+else
+  printf '\n'
+fi
+DATEEOF
+  chmod +x "$BSDDATE_BIN/date"
+
+  BSDDATE_DRIVER="$TMPROOT/run_recorder_bsddate.sh"
+  cat > "$BSDDATE_DRIVER" <<'SHEOF'
+#!/bin/bash
+set -uo pipefail
+LIB="$1" FIXTURE="$2" PROGRESS_FILE="$3" FRAMING="$4" ERR_LOG="$5"
+env -u AUTONOMOUS_CONF_DIR \
+  AUTONOMOUS_PID_DIR="$(dirname "$PROGRESS_FILE")" \
+  PROJECT_ID="testproj" \
+  PROJECT_DIR="$(dirname "$PROGRESS_FILE")" \
+  AGENT_CMD=claude \
+  AGENT_PROGRESS_FILE="$PROGRESS_FILE" \
+  RUN_ID="run-bsddate" \
+  bash -c '
+    mkdir -p "$AUTONOMOUS_PID_DIR"
+    unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE
+    unset EPOCHREALTIME
+    source "'"$LIB"'"
+    cat "'"$FIXTURE"'" | _agent_progress_recorder "'"$FRAMING"'"
+  ' 2>"$ERR_LOG"
+SHEOF
+  chmod +x "$BSDDATE_DRIVER"
+
+  BSDDATE_OUT="$TMPROOT/bsddate-out.jsonl"
+  BSDDATE_ERR="$TMPROOT/bsddate-err.log"
+  BSDDATE_PROGRESS_DIR="$TMPROOT/bsddate-pd"
+  rm -rf "$BSDDATE_PROGRESS_DIR"
+
+  # A small fixture is enough here — this test is about the CLOCK reading,
+  # not about forcing genuine EAGAIN, so no pipe-pressure harness is needed;
+  # a healthy (always-draining) plain pipe suffices to prove no record is
+  # dropped and no "clock unavailable" diagnostic fires.
+  PATH="$BSDDATE_BIN" AGENT_PROGRESS_WRITE_RETRY_BUDGET_SECONDS=1 \
+    bash "$BSDDATE_DRIVER" "$LIB" "$EAGAIN_FIXTURE" "$BSDDATE_PROGRESS_DIR/progress.json" json "$BSDDATE_ERR" \
+    > "$BSDDATE_OUT"
+  rm -rf "$BSDDATE_BIN"
+
+  bsddate_sha=$(_sha "$EAGAIN_FIXTURE")
+  bsddate_out_sha=$(_sha "$BSDDATE_OUT")
+  assert_eq "TC-LEASE-033 recorder output is byte-identical with a BSD-shaped (%N-unsupported, exit-0) date stub" \
+    "$bsddate_sha" "$bsddate_out_sha"
+
+  if grep -q "clock unavailable" "$BSDDATE_ERR" 2>/dev/null; then
+    bad "TC-LEASE-033 BSD-shaped date's non-numeric %N output was misclassified as clock unavailable"
+  else
+    ok "TC-LEASE-033 BSD-shaped date's non-numeric %N output does NOT misclassify a healthy clock as unavailable"
+  fi
+
+  # ---------------------------------------------------------------------
   # TC-LEASE-028 (round-1 review finding): a dead reader (closed read end,
   # real EPIPE — not EAGAIN) must fail FAST, not burn the ~2s-per-slice
   # retry budget. Distinguishes this from TC-LEASE-026's never-draining-but-
@@ -1295,8 +1376,50 @@ SHEOF
   else
     bad "TC-LEASE-029 characterization: the retired per-slice-reset shape finished in ${old_shape_elapsed}s — expected it to exceed 1.5s, or this test cannot tell fixed from broken"
   fi
+
+  # ---------------------------------------------------------------------
+  # TC-LEASE-034 (round-10 review finding [P2]): the write slice size must
+  # not exceed the POSIX PIPE_BUF floor (512 bytes). Linux's actual PIPE_BUF
+  # is 4096, but POSIX only GUARANTEES {_POSIX_PIPE_BUF} = 512 — macOS/BSD's
+  # is genuinely 512. A hard-coded 4096-byte slice size is only atomic on
+  # Linux; on a 512-byte-PIPE_BUF platform, that same slice could itself
+  # receive a partial write() below the slice boundary, silently reopening
+  # the resend-duplication hazard chunking exists to prevent. Verified via
+  # `strace` (skipped, not failed, if strace is unavailable) that every
+  # write(2) the recorder itself issues to fd 1 is <= 512 bytes for a
+  # multi-slice record, on THIS platform's actual (4096) PIPE_BUF — proving
+  # the fix does not merely happen to be safe here by coincidence of a large
+  # platform PIPE_BUF, but genuinely caps its own writes at the portable
+  # floor regardless of what the platform allows.
+  # ---------------------------------------------------------------------
+  if command -v strace >/dev/null 2>&1; then
+    SLICE_FIXTURE="$TMPROOT/slice-fixture.jsonl"
+    python3 -c "print('{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"' + 'x'*3000 + '\"}]}}')" \
+      > "$SLICE_FIXTURE"
+    SLICE_PROGRESS_DIR="$TMPROOT/slice-pd"
+    rm -rf "$SLICE_PROGRESS_DIR"
+    SLICE_STRACE_PREFIX="$TMPROOT/slice-strace"
+    # `-ff` (one trace file per process, not `-f` which interleaves into one
+    # file) isolates the recorder's OWN writes from an unrelated `jq -e .`
+    # validation subprocess in the json-framing path, which also happens to
+    # inherit fd 1 and would otherwise pollute a single merged trace with an
+    # unrelated single large write. "line" framing avoids spawning that
+    # subprocess entirely, so every write(2) captured here is unambiguously
+    # this recorder's own.
+    strace -ff -e trace=write -o "$SLICE_STRACE_PREFIX" \
+      bash "$RECORDER_DRIVER" "$LIB" "$SLICE_FIXTURE" "$SLICE_PROGRESS_DIR/progress.json" line /dev/null \
+      > /dev/null
+    max_write=$(grep -h -oP 'write\(1, .*, \K[0-9]+' "$SLICE_STRACE_PREFIX".* 2>/dev/null | sort -n | tail -1)
+    if [[ -n "$max_write" ]] && (( max_write <= 512 )); then
+      ok "TC-LEASE-034 recorder's own writes to fd 1 never exceed the portable 512-byte PIPE_BUF floor (max observed: ${max_write})"
+    else
+      bad "TC-LEASE-034 recorder wrote ${max_write:-no writes captured}-byte chunk(s) to fd 1 — exceeds the portable 512-byte PIPE_BUF floor, unsafe on platforms where PIPE_BUF is genuinely 512"
+    fi
+  else
+    echo "  SKIP: TC-LEASE-034 requires strace (not found on PATH) — no portable way to observe raw write(2) sizes from bash alone"
+  fi
 else
-  echo "  SKIP: TC-LEASE-024..029 require python3 (not found on PATH) — the fcntl-based nonblocking-pipe harness has no shell-only equivalent"
+  echo "  SKIP: TC-LEASE-024..029,033,034 require python3 (not found on PATH) — the fcntl-based nonblocking-pipe harness has no shell-only equivalent"
 fi
 
 # ---------------------------------------------------------------------------
