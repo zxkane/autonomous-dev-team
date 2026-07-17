@@ -252,6 +252,10 @@ jobs:
             skills/autonomous-dispatcher/scripts/lib-review-smoke.sh \
             skills/autonomous-dispatcher/scripts/lib-agent-smoke.sh \
             skills/autonomous-dispatcher/scripts/lib-metrics.sh \
+            skills/autonomous-dispatcher/scripts/lib-accounting.sh \
+            tests/unit/test-lib-accounting.sh \
+            tests/e2e/run-resource-accounting-e2e.sh \
+            tests/unit/test-resource-accounting-e2e.sh \
             skills/autonomous-dispatcher/scripts/metrics-report.sh \
             skills/autonomous-dispatcher/scripts/lib-run-artifacts.sh \
             skills/autonomous-dispatcher/scripts/status.sh \
