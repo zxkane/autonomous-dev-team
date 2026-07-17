@@ -214,7 +214,7 @@ unreached `kill -TERM` line executes (it cannot retroactively undo a
 signal already sent; that residual race is accepted, same fail-safe
 posture as [INV-137]'s other documented residuals) — then (2) POLLS
 `get-command-invocation`, giving up only once
-`cmd_sent_at + exec_timeout + REMOTE_POLL_TIMEOUT_RECOVER_SECONDS`
+`cmd_sent_at + cmd_timeout + exec_timeout + REMOTE_POLL_TIMEOUT_RECOVER_SECONDS`
 (margin default 5) has elapsed, rather than accepting one immediate
 check or an independent short window.
 
@@ -250,6 +250,23 @@ which the caller (`_remote_dev_progress_compare_and_signal`) still,
 correctly, treats identically to `ABORTED:remote-transport-failure`; by
 construction that `rc=2` now only ever means "could not read the
 outcome," never "gave up while the command might still be running."
+
+**Round-4 review finding #1's root cause and fix**: round-3's recovery
+deadline (`cmd_sent_at + exec_timeout + margin`) omitted `cmd_timeout` —
+send-command's own `--timeout-seconds`, which bounds only DELIVERY: how
+long the command may sit `Pending`/`Delayed` before it starts running at
+all. `exec_timeout` (the document's `executionTimeout`) only starts
+counting once the command actually starts. A command that sits at the
+delivery deadline before starting, then runs for the full `exec_timeout`,
+is not guaranteed terminal until `cmd_sent_at + cmd_timeout +
+exec_timeout` — the round-3 anchor could still give up while such a
+late-starting command was capable of reaching its `kill -TERM` line. The
+fix adds `cmd_timeout` into the deadline sum: `_ssm_poll_timeout_recover`
+now takes `cmd_timeout` as an explicit parameter (alongside `cmd_sent_at`
+and `exec_timeout`) and anchors to
+`cmd_sent_at + cmd_timeout + exec_timeout + margin`, so giving up can no
+longer happen before BOTH of AWS's own enforcement windows (delivery,
+then execution) guarantee the command is terminal.
 
 ## `pid_alive` switching contract
 
@@ -433,7 +450,7 @@ Common to all backends:
 | `REMOTE_LIVENESS_CHECK_DISABLE` | `false` | `true` falls back to legacy local-only `pid_alive` (operator escape hatch for transport-blocked deployments) |
 | `REMOTE_LIVENESS_CHECK_TIMEOUT_SECONDS` | `8` | Dispatcher-side bound on synchronous polling (`lib-ssm.sh::_ssm_run_remote_command` honors this) |
 | `SSM_COMMAND_TIMEOUT_SECONDS` | `30` | SSM-side cap (`aws ssm send-command --timeout-seconds`) so a hung remote shell can't tie up an SSM slot for the default 600s. 30 is AWS's hard API minimum for this flag (#369). ALSO passed as the `AWS-RunShellScript` document's own `executionTimeout` parameter (clamped to its 1–172800 valid range) — round-3 review finding #1: `--timeout-seconds` alone only bounds delivery, not execution time, so without this the document's real execution bound silently defaulted to 3600s regardless of this knob |
-| `REMOTE_POLL_TIMEOUT_RECOVER_SECONDS` | `5` | Margin added on top of `cmd_sent_at + executionTimeout` for `lib-ssm.sh::_ssm_poll_timeout_recover`'s post-cancel recovery poll (see [Poll-timeout recovery](#4-agent-progress-snapshot--compare-and-signal-transport-inv-137-485) above) — absorbs `cancel-command`'s own asynchronicity, not an independent timeout of its own |
+| `REMOTE_POLL_TIMEOUT_RECOVER_SECONDS` | `5` | Margin added on top of `cmd_sent_at + --timeout-seconds + executionTimeout` (both the delivery and execution bounds, round-4 review finding #1) for `lib-ssm.sh::_ssm_poll_timeout_recover`'s post-cancel recovery poll (see [Poll-timeout recovery](#4-agent-progress-snapshot--compare-and-signal-transport-inv-137-485) above) — absorbs `cancel-command`'s own asynchronicity, not an independent timeout of its own |
 | `HEARTBEAT_INTERVAL_SECONDS` | `120` | Wrapper-side heartbeat cadence; threshold = `× 3 = 360s` (consumed remote-side in the liveness snippet) |
 | `DEV_PROGRESS_STALE_SECONDS` | `1800` | Agent-progress freshness threshold ([INV-137]) — a fixed literal constant on BOTH backends (plain assignment, not `${VAR:-1800}`); not an environment/`autonomous.conf` knob at all, so a deployment cannot classify the same lease differently by backend (round-3 review finding #2) |
 

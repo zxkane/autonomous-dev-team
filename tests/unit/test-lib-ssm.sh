@@ -509,6 +509,40 @@ rc_015=$?
 assert_rc "TC-LSSM-015 rc=0 — delayed completion within exec_timeout is NOT downgraded to indeterminate" 0 "$rc_015"
 assert_contains "TC-LSSM-015 stdout reports the delayed command's real output" "delayed-but-completed" "$out_015"
 
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-LSSM-016: recovery deadline includes the DELIVERY window, not just executionTimeout (round-4 review finding #1) ==="
+# ---------------------------------------------------------------------------
+# Round-3's recovery deadline was cmd_sent_at + exec_timeout + margin,
+# omitting cmd_timeout (send-command's --timeout-seconds), which bounds
+# how long the command may sit Pending/Delayed BEFORE it starts running —
+# exec_timeout only starts counting once the command actually starts. A
+# command whose remote script starts late (near the delivery deadline)
+# and then runs the full exec_timeout is not guaranteed terminal until
+# cmd_sent_at + cmd_timeout + exec_timeout. Reuse TC-LSSM-015's delayed
+# stub but push completion (DELAY_UNTIL_CALL=14, ~7s of InProgress polls
+# at 0.5s/call) past what the OLD exec_timeout-only anchor
+# (SSM_COMMAND_TIMEOUT_SECONDS=4 -> recover_deadline ~= sent+4+1=5s) would
+# have tolerated, while the NEW anchor (sent+4+4+1=9s) has room to spare.
+reset_recorder
+CALL_COUNT_FILE="$TMPROOT/call-count-016"
+echo 0 > "$CALL_COUNT_FILE"
+out_016=$(
+  PATH="$DELAYED_STUB_BIN:$PATH" \
+  AWS_RECORD_FILE="$TMPROOT/aws-record" \
+  CALL_COUNT_FILE="$CALL_COUNT_FILE" \
+  DELAY_UNTIL_CALL=14 \
+  REMOTE_LIVENESS_CHECK_TIMEOUT_SECONDS=1 \
+  SSM_COMMAND_TIMEOUT_SECONDS=4 \
+  REMOTE_POLL_TIMEOUT_RECOVER_SECONDS=1 \
+  bash -c "source '$LIB'; _ssm_run_remote_command i-test ap-southeast-1 'echo hi' 2>/dev/null"
+)
+rc_016=$?
+# An exec_timeout-only anchor (dropping cmd_timeout) would give up at
+# ~5s, well before call 14's ~7s Success — this pins that regression.
+assert_rc "TC-LSSM-016 rc=0 — completion past an exec_timeout-only deadline is still observed" 0 "$rc_016"
+assert_contains "TC-LSSM-016 stdout reports the delayed command's real output" "delayed-but-completed" "$out_016"
+
 echo ""
 echo "==============================================="
 echo -e "Total: $((PASS + FAIL)) tests, ${GREEN}${PASS} pass${NC}, ${RED}${FAIL} fail${NC}"

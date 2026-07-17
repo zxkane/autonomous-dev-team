@@ -181,7 +181,8 @@ _ssm_build_full_cmd() {
 # (it cannot retroactively undo a signal already sent, but that residual
 # race is unavoidable in any cooperative-cancel design and is no worse
 # than doing nothing) — then (2) POLLS get-command-invocation, giving up
-# only once `cmd_sent_at + cmd_timeout + REMOTE_POLL_TIMEOUT_RECOVER_SECONDS`
+# only once
+# `cmd_sent_at + cmd_timeout + exec_timeout + REMOTE_POLL_TIMEOUT_RECOVER_SECONDS`
 # (default margin 5s) has elapsed — i.e. not before AWS's OWN
 # executionTimeout enforcement guarantees the command has been forced to
 # a terminal state, plus a small buffer for `cancel-command`'s own
@@ -197,6 +198,17 @@ _ssm_build_full_cmd() {
 # point the command is guaranteed (by AWS's own enforcement) to be
 # terminal, so "indeterminate" now only ever means "we could not read the
 # outcome," never "we gave up while it might still be running."
+#
+# Round-4 finding #1's root cause: `cmd_timeout` (send-command's
+# --timeout-seconds) bounds how long the command may sit `Pending` before
+# it starts; `exec_timeout` (the document's `executionTimeout`) only
+# starts counting once the command actually starts running. A command
+# that sits at the DELIVERY deadline before starting, then runs for the
+# full `exec_timeout`, is not guaranteed terminal until
+# `cmd_sent_at + cmd_timeout + exec_timeout` — anchoring the recovery
+# deadline to `cmd_sent_at + exec_timeout` alone (dropping the delivery
+# window) could give up while a command that started late is still able
+# to reach its `kill -TERM` line. The deadline below adds BOTH bounds.
 _ssm_run_remote_command() {
   local instance_id="$1"
   local region="$2"
@@ -251,10 +263,14 @@ _ssm_run_remote_command() {
   # Poll loop with wall-clock cap. cmd_sent_at anchors BOTH this loop's
   # deadline and (on timeout) the recovery loop's deadline in
   # _ssm_poll_timeout_recover, which needs the ORIGINAL send time PLUS
-  # exec_timeout (the document's own executionTimeout, now explicitly set
-  # above — NOT cmd_timeout, which only bounds delivery) to bound itself
-  # by the command's actual guaranteed terminal deadline rather than an
-  # independent short window.
+  # BOTH cmd_timeout (send-command's --timeout-seconds, which bounds how
+  # long the command may sit Pending/delayed before it starts) AND
+  # exec_timeout (the document's own executionTimeout, which only starts
+  # counting once the command actually starts running) — round-4 review
+  # finding #1: anchoring to exec_timeout alone would drop the delivery
+  # window, so a command that started right at the delivery deadline and
+  # then ran for the full exec_timeout would not yet be guaranteed
+  # terminal at the old (shorter) deadline.
   local cmd_sent_at t_deadline now status get_out stdout_content
   cmd_sent_at=$(date +%s) || cmd_sent_at=""
   if ! [[ "$cmd_sent_at" =~ ^[0-9]+$ ]]; then
@@ -277,7 +293,7 @@ _ssm_run_remote_command() {
       --command-id "$command_id" \
       --output json 2>/dev/null) || {
       now=$(date +%s)
-      [[ "$now" -ge "$t_deadline" ]] && { _ssm_poll_timeout_recover "$instance_id" "$region" "$command_id" "$cmd_sent_at" "$exec_timeout"; return $?; }
+      [[ "$now" -ge "$t_deadline" ]] && { _ssm_poll_timeout_recover "$instance_id" "$region" "$command_id" "$cmd_sent_at" "$cmd_timeout" "$exec_timeout"; return $?; }
       continue
     }
     status=$(printf '%s' "$get_out" | jq -r '.Status // empty')
@@ -294,7 +310,7 @@ _ssm_run_remote_command() {
         ;;
       InProgress|Pending|Delayed)
         now=$(date +%s)
-        [[ "$now" -ge "$t_deadline" ]] && { _ssm_poll_timeout_recover "$instance_id" "$region" "$command_id" "$cmd_sent_at" "$exec_timeout"; return $?; }
+        [[ "$now" -ge "$t_deadline" ]] && { _ssm_poll_timeout_recover "$instance_id" "$region" "$command_id" "$cmd_sent_at" "$cmd_timeout" "$exec_timeout"; return $?; }
         continue
         ;;
       *)
@@ -305,7 +321,7 @@ _ssm_run_remote_command() {
   done
 }
 
-# _ssm_poll_timeout_recover <instance-id> <region> <command_id> <cmd_sent_at> <exec_timeout>
+# _ssm_poll_timeout_recover <instance-id> <region> <command_id> <cmd_sent_at> <cmd_timeout> <exec_timeout>
 #
 # Called ONLY when _ssm_run_remote_command's dispatcher-side poll loop
 # (REMOTE_LIVENESS_CHECK_TIMEOUT_SECONDS, default 8) has hit its deadline
@@ -316,24 +332,27 @@ _ssm_run_remote_command() {
 # after the caller has already been told "indeterminate"; it cannot undo
 # a signal already sent, which remains a documented residual), THEN polls
 # get-command-invocation, giving up only once
-# `<cmd_sent_at> + <exec_timeout> + REMOTE_POLL_TIMEOUT_RECOVER_SECONDS`
-# (default margin 5s) has elapsed (round-3 review finding #1 — hardened
-# from round-2's independent short window, which had no real bound: a
-# still-InProgress command was never actually guaranteed to reach a
-# terminal state within that window, since `exec_timeout` — the
-# AWS-RunShellScript document's `executionTimeout` parameter, now
-# explicitly set by the caller — is what actually bounds execution, and
-# it can be a good deal larger than the caller's own poll timeout).
-# Anchoring to `cmd_sent_at + exec_timeout` means AWS's OWN enforcement
-# guarantees a terminal status by that deadline, so giving up there (never
-# earlier) can no longer race a command that might still be running.
-# `cancel-command` only REQUESTS that SSM Agent stop the running script —
-# it does not confirm the stop synchronously, so a read taken immediately
-# after issuing it can still observe a stale InProgress/Pending status
-# even though the command is moments from reaching Cancelled (the stop
-# won), Success, or Failed (the command finished first); the small
-# REMOTE_POLL_TIMEOUT_RECOVER_SECONDS margin absorbs that plus
-# get-command-invocation poll granularity.
+# `<cmd_sent_at> + <cmd_timeout> + <exec_timeout> + REMOTE_POLL_TIMEOUT_RECOVER_SECONDS`
+# (default margin 5s) has elapsed (round-4 review finding #1 — hardened
+# from round-3's `cmd_sent_at + exec_timeout` anchor, which omitted the
+# DELIVERY window: `cmd_timeout` — send-command's own `--timeout-seconds`
+# — bounds how long the command may sit Pending/Delayed before it starts
+# running at all; `exec_timeout` — the AWS-RunShellScript document's
+# `executionTimeout` — only starts counting once the command actually
+# starts. A command that sits at the delivery deadline before starting,
+# then runs for the full exec_timeout, is not guaranteed terminal until
+# `cmd_sent_at + cmd_timeout + exec_timeout` — anchoring to `exec_timeout`
+# alone could give up while such a late-starting command is still able to
+# reach its `kill -TERM` line). Anchoring to the sum of BOTH bounds means
+# AWS's OWN enforcement guarantees a terminal status by that deadline, so
+# giving up there (never earlier) can no longer race a command that might
+# still be running. `cancel-command` only REQUESTS that SSM Agent stop the
+# running script — it does not confirm the stop synchronously, so a read
+# taken immediately after issuing it can still observe a stale
+# InProgress/Pending status even though the command is moments from
+# reaching Cancelled (the stop won), Success, or Failed (the command
+# finished first); the small REMOTE_POLL_TIMEOUT_RECOVER_SECONDS margin
+# absorbs that plus get-command-invocation poll granularity.
 #
 # Stdout: on Success, prints StandardOutputContent (stripped of trailing
 # newline), same contract as the main poll loop; empty on any other path.
@@ -342,7 +361,7 @@ _ssm_run_remote_command() {
 # terminal, so it means "could not read the outcome," never "gave up
 # while it might still be running").
 _ssm_poll_timeout_recover() {
-  local instance_id="$1" region="$2" command_id="$3" cmd_sent_at="$4" exec_timeout="$5"
+  local instance_id="$1" region="$2" command_id="$3" cmd_sent_at="$4" cmd_timeout="$5" exec_timeout="$6"
   echo "[lib-ssm] WARN: poll-loop timeout — attempting cancel-command + bounded recovery poll" >&2
   # Best-effort only: cancel-command failing (already completed, already
   # cancelled, transport blip) does not change what we do next — the
@@ -355,18 +374,19 @@ _ssm_poll_timeout_recover() {
 
   local recover_margin="${REMOTE_POLL_TIMEOUT_RECOVER_SECONDS:-5}"
   [[ "$recover_margin" =~ ^[0-9]+$ ]] || recover_margin=5
-  # cmd_sent_at/exec_timeout are the caller's anchors this whole recovery
-  # deadline depends on — under `set -u`, an EMPTY (not unset) value
-  # silently evaluates as 0 in arithmetic rather than erroring, which
-  # would collapse recover_deadline to near cmd_sent_at (or near-zero if
-  # BOTH are empty) and reopen exactly the race this fix closes. Validate
-  # rather than let bad args silently corrupt the deadline.
-  if ! [[ "$cmd_sent_at" =~ ^[0-9]+$ ]] || ! [[ "$exec_timeout" =~ ^[0-9]+$ ]]; then
-    echo "[lib-ssm] ERROR: _ssm_poll_timeout_recover called with invalid cmd_sent_at/exec_timeout ('$cmd_sent_at'/'$exec_timeout')" >&2
+  # cmd_sent_at/cmd_timeout/exec_timeout are the caller's anchors this
+  # whole recovery deadline depends on — under `set -u`, an EMPTY (not
+  # unset) value silently evaluates as 0 in arithmetic rather than
+  # erroring, which would collapse recover_deadline toward cmd_sent_at (or
+  # near-zero if all are empty) and reopen exactly the race this fix
+  # closes. Validate rather than let bad args silently corrupt the
+  # deadline.
+  if ! [[ "$cmd_sent_at" =~ ^[0-9]+$ ]] || ! [[ "$cmd_timeout" =~ ^[0-9]+$ ]] || ! [[ "$exec_timeout" =~ ^[0-9]+$ ]]; then
+    echo "[lib-ssm] ERROR: _ssm_poll_timeout_recover called with invalid cmd_sent_at/cmd_timeout/exec_timeout ('$cmd_sent_at'/'$cmd_timeout'/'$exec_timeout')" >&2
     return 2
   fi
   local recover_deadline
-  recover_deadline=$(( cmd_sent_at + exec_timeout + recover_margin ))
+  recover_deadline=$(( cmd_sent_at + cmd_timeout + exec_timeout + recover_margin ))
 
   local get_out status stdout_content now
   while :; do
@@ -389,7 +409,7 @@ _ssm_poll_timeout_recover() {
     esac
     now=$(date +%s)
     if [[ "$now" -ge "$recover_deadline" ]]; then
-      echo "[lib-ssm] WARN: post-cancel recovery window elapsed with no terminal status (AWS's own executionTimeout guarantees the command is terminal by now) — remaining indeterminate" >&2
+      echo "[lib-ssm] WARN: post-cancel recovery window elapsed with no terminal status (AWS's own delivery timeout + executionTimeout guarantee the command is terminal by now) — remaining indeterminate" >&2
       return 2
     fi
     sleep 0.5
