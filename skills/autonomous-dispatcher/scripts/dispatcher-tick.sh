@@ -808,27 +808,97 @@ for i in $(seq 0 $((cand_count - 1))); do
       continue
     fi
 
-    # [INV-10] strict > 300s.
+    # [INV-10] strict > 300s. Necessary but — since [INV-137] — no longer
+    # sufficient on its own: PR.updatedAt does not move while the agent
+    # edits/tests/builds locally between pushes ([INV-137]).
     if [ "$idle_seconds" -le 300 ]; then
       # Recent activity — agent may be cleaning up. Leave alone.
       continue
     fi
 
-    # Re-verify PID is still alive (could have exited between the original
-    # probe and now; if reassigned we'd SIGTERM an unrelated process).
-    if ! kill -0 "$pid" 2>/dev/null; then
-      echo "INFO: wrapper PID ${pid} for issue ${issue_num} exited between checks; deferring to next cycle" >&2
+    # [INV-137] Initial agent-progress-lease snapshot. FRESH and UNKNOWN
+    # both mean "do not SIGTERM" — UNKNOWN is fail-safe by construction
+    # (never falls back to the idle gate alone). Only STALE proceeds.
+    _dps_backend="${EXECUTION_BACKEND:-local}"
+    if [ "$_dps_backend" = "remote-aws-ssm" ]; then
+      snapshot=$(_remote_dev_progress_snapshot_query "$issue_num")
+    else
+      snapshot=$(dev_progress_snapshot "$issue_num")
+    fi
+    snap_state=$(jq -r '.state // "UNKNOWN"' <<<"$snapshot" 2>/dev/null) || snap_state="UNKNOWN"
+
+    if [ "$snap_state" != "STALE" ]; then
+      if [ "$snap_state" = "UNKNOWN" ]; then
+        snap_reason=$(jq -r '.reason // "unknown"' <<<"$snapshot" 2>/dev/null) || snap_reason="unknown"
+        echo "WARN: issue ${issue_num} agent-progress snapshot is UNKNOWN (reason=${snap_reason}) — leaving as-is [INV-137]" >&2
+      fi
+      # FRESH (or UNKNOWN) — agent is actively working (or we cannot prove
+      # otherwise). Leave alone.
       continue
     fi
 
-    # Fire SIGTERM and transition to pending-review.
-    if kill "$pid" 2>/dev/null; then
-      kill_note="Sent SIGTERM to PID ${pid}"
-    else
-      kill_note="PID ${pid} already gone"
+    snap_pid=$(jq -r '.pid // empty' <<<"$snapshot" 2>/dev/null)
+    snap_run_id=$(jq -r '.run_id // empty' <<<"$snapshot" 2>/dev/null)
+    snap_age=$(jq -r '.age // empty' <<<"$snapshot" 2>/dev/null)
+    if [ -z "$snap_pid" ] || [ -z "$snap_run_id" ] || [ -z "$snap_age" ]; then
+      echo "WARN: issue ${issue_num} STALE snapshot missing pid/run_id/age fields — leaving as-is [INV-137]" >&2
+      continue
     fi
+
+    # Final pre-kill recheck ([INV-137]): re-verify liveness AND re-run the
+    # snapshot, requiring STALE with the SAME pid/run_id observed above.
+    # Any mismatch/FRESH/UNKNOWN aborts — no comment, no transition.
+    if [ "$_dps_backend" = "remote-aws-ssm" ]; then
+      # Remote: dispatcher-side `$pid` (from `get_pid`) is ALWAYS empty
+      # under this backend (the PID file lives on the wrapper box) — a
+      # local `kill -0 "$pid"` here would always report gone and can never
+      # be used as a preliminary liveness check. Instead, ONE additional
+      # SSM round-trip performs the pid-file-equality recheck, the
+      # snapshot re-validation, AND the kill atomically ON THE WRAPPER
+      # HOST — no gap between the final recheck and the signal for a race
+      # to land in.
+      cas_result=$(_remote_dev_progress_compare_and_signal "$issue_num" "$snap_pid" "$snap_run_id")
+      case "$cas_result" in
+        SIGNALED)
+          kill_note="Sent SIGTERM to PID ${snap_pid}"
+          ;;
+        *)
+          echo "INFO: issue ${issue_num} remote compare-and-signal aborted (${cas_result}); deferring to next cycle [INV-137]" >&2
+          continue
+          ;;
+      esac
+    else
+      if ! kill -0 "$pid" 2>/dev/null; then
+        echo "INFO: wrapper PID ${pid} for issue ${issue_num} exited between checks; deferring to next cycle" >&2
+        continue
+      fi
+      recheck_pid=$(get_pid "$kind" "$issue_num")
+      if [ "$recheck_pid" != "$snap_pid" ]; then
+        echo "INFO: issue ${issue_num} PID changed between checks (was ${snap_pid}, now ${recheck_pid}); deferring to next cycle [INV-137]" >&2
+        continue
+      fi
+      recheck_snapshot=$(dev_progress_snapshot "$issue_num")
+      recheck_state=$(jq -r '.state // "UNKNOWN"' <<<"$recheck_snapshot" 2>/dev/null) || recheck_state="UNKNOWN"
+      recheck_run_id=$(jq -r '.run_id // empty' <<<"$recheck_snapshot" 2>/dev/null)
+      if [ "$recheck_state" != "STALE" ] || [ "$recheck_run_id" != "$snap_run_id" ]; then
+        echo "INFO: issue ${issue_num} progress snapshot changed on final recheck (state=${recheck_state}); deferring to next cycle [INV-137]" >&2
+        continue
+      fi
+
+      # Fire SIGTERM and transition to pending-review. Signal snap_pid (not
+      # the outer $pid) — recheck_pid == snap_pid was just proven above, so
+      # this makes "what we validated is what we signal" explicit rather
+      # than relying on the two happening to hold the same value.
+      if kill "$snap_pid" 2>/dev/null; then
+        kill_note="Sent SIGTERM to PID ${snap_pid}"
+      else
+        echo "INFO: issue ${issue_num} PID ${snap_pid} already gone at signal time; deferring to next cycle [INV-137]" >&2
+        continue
+      fi
+    fi
+
     itp_post_comment "$issue_num" \
-      "Dev process still alive but PR #${pr_num} is ready (all CI checks passed, idle ${idle_seconds}s). ${kill_note}. Moving to pending-review."
+      "Dev process still alive but PR #${pr_num} is ready (all CI checks passed, PR inactive ${idle_seconds}s, no agent progress for ${snap_age}s). ${kill_note}. Moving to pending-review."
     label_swap "$issue_num" "in-progress" "pending-review"
 
   else

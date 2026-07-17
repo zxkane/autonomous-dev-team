@@ -3102,6 +3102,180 @@ pr_idle_seconds() {
   _iso_age_seconds "$1"
 }
 
+# [INV-137] DEV_PROGRESS_STALE_SECONDS — a fixed shared threshold, NOT a
+# conf knob (issue #485 explicitly scopes this out of autonomous.conf).
+# Exceeds the observed 5-10+ min local verification windows (typecheck/
+# test/build between pushes) while staying far faster than the 4h
+# AGENT_TIMEOUT. `age <= 1800` is FRESH (inclusive boundary); `age > 1800`
+# is STALE (strict).
+DEV_PROGRESS_STALE_SECONDS=1800
+
+# dev_progress_snapshot <issue_num>
+#
+# Echoes ONE compact JSON object classifying the current-run agent-progress
+# lease #493 produces (`issue-<N>.progress.json` / `issue-<N>.run-id`,
+# [INV-135]):
+#   {"state":"FRESH","age":N,"pid":N,"run_id":"..."}
+#   {"state":"STALE","age":N,"pid":N,"run_id":"..."}
+#   {"state":"UNKNOWN","reason":"<token>"}
+#
+# `reason` is diagnostic-only (matches [a-z0-9-]+) — callers/tests MUST
+# assert on `state` and the absence of side effects, never on a specific
+# reason spelling ([INV-137] normative text).
+#
+# UNKNOWN is fail-safe: any of missing/unreadable sidecar, symlink or
+# non-regular file, mode other than 0600 on progress.json, malformed JSON /
+# wrong schema, non-numeric/negative/future `updated_at_epoch`, non-numeric
+# pid, a lease `pid` that doesn't equal the CURRENT `issue-N.pid` content, a
+# lease `run_id` that doesn't equal the CURRENT `issue-N.run-id` content
+# (a fresh lease from a PRIOR run — never treated as FRESH for THIS run),
+# or a local stat/read failure. Never throws under `set -e` (every internal
+# failure is guarded with `|| ...`); always returns 0.
+#
+# Local backend only — the remote-aws-ssm equivalent is
+# `_remote_dev_progress_snapshot_query`, mirroring `_remote_pid_alive_query`'s
+# split (this function stays the LOCAL probe; the remote wrapper below
+# dispatches to the SSM driver instead of calling this function under that
+# backend).
+dev_progress_snapshot() {
+  local issue_num="$1"
+  local dir
+  dir=$(pid_dir_for_project 2>/dev/null) || { printf '{"state":"UNKNOWN","reason":"pid-dir-unavailable"}\n'; return 0; }
+
+  local progress_file="${dir}/issue-${issue_num}.progress.json"
+  local runid_file="${dir}/issue-${issue_num}.run-id"
+  local pid_file="${dir}/issue-${issue_num}.pid"
+
+  if [[ -L "$progress_file" ]] || [[ ! -f "$progress_file" ]]; then
+    printf '{"state":"UNKNOWN","reason":"progress-file-missing-or-symlink"}\n'
+    return 0
+  fi
+  if [[ -L "$runid_file" ]] || [[ ! -f "$runid_file" ]]; then
+    printf '{"state":"UNKNOWN","reason":"runid-file-missing-or-symlink"}\n'
+    return 0
+  fi
+
+  local mode
+  # A stat failure (GNU/BSD both missing, or the file vanished mid-check)
+  # falls back to "" — mode != "600" then fails closed to UNKNOWN below,
+  # never mistaken for a valid 0600 file.
+  mode=$(stat -c '%a' "$progress_file" 2>/dev/null || stat -f '%Lp' "$progress_file" 2>/dev/null || echo "")
+  if [[ "$mode" != "600" ]]; then
+    printf '{"state":"UNKNOWN","reason":"progress-file-bad-mode"}\n'
+    return 0
+  fi
+  # Same fail-closed direction as above, for the run-id sidecar.
+  mode=$(stat -c '%a' "$runid_file" 2>/dev/null || stat -f '%Lp' "$runid_file" 2>/dev/null || echo "")
+  if [[ "$mode" != "600" ]]; then
+    printf '{"state":"UNKNOWN","reason":"runid-file-bad-mode"}\n'
+    return 0
+  fi
+
+  local lease_json
+  lease_json=$(cat "$progress_file" 2>/dev/null) || { printf '{"state":"UNKNOWN","reason":"progress-file-unreadable"}\n'; return 0; }
+
+  local now
+  now=$(date -u +%s 2>/dev/null) || { printf '{"state":"UNKNOWN","reason":"clock-unavailable"}\n'; return 0; }
+
+  local parsed
+  parsed=$(jq -re --arg now "$now" '
+      if (.schema_version == 1)
+         and (.pid | type == "number" and (. == (. | floor)) and . >= 0)
+         and (.updated_at_epoch | type == "number" and (. == (. | floor)) and . >= 0 and . <= ($now | tonumber))
+         and (.run_id | type == "string" and length > 0)
+      then "\(.pid)\t\(.updated_at_epoch)\t\(.run_id)"
+      else empty
+      end
+    ' <<<"$lease_json" 2>/dev/null) || { printf '{"state":"UNKNOWN","reason":"progress-file-malformed"}\n'; return 0; }
+
+  local lease_pid lease_epoch lease_run_id
+  IFS=$'\t' read -r lease_pid lease_epoch lease_run_id <<<"$parsed"
+
+  local current_pid current_run_id
+  current_pid=$(cat "$pid_file" 2>/dev/null) || current_pid=""
+  current_run_id=$(head -n1 "$runid_file" 2>/dev/null) || current_run_id=""
+
+  if [[ -z "$current_pid" ]] || [[ "$lease_pid" != "$current_pid" ]]; then
+    printf '{"state":"UNKNOWN","reason":"pid-mismatch"}\n'
+    return 0
+  fi
+  if [[ -z "$current_run_id" ]] || [[ "$lease_run_id" != "$current_run_id" ]]; then
+    printf '{"state":"UNKNOWN","reason":"run-id-mismatch"}\n'
+    return 0
+  fi
+
+  local age=$(( now - lease_epoch ))
+  local state="FRESH"
+  [[ "$age" -gt "$DEV_PROGRESS_STALE_SECONDS" ]] && state="STALE"
+
+  jq -nc --arg state "$state" --argjson age "$age" --argjson pid "$lease_pid" --arg run_id "$lease_run_id" \
+    '{state: $state, age: $age, pid: $pid, run_id: $run_id}' 2>/dev/null \
+    || printf '{"state":"UNKNOWN","reason":"snapshot-encode-failure"}\n'
+  return 0
+}
+
+# _remote_dev_progress_snapshot_query <issue_num>
+#
+# Synchronous SSM query into the wrapper box's agent-progress lease.
+# Mirrors `_remote_pid_alive_query`'s shape: resolves the driver path via
+# parameter expansion (no `dirname`, PATH-scrubbed-safe), test override via
+# `_PROGRESS_SNAPSHOT_DRIVER_OVERRIDE`. Echoes the driver's own JSON snapshot
+# line verbatim on rc=0; on any transport failure (rc≠0), echoes the fixed
+# UNKNOWN sentinel below — NEVER fabricates STALE from a transport fault.
+_remote_dev_progress_snapshot_query() {
+  local issue_num="$1"
+  local driver
+  if [ -n "${_PROGRESS_SNAPSHOT_DRIVER_OVERRIDE:-}" ]; then
+    driver="$_PROGRESS_SNAPSHOT_DRIVER_OVERRIDE"
+  else
+    local _src="${BASH_SOURCE[0]:-$0}"
+    driver="${_src%/*}/agent-progress-snapshot-remote-aws-ssm.sh"
+  fi
+
+  local out rc
+  out=$(bash "$driver" --snapshot "$issue_num" 2>/dev/null)
+  rc=$?
+
+  if [[ "$rc" -eq 0 ]] && [[ -n "$out" ]]; then
+    printf '%s' "$out"
+  else
+    printf '{"state":"UNKNOWN","reason":"remote-transport-failure"}'
+  fi
+  return 0
+}
+
+# _remote_dev_progress_compare_and_signal <issue_num> <expected_pid> <expected_run_id>
+#
+# Synchronous SSM round-trip that re-validates the lease ON THE WRAPPER HOST
+# and, only if the recheck still reports STALE with the SAME pid/run_id,
+# sends SIGTERM there — atomically, within one remote invocation, so there
+# is no gap between the final recheck and the signal. Echoes `SIGNALED` or
+# `ABORTED:<reason>` on rc=0; on any transport failure echoes the fixed
+# `ABORTED:remote-transport-failure` sentinel — the caller must treat this
+# identically to a genuine abort (no comment, no transition), never assume
+# the signal was sent.
+_remote_dev_progress_compare_and_signal() {
+  local issue_num="$1" expected_pid="$2" expected_run_id="$3"
+  local driver
+  if [ -n "${_PROGRESS_SNAPSHOT_DRIVER_OVERRIDE:-}" ]; then
+    driver="$_PROGRESS_SNAPSHOT_DRIVER_OVERRIDE"
+  else
+    local _src="${BASH_SOURCE[0]:-$0}"
+    driver="${_src%/*}/agent-progress-snapshot-remote-aws-ssm.sh"
+  fi
+
+  local out rc
+  out=$(bash "$driver" --compare-and-signal "$issue_num" "$expected_pid" "$expected_run_id" 2>/dev/null)
+  rc=$?
+
+  if [[ "$rc" -eq 0 ]] && [[ "$out" == "SIGNALED" || "$out" == ABORTED:* ]]; then
+    printf '%s' "$out"
+  else
+    printf 'ABORTED:remote-transport-failure'
+  fi
+  return 0
+}
+
 # Step 5b: echoes the SHA from the most recent "Reviewed HEAD: \`<sha>\`"
 # trailer comment on the issue. Empty if none found (caller routes to
 # pending-review per [INV-07]).

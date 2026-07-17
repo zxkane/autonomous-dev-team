@@ -229,6 +229,14 @@ AGENT_PERMISSION_MODE="auto"
 # see AGENT_REVIEW_TIMEOUT below.
 AGENT_TIMEOUT="4h"
 
+# Step 5a's agent-progress freshness threshold (DEV_PROGRESS_STALE_SECONDS,
+# INV-137, #485) is a FIXED constant (1800s) in lib-dispatch.sh — it is
+# deliberately NOT a conf knob here. Step 5a SIGTERMs a live dev wrapper only
+# when the PR has been idle >300s (INV-10, unchanged) AND the wrapper's
+# current-run agent-progress lease (INV-135) has produced no output for
+# >1800s — so a session doing local typecheck/test/build between pushes is
+# never mistaken for a hung one.
+
 # AGENT_REVIEW_TIMEOUT: per-side wall-clock cap for REVIEW-agent CLIs only
 # (INV-48, #185). The shared AGENT_TIMEOUT above is generous (4h) because a dev
 # run can legitimately take hours; a code REVIEW is ~1-2 min, so a review CLI
