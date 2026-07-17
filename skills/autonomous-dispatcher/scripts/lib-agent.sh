@@ -1485,27 +1485,22 @@ _agent_progress_write_retry() {
 #     validation only on a box with no jq is preferable to refusing to
 #     progress-track at all.
 #   anything else ("line" framing) — every non-empty line counts.
-# _agent_progress_refresh no-ops (returns 0 immediately) when
-# AGENT_PROGRESS_FILE is unset — the review side never sets it — but the
-# READ LOOP below runs unconditionally on BOTH sides: it is not merely a
-# no-op passthrough there. `autonomous-review.sh` composes the SAME
-# `exec > >(tee -a run.log) 2>&1` topology as the dev wrapper, so the
-# review-side CLI's O_NONBLOCK pipe hazard (the root cause of issue #508)
-# applies equally there. A prior version of this function special-cased a
-# bare `cat` when AGENT_PROGRESS_FILE was unset, reasoning that the review
-# side never refreshes a lease so a plain passthrough was equivalent —
-# true for the LEASE, false for the WRITE: GNU coreutils `cat` (the
-# `ubuntu-latest` CI runner's `cat`, unlike some other `cat`
-# implementations) does not retry EAGAIN either and silently drops data
-# past the pipe buffer boundary, exactly like bash's un-retried `printf`
-# before this issue's fix (caught by TC-LEASE-027 failing on GNU `cat`
-# specifically, despite passing locally against a non-GNU `cat`). Routing
-# BOTH sides through `_agent_progress_write_retry` closes that gap. Never
-# swallows/buffers stdout, never touches stderr, and never affects the
-# pipeline's exit-status propagation — callers read the CLI's own rc via
-# PIPESTATUS at the SAME index it already used before this stage was
+# No-op passthrough (bare `cat`) when AGENT_PROGRESS_FILE is unset — the
+# review side never sets it, so composing this into every adapter is always
+# safe there. Never swallows/buffers stdout, never touches stderr, and never
+# affects the pipeline's exit-status propagation — callers read the CLI's own
+# rc via PIPESTATUS at the SAME index it already used before this stage was
 # inserted (recorder is appended strictly AFTER the CLI's own
 # _run_with_timeout stage, so that index never shifts).
+#
+# Issue #508 scope note: the review-side `cat` here has the SAME un-retried-
+# EAGAIN data-drop hazard the dev-side `printf` had (confirmed empirically:
+# GNU coreutils `cat` drops data under the identical O_NONBLOCK pressure —
+# see TC-LEASE-027's history and #510). #508's own "Mandated fix shape"
+# explicitly scopes the fix to the dev-side write path and requires this
+# fast path be left unchanged, so that hazard is deliberately NOT fixed
+# here; it is tracked in #510 so the fix stays in scope and the known gap
+# isn't silently dropped.
 #
 # A bash read-loop, not an awk filter like the codex/opencode capture
 # filters below: _agent_progress_refresh is a real function call per record,
@@ -1518,6 +1513,10 @@ _agent_progress_write_retry() {
 # synthesized newline — true byte-identical passthrough.
 _agent_progress_recorder() {
   local framing="${1:-line}"
+  if [[ -z "${AGENT_PROGRESS_FILE:-}" ]]; then
+    cat
+    return 0
+  fi
   local line rc out
   while :; do
     # `|| rc=$?` (not a bare `read`) so a non-zero `read` at EOF — the

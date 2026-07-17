@@ -1041,29 +1041,34 @@ PYEOF
   fi
 
   # ---------------------------------------------------------------------
-  # TC-LEASE-027: the zero-AGENT_PROGRESS_FILE review-side path (no lease
-  # to refresh) goes through the SAME retry-protected write loop as the
-  # dev side and stays byte-identical under the same EAGAIN pressure. A
-  # prior shape special-cased a bare `cat` here on the reasoning that the
-  # review side never refreshes a lease so a plain passthrough was
-  # equivalent — true for the lease, false for the write: GNU coreutils
-  # `cat` does not retry EAGAIN either (unlike some other `cat`
-  # implementations), so a bare `cat` on the review side would silently
-  # drop data exactly like the un-retried `printf` this issue fixes on the
-  # dev side. This assertion is what actually catches that: it failed
-  # against a GNU-coreutils `cat` even while every other TC-LEASE-024..029
-  # assertion passed, since the bug lived in the now-removed shortcut, not
-  # in `_agent_progress_write_retry` itself.
+  # TC-LEASE-027: the zero-AGENT_PROGRESS_FILE fast path (bare `cat`) is
+  # UNCHANGED by this PR — issue #508's own "Mandated fix shape" explicitly
+  # scopes the retry fix to the dev-side write path and requires this fast
+  # path be left as-is. This asserts byte-identical passthrough under
+  # NORMAL (non-adversarial) conditions, proving the fast path's code path
+  # itself is untouched by this PR — the same guarantee it had before this
+  # PR existed. It deliberately does NOT assert losslessness under the
+  # EAGAIN pressure TC-LEASE-024 exercises for the dev-side write path: the
+  # fast path provably is NOT lossless there (some `cat` implementations,
+  # e.g. GNU coreutils, do not retry EAGAIN and drop data past the pipe
+  # buffer boundary, the same failure mode as the pre-fix `printf` this
+  # issue exists to fix on the dev side — confirmed empirically against a
+  # real GNU `cat` binary). That hazard is real but out of THIS issue's
+  # mandated scope (its own text requires this fast path be left
+  # unchanged) and has no completion-detection consumer on the review side
+  # (`is_session_completed` only ever reads the dev wrapper's log — see
+  # lib-dispatch.sh), unlike the dev-side drop this issue fixes; it is
+  # tracked as a separate follow-up (#510) instead of silently dropped.
   # ---------------------------------------------------------------------
   FASTPATH_OUT="$TMPROOT/fastpath-out.jsonl"
-  python3 "$PY_DRIVER" "$FASTPATH_OUT" 1.0 -- bash -c '
+  bash -c '
     unset AGENT_PROGRESS_FILE
     source "'"$LIB"'"
     cat "'"$EAGAIN_FIXTURE"'" | _agent_progress_recorder json
-  ' >/dev/null 2>&1
+  ' >"$FASTPATH_OUT" 2>/dev/null
 
   fastpath_sha=$(_sha "$FASTPATH_OUT")
-  assert_eq "TC-LEASE-027 review-side path (AGENT_PROGRESS_FILE unset) stays byte-identical under the same pressure" \
+  assert_eq "TC-LEASE-027 fast path (AGENT_PROGRESS_FILE unset) stays byte-identical under normal (non-adversarial) conditions" \
     "$expected_sha" "$fastpath_sha"
 
   # ---------------------------------------------------------------------

@@ -87,18 +87,16 @@ sites in the recorder's read loop with a bounded-retry write:
   guards mean bound exhaustion/EPIPE can never abort the read loop under a caller's
   `set -e` — the same rationale as the loop's pre-existing `read -r line || rc=$?` guard for
   the no-trailing-newline EOF case.
-- **The zero-`AGENT_PROGRESS_FILE` review-side path goes through the same retry-protected
-  loop, not a bare `cat` (round-2 review finding, caught only by CI).** The first shipped
-  shape special-cased a plain `cat` when `AGENT_PROGRESS_FILE` was unset, reasoning the
-  review side never refreshes a lease so a no-op passthrough was equivalent — true for the
-  lease, false for the write: `autonomous-review.sh` composes the identical
-  `exec > >(tee -a run.log) 2>&1` topology, so the review-side CLI has the SAME shared
-  nonblocking-pipe hazard. GNU coreutils `cat` (the CI runner's `cat`) does not retry
-  `EAGAIN` either and silently drops data past the pipe buffer boundary — TC-LEASE-027
-  failed in CI while passing locally, because the dev box's `cat` happened to be a
-  different (non-GNU) implementation that behaves differently under the same pressure. The
-  shortcut was removed; `_agent_progress_refresh`'s own unset-`AGENT_PROGRESS_FILE` guard
-  already makes the lease side a safe no-op there, so this costs nothing on the review side.
+- **The zero-`AGENT_PROGRESS_FILE` review-side fast path (bare `cat`) is UNCHANGED**, per
+  the issue's own "Mandated fix shape" ("the retry must not change the
+  zero-`AGENT_PROGRESS_FILE` fast path (`cat` short-circuit, review side)"). A round-2 dev
+  iteration removed this shortcut after CI's TC-LEASE-027 exposed that GNU coreutils `cat`
+  has the SAME un-retried-`EAGAIN` data-drop hazard as the pre-fix `printf` (confirmed
+  empirically against a real GNU `cat` binary: it drops ~53% of a 500-line fixture under
+  the harness's EAGAIN pressure). That fix was reverted after round-6/7 review correctly
+  rejected the scope expansion (documenting a deviation is not the same as obtaining an
+  owner-approved requirement change) — see "Review-side `cat` EAGAIN hazard" below for why
+  reverting is safe and where the hazard is tracked instead.
 
 ## Review-round follow-ups (this PR)
 
@@ -110,57 +108,58 @@ sites in the recorder's read loop with a bounded-retry write:
 | 2 | TC-LEASE-024..028 existed only in the shell test, not in `docs/test-cases/agent-progress-lease.md` | Added TC-LEASE-024..029 there in Given/When/Then form, plus the R3 acceptance-mapping update |
 | 2 | No design canvas covered the slice/retry/error-classification design | This document |
 | 2 | `local LC_ALL=C` does not reach the child `awk` process unless `LC_ALL` was already exported — a comma-decimal locale could corrupt the deadline float comparison | Prefixed `LC_ALL=C` directly on both `awk` invocations |
-| 2 (CI, not local) | TC-LEASE-027 failed against GNU coreutils `cat` (the CI runner's `cat`) even though it passed locally against this dev box's non-GNU `cat` — the "zero-`AGENT_PROGRESS_FILE` fast path" bare `cat` had the SAME un-retried-`EAGAIN` data-drop bug as the pre-fix `printf`, just on the review side | Removed the bare-`cat` special case; the review-side path now runs through the same `_agent_progress_write_retry`-protected loop as the dev side |
+| 2 (CI, not local) | TC-LEASE-027 failed against GNU coreutils `cat` (the CI runner's `cat`) even though it passed locally against this dev box's non-GNU `cat` — the "zero-`AGENT_PROGRESS_FILE` fast path" bare `cat` had the SAME un-retried-`EAGAIN` data-drop bug as the pre-fix `printf`, just on the review side | Removed the bare-`cat` special case, routing the review-side path through the same `_agent_progress_write_retry`-protected loop as the dev side — **later reverted in round 8** (see rows 5 and 6, 7) as out of #508's scope |
 | 3 | A missing/broken `awk` on `PATH` made the exhaustion check's `if awk ...; then` misread "awk itself couldn't execute" as "deadline not yet reached", spinning the retry loop forever instead of failing safe | Capture the `awk` invocation's exit code explicitly and treat anything other than its documented rc 1 ("not yet") as exhaustion; the deadline computation's own `awk` call falls back to `deadline=now` on failure (see Decision above); TC-LEASE-030 |
 | 4 | On a bash without `EPOCHREALTIME` whose `date` fallback is also missing/broken, the clock helper returns an empty string; awk coerces that to `0` in arithmetic (not a failing exit code), so `deadline` and every later `now` both compute from `0` and `0 >= deadline` never holds — an unbounded hang the round-3 `awk`-exit-code fix does not catch, since `awk` itself runs successfully here | `_agent_progress_write_retry_clock_ok` validates the clock reading is a plain decimal number BEFORE it reaches `awk`, checked on the initial `now0` and again on every retry attempt's `now`; an unusable reading fails closed immediately with a "clock unavailable" diagnostic; TC-LEASE-031 |
-| 5 | The literal issue text says the fix "must not change the zero-`AGENT_PROGRESS_FILE` fast path (`cat` short-circuit, review side)" — read strictly, restoring the pre-round-2 bare `cat` special case | See "Scope amendment" below: restoring it reintroduces the exact data-drop bug class this issue exists to fix (re-verified empirically against the round-2 fix's own repro harness before deciding to keep the removal) |
+| 5 | The literal issue text says the fix "must not change the zero-`AGENT_PROGRESS_FILE` fast path (`cat` short-circuit, review side)" — round 5 recognized a stricter reading was needed but only documented the round-2 removal as a deliberate deviation instead of reverting it | See "Review-side `cat` EAGAIN hazard" below: reverted the round-2 change; the bare `cat` fast path is restored byte-for-byte as it existed before this PR |
+| 6, 7 | Review rejected the round-5 "documented deviation" twice in a row: restore the fast path or obtain an owner-approved requirement change — a design-doc note is neither | Reverted the round-2 fast-path removal outright (this round); filed the underlying `cat`/EAGAIN hazard as #510 instead of fixing it inside #508's scope |
 
-## Scope amendment: the review-side `cat` short-circuit stays removed (round-5 review finding)
+## Review-side `cat` EAGAIN hazard (tracked separately, NOT fixed in this PR)
 
 Issue #508's own "Mandated fix shape" section states the retry "must not change the
-zero-`AGENT_PROGRESS_FILE` fast path (`cat` short-circuit, review side)". Read literally,
-that requires restoring the bare `cat "$@"` special case this PR's round-2 fix removed.
-This PR does NOT restore it, for a reason the issue's author could not have known when
-writing that constraint: **the constraint's own premise is false**. The issue was filed,
-and that sentence written, assuming the review-side fast path is a safe no-op passthrough
-because it never refreshes a lease — true for the LEASE, but the constraint conflates
-"no lease to refresh" with "no write-side hazard", and the review side has the exact same
-shared-nonblocking-pipe write hazard the dev side does (`autonomous-review.sh` composes the
-identical `exec > >(tee -a run.log) 2>&1` topology). This was not a hypothetical raised
-during development — it is a **CI-observed regression**: the round-2 fix's own
-TC-LEASE-027 failed in CI (GNU coreutils `cat`) while passing locally (a non-GNU `cat`)
-specifically because CI's `cat` drops data under this exact `O_NONBLOCK`/EAGAIN pressure,
-the identical failure mode as the un-retried `printf` this whole issue exists to fix.
-Restoring the bare-`cat` shortcut would re-introduce a known, CI-reproducible instance of
-the bug class issue #508 was filed to eliminate — on the review side specifically, where a
-false session-completion misread has the same downstream blast radius (false
-`crashed-session-retry` → false `stalled`) as on the dev side.
+zero-`AGENT_PROGRESS_FILE` fast path (`cat` short-circuit, review side)". A round-2
+iteration removed that shortcut anyway, after CI's TC-LEASE-027 showed GNU coreutils `cat`
+drops data under this same `O_NONBLOCK`/EAGAIN pressure — a real bug, verified again here
+directly: a real GNU `cat` (9.7) run through this issue's own `drive_recorder.py` harness
+against a 500-line/~140KB fixture landed only 233 of 500 lines (sha256 mismatch,
+`write error: Resource temporarily unavailable` on stderr), while this dev box's default
+`cat` (a Rust/uutils reimplementation) reproduced the input byte-identically under the
+identical pressure — confirming the hazard is real but implementation-dependent, not a flaw
+in this PR's own retry logic.
 
-Re-verified directly (not merely re-asserting the round-2 finding) before writing this
-section: running the round-2 fix's own `drive_recorder.py` EAGAIN-pressure harness against
-a bare `cat` of the same ≥64KB fixture reproduces byte-identical output on THIS box's
-non-GNU `cat` (matching the round-2 finding's own "passes locally" observation) — the
-divergence is `cat`-implementation-specific, consistent with GNU coreutils' documented
-behavior of not retrying a partial/failed `write(2)` on `EAGAIN`. This PR's existing
-TC-LEASE-027 (which asserts the retry-protected path, not a bare `cat`) is the CI-portable
-regression guard; it cannot regress on a `cat` variant either way, unlike the pre-round-2
-shape it replaced.
+Round 5 kept the round-2 removal and only documented it as a "deliberate deviation" rather
+than obtaining an actual requirement change. Rounds 6 and 7 correctly rejected that: the
+issue's constraint is unambiguous, and a design-doc note asserting a deviation is justified
+is not the "owner-approved requirement change" the review asked for. This round reverts the
+round-2 removal outright — the fast path is restored to a bare `cat`, byte-for-byte as it
+existed before this PR — and stops trying to fix the review-side hazard inside #508's scope.
 
-Per this skill's autonomous-mode decision-making guidance ("scope ambiguity → implement the
-minimum viable interpretation"; no maintainer is available synchronously to confirm), the
-minimum-viable, correctness-preserving interpretation is: honor the constraint's INTENT
-(the review-side write path must not gain a NEW behavior beyond what's needed to close the
-EAGAIN hazard) while declining to reinstate a fast path independently proven unsafe in this
-repo's own CI. This is flagged here, in the PR body, and in the issue comment for this
-round explicitly as a deliberate, evidence-backed deviation from the issue's literal text —
-not an oversight — so a maintainer can override it on sight if they disagree.
+This is a safe revert, not a regression, because the review-side hazard has a materially
+different blast radius than the dev-side one this issue exists to fix:
+- `is_session_completed` (`lib-dispatch.sh`) — the function whose false-negative reads
+  cascade into `crashed-session-retry` → false `stalled` — only ever parses the **dev**
+  wrapper's log (gated on `AGENT_DEV_CMD`/`AGENT_CMD`); it has no review-side counterpart.
+  A dropped record in the review wrapper's `run.log` degrades log fidelity for a human
+  reading it post-hoc; it does not feed any automated state-machine decision.
+- The hazard is therefore real and worth fixing, but it is a different, smaller-severity
+  bug than #508, not a component of #508's fix. It is filed as #510 rather than fixed
+  here, so #508 can converge on its own literal, unambiguous scope.
+
+TC-LEASE-027 is adjusted accordingly: it now asserts the fast path is byte-identical under
+NORMAL (non-adversarial) conditions — proving the code path is untouched by this PR — and
+no longer asserts losslessness under the EAGAIN harness, since that property is false for
+some `cat` implementations and asserting it would just reintroduce the same CI-observed
+failure the round-2 removal was trying (out of scope) to fix.
 
 ## Out of scope
 
 Dispatcher-side hardening of the `crashed-session-retry` / INV-85 misclassification chain
 (the consumer was fed corrupted input; fixing the producer removes the input class).
 Changing the wrapper's `exec > >(tee ...)` topology or Node's stdio flags. The remote-SSM
-log probe (reads the same file post-hoc; fixed by the same producer fix).
+log probe (reads the same file post-hoc; fixed by the same producer fix). The review-side
+`cat` fast path's own EAGAIN/data-drop hazard (discovered during round 2, reverted in
+round 8 per the "Review-side `cat` EAGAIN hazard" section above) — tracked as #510, not
+fixed here.
 
 ## Test plan
 
@@ -168,11 +167,14 @@ See `docs/test-cases/agent-progress-lease.md` TC-LEASE-024..031 —
 `tests/unit/test-agent-progress-lease.sh`, driving the real recorder through a real
 `O_NONBLOCK` pipe via a python3 `fcntl` helper: byte-identical passthrough under transient
 EAGAIN pressure, the no-trailing-newline contract under retry, bounded-exhaustion
-completing instead of hanging, the zero-`AGENT_PROGRESS_FILE` review-side path now
-protected the same way as the dev side, dead-reader (EPIPE) fast-fail, the whole-record
-(not per-slice) retry budget, (TC-LEASE-030) a missing `awk` on `PATH` failing safe instead
-of retrying forever against the SAME never-draining-reader harness TC-LEASE-026 uses, and
-(TC-LEASE-031) a bash with no `EPOCHREALTIME` AND a missing/broken `date` fallback — no
-usable clock at all — also failing safe against that same harness, distinct from
-TC-LEASE-030 because here `awk` itself runs fine; the bad input (an empty clock reading
-coerced to `0`) never produces a failing exit code for the round-3 fix to catch.
+completing instead of hanging, the zero-`AGENT_PROGRESS_FILE` fast path staying an
+unmodified bare `cat` (byte-identical under normal, non-adversarial conditions — not
+asserted lossless under EAGAIN pressure, since it provably is not for every `cat`
+implementation and that hazard is explicitly out of scope), dead-reader (EPIPE) fast-fail,
+the whole-record (not per-slice) retry budget, (TC-LEASE-030) a missing `awk` on `PATH`
+failing safe instead of retrying forever against the SAME never-draining-reader harness
+TC-LEASE-026 uses, and (TC-LEASE-031) a bash with no `EPOCHREALTIME` AND a missing/broken
+`date` fallback — no usable clock at all — also failing safe against that same harness,
+distinct from TC-LEASE-030 because here `awk` itself runs fine; the bad input (an empty
+clock reading coerced to `0`) never produces a failing exit code for the round-3 fix to
+catch.
