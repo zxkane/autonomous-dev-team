@@ -3330,13 +3330,15 @@ _inv92_matched_patterns() {
     2>/dev/null || true  # fail-empty on jq/transport failure, never abort under set -e (see docstring)
 }
 
-# [INV-85] (#274): returns 0 (true) if any issue comment carries the
-# bot-permission signature that proves the only fix is one the scoped agent
-# token cannot perform — a `Resource not accessible by integration` 403 in a
-# PR-metadata-edit context (`gh pr edit`, a `PATCH .../pulls/N`, or an explicit
-# "PR body"/"pull request" mention). When present, no commit the bot can push
-# clears the finding, so the completed-session failed-substantive branch
-# escalates to the operator without spending even one `dev-new`.
+# [INV-85] (#274, extended #511): returns 0 (true) if the CURRENT dev attempt
+# is bot-unfixable — either a structured `<!-- dev-blocked-403: head=<sha> -->`
+# marker (primary signal), or — only when no such marker exists anywhere in the
+# window — the legacy free-text signature: a `Resource not accessible by
+# integration` 403 in a PR-metadata-edit context (`gh pr edit`, a `PATCH
+# .../pulls/N`, or an explicit "PR body"/"pull request" mention). When present,
+# no commit the bot can push clears the finding, so the completed-session
+# failed-substantive branch escalates to the operator without spending even one
+# `dev-new`.
 #
 # Fail-safe: a `gh` transport error / no match yields empty → return 1 (NOT
 # unfixable), so the caller falls through to the bounded-retry path (which still
@@ -3345,13 +3347,15 @@ _inv92_matched_patterns() {
 # RE2-safe (plain alternation, no look-behind/ahead) so a `gh --jq` run can't
 # abort the wrapper under `set -e` ([gh --jq is RE2]).
 dev_report_bot_unfixable() {
-  # NOTE: arg 2 (the current PR head) is intentionally accepted-but-unused — the
-  # lower bound is now the current dev attempt's dispatch token, not a HEAD
-  # trailer (see scoping (2) below). Kept in the signature for call-site
-  # stability and because the caller already gates on the head.
-  local issue_num="$1" _current_head_unused="${2:-}" since_iso="" dev_login="" hits
+  # arg 2 is now load-bearing (#511): the CALLER's current PR head, matched
+  # against the structured marker's `head=` field (scoping below) and used to
+  # detect whether HEAD moved during the current attempt (the success-veto).
+  # Pre-#511 this arg was accepted-but-unused; every existing call site already
+  # passes the current head (the caller gates on `current_head ==
+  # last_reviewed_head` before calling), so no call site needed to change.
+  local issue_num="$1" current_head="${2:-}" since_iso="" dev_login="" hits
 
-  # Count a PR-metadata 403 ONLY when it was authored BY the dev agent during the
+  # Count a 403 signal ONLY when it was authored BY the dev agent during the
   # CURRENT dev attempt. A 403 only proves the *active dev attempt* is bot-blocked
   # when the dev agent reported it in this attempt — not when a reviewer, a
   # maintainer/owner, or a human comment merely *quotes* the signature, and not
@@ -3404,6 +3408,77 @@ dev_report_bot_unfixable() {
     2>/dev/null) || since_iso=""
   since_iso="${since_iso:-1970-01-01T00:00:00Z}"
 
+  # (#511 design point 1, PRIMARY signal): a structured `<!-- dev-blocked-403:
+  # head=<sha> -->` marker, dev-authored, in the current attempt's window (same
+  # scopings (1)-(3) as the legacy path). One fetch + one jq pass emits both
+  # counts: `marker_any` (matches on ANY head) and `marker_matching` (narrowed
+  # to a `head=` equal to the caller-supplied `current_head`). Matching on ANY
+  # head first (design point 3) is deliberate: once the dev agent emits a
+  # marker at all for this attempt, it is marker-aware, so a STALE-head marker
+  # means "blocked at a head that is no longer current" (not-unfixable, not a
+  # legacy-substring fallback candidate) rather than falling through to the
+  # free-text heuristic this issue exists to stop misfiring. `capture(...;
+  # "g")` naturally yields zero objects for a non-matching body (no
+  # `select`-on-null risk); `.body // ""` still guards the null-body case
+  # (#148).
+  local marker_counts marker_any marker_matching
+  marker_counts=$(itp_list_comments "$issue_num" 2>/dev/null \
+    | jq -r --arg dev "$dev_login" --arg head "$current_head" --arg since "$since_iso" \
+      "[.[]
+         | select((.author // \"\") == \$dev)
+         | select(.createdAt > \$since)
+         | (.body // \"\")
+         | select((test(\"Review Session:\") or test(\"Review findings\") or test(\"Review Agent:\")) | not)
+         | capture(\"<!-- dev-blocked-403: head=(?<h>[^ \\\\n]+) -->\"; \"g\")
+         | .h] as \$heads
+       | \"\(\$heads | length) \(\$heads | map(select(. == \$head)) | length)\"" \
+    2>/dev/null) || marker_counts="0 0"
+  read -r marker_any marker_matching <<<"$marker_counts"
+  if [ -n "$marker_any" ] && [ "$marker_any" != "0" ]; then
+    if [ -n "$marker_matching" ] && [ "$marker_matching" != "0" ]; then
+      return 0
+    else
+      return 1
+    fi
+  fi
+
+  # (#511 design point 2, success-comment veto — LEGACY PATH ONLY): no marker
+  # exists anywhere in the window, so fall back to the free-text heuristic —
+  # unless THIS attempt made verifiable progress. Progress is: (a) a
+  # dev-authored, in-window `Agent Session Report (Dev)` reporting `Exit code:
+  # 0`, AND (b) HEAD demonstrably moved during the attempt — the most recent
+  # `Reviewed HEAD:` trailer BEFORE the current dispatch token (the head this
+  # attempt started from) differs from `current_head` (the head it left
+  # behind). Both must hold: exit-0 alone does not prove progress (a session can
+  # exit 0 having pushed nothing — BU-012/BU-025 class), and a moved head alone
+  # does not prove non-blockage. Requiring an ACTUAL prior `Reviewed HEAD:`
+  # trailer (not just "current_head is non-empty") is deliberate fail-safe: no
+  # trailer found means we have no evidence HEAD moved, so we do NOT veto — the
+  # legacy path's original all-or-nothing behavior is preserved whenever this
+  # forensic signal is unavailable (round-4 regression BU-012 depends on this).
+  local pre_attempt_head success_exit0 head_moved=0 success_veto=0
+  pre_attempt_head=$(itp_list_comments "$issue_num" 2>/dev/null \
+    | jq -r --arg since "$since_iso" \
+      "[.[] | select(.createdAt < \$since) | (.body // \"\") | capture(\"Reviewed HEAD: \`(?<sha>[0-9a-f]{7,40})\`\"; \"g\") | .sha] | last // empty" \
+    2>/dev/null) || pre_attempt_head=""
+  if [ -n "$pre_attempt_head" ] && [ -n "$current_head" ] && [ "$pre_attempt_head" != "$current_head" ]; then
+    head_moved=1
+  fi
+  success_exit0=$(itp_list_comments "$issue_num" 2>/dev/null \
+    | jq -r --arg dev "$dev_login" --arg since "$since_iso" \
+      "[.[]
+         | select((.author // \"\") == \$dev)
+         | select(.createdAt > \$since)
+         | (.body // \"\")
+         | select(test(\"Agent Session Report \\\\(Dev\\\\)\"))
+         | select(test(\"Exit code: 0\\\\b\"))] | length" \
+    2>/dev/null) || success_exit0="0"
+  if [ -n "$success_exit0" ] && [ "$success_exit0" != "0" ] && [ "$head_moved" -eq 1 ]; then
+    success_veto=1
+  fi
+  [ "$success_veto" -eq 1 ] && return 1
+
+  # (#511 design point 3, LEGACY substring fallback — unchanged from pre-#511):
   # `.body` is null when a comment has an empty body; `null | test(...)` aborts
   # the jq filter (silently hiding any match — #148), so guard with `// ""`.
   # The `test()` filters are RE2-safe (plain alternation, no look-behind/ahead).
@@ -3413,10 +3488,10 @@ dev_report_bot_unfixable() {
   # interpolation of the login into the jq program, no regex of it. The fetch
   # moved behind itp_list_comments; the whole select/exact-eq parse stays here.
   hits=$(itp_list_comments "$issue_num" 2>/dev/null \
-    | jq -r --arg dev "$dev_login" \
+    | jq -r --arg dev "$dev_login" --arg since "$since_iso" \
       "[.[]
          | select((.author // \"\") == \$dev)
-         | select(.createdAt > \"${since_iso}\")
+         | select(.createdAt > \$since)
          | (.body // \"\")
          | select((test(\"Review Session:\") or test(\"Review findings\") or test(\"Review Agent:\")) | not)
          | select(test(\"Resource not accessible by integration\"))
