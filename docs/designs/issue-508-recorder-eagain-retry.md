@@ -147,9 +147,9 @@ sites in the recorder's read loop with a bounded-retry write:
 | 4 | On a bash without `EPOCHREALTIME` whose `date` fallback is also missing/broken, the clock helper returns an empty string; awk coerces that to `0` in arithmetic (not a failing exit code), so `deadline` and every later `now` both compute from `0` and `0 >= deadline` never holds — an unbounded hang the round-3 `awk`-exit-code fix does not catch, since `awk` itself runs successfully here | `_agent_progress_write_retry_clock_ok` validates the clock reading is a plain decimal number BEFORE it reaches `awk`, checked on the initial `now0` and again on every retry attempt's `now`; an unusable reading fails closed immediately with a "clock unavailable" diagnostic; TC-LEASE-031 |
 | 5 | The literal issue text says the fix "must not change the zero-`AGENT_PROGRESS_FILE` fast path (`cat` short-circuit, review side)" — round 5 recognized a stricter reading was needed but only documented the round-2 removal as a deliberate deviation instead of reverting it | See "Review-side `cat` EAGAIN hazard" below: reverted the round-2 change; the bare `cat` fast path is restored byte-for-byte as it existed before this PR |
 | 6, 7 | Review rejected the round-5 "documented deviation" twice in a row: restore the fast path or obtain an owner-approved requirement change — a design-doc note is neither | Reverted the round-2 fast-path removal outright (this round); filed the underlying `cat`/EAGAIN hazard as #510 instead of fixing it inside #508's scope |
-| 9 (this round) | The exhaustion check bounds retries against a wall clock; if that clock steps backward after `deadline` is computed (e.g. an NTP correction), every later `now` reading is valid but never reaches `deadline` — the loop spins on `sleep 0.05` forever, a hang none of rounds 1–4's clock-validity/missing-`awk` fixes catch (they only guard a MISSING/malformed clock, not a valid non-advancing one) | Added `max_attempts`, a clock-independent bash integer ceiling checked before the wall-clock check on every attempt (see Decision above); TC-LEASE-032 |
-| 10 | The 4096-byte slice size is only atomic on platforms where the real `PIPE_BUF` is >= 4096; POSIX only guarantees 512, and macOS/BSD's `PIPE_BUF` genuinely is 512 — a hard-coded 4096-byte slice risks a sub-slice partial write on such platforms, reopening the resend-duplication hazard chunking exists to prevent | Slice size lowered to 512 (the POSIX floor, safe on every platform); TC-LEASE-034 verifies via `strace` that the recorder's own writes never exceed 512 bytes |
-| 10 | BSD/macOS `date +%s.%N` does not fail on the unsupported `%N` — it exits 0 and emits a non-numeric `.N`-suffixed string, so the `\|\|`-fallback never fires and a perfectly healthy BSD/macOS clock was misclassified as "clock unavailable" by the round-4 validation, dropping every record | `_agent_progress_write_retry_now_seconds` now validates the `%N` reading is purely numeric before accepting it, falling back to whole-second `date +%s` otherwise; TC-LEASE-033 |
+| 9 (this round) | The exhaustion check bounds retries against a wall clock; if that clock steps backward after `deadline` is computed (e.g. an NTP correction), every later `now` reading is valid but never reaches `deadline` — the loop spins on `sleep 0.05` forever, a hang none of rounds 1–4's clock-validity/missing-`awk` fixes catch (they only guard a MISSING/malformed clock, not a valid non-advancing one) | Added `max_attempts`, a clock-independent bash integer ceiling checked before the wall-clock check on every attempt (see Decision above); TC-LEASE-035 |
+| 10 | The 4096-byte slice size is only atomic on platforms where the real `PIPE_BUF` is >= 4096; POSIX only guarantees 512, and macOS/BSD's `PIPE_BUF` genuinely is 512 — a hard-coded 4096-byte slice risks a sub-slice partial write on such platforms, reopening the resend-duplication hazard chunking exists to prevent | Slice size lowered to 512 (the POSIX floor, safe on every platform); TC-LEASE-037 verifies via `strace` that the recorder's own writes never exceed 512 bytes |
+| 10 | BSD/macOS `date +%s.%N` does not fail on the unsupported `%N` — it exits 0 and emits a non-numeric `.N`-suffixed string, so the `\|\|`-fallback never fires and a perfectly healthy BSD/macOS clock was misclassified as "clock unavailable" by the round-4 validation, dropping every record | `_agent_progress_write_retry_now_seconds` now validates the `%N` reading is purely numeric before accepting it, falling back to whole-second `date +%s` otherwise; TC-LEASE-036 |
 
 ## Review-side `cat` EAGAIN hazard (tracked separately, NOT fixed in this PR)
 
@@ -200,7 +200,7 @@ fixed here.
 
 ## Test plan
 
-See `docs/test-cases/agent-progress-lease.md` TC-LEASE-024..034 —
+See `docs/test-cases/agent-progress-lease.md` TC-LEASE-024..031, 035..037 —
 `tests/unit/test-agent-progress-lease.sh`, driving the real recorder through a real
 `O_NONBLOCK` pipe via a python3 `fcntl` helper: byte-identical passthrough under transient
 EAGAIN pressure, the no-trailing-newline contract under retry, bounded-exhaustion
@@ -214,11 +214,11 @@ TC-LEASE-026 uses, (TC-LEASE-031) a bash with no `EPOCHREALTIME` AND a missing/b
 `date` fallback — no usable clock at all — also failing safe against that same harness,
 distinct from TC-LEASE-030 because here `awk` itself runs fine; the bad input (an empty
 clock reading coerced to `0`) never produces a failing exit code for the round-3 fix to
-catch, (TC-LEASE-032) a clock that steps backward or freezes after `deadline` is computed
-also failing safe via the clock-independent `max_attempts` ceiling, (TC-LEASE-033) a
+catch, (TC-LEASE-035) a clock that steps backward or freezes after `deadline` is computed
+also failing safe via the clock-independent `max_attempts` ceiling, (TC-LEASE-036) a
 BSD/macOS-shaped `date` stub (exit 0, non-numeric `%N` output) does NOT misclassify a
 healthy clock as unavailable — it falls back to `date +%s` and the record survives, and
-(TC-LEASE-034) an `strace`-verified assertion (skipped, not failed, if `strace` is
+(TC-LEASE-037) an `strace`-verified assertion (skipped, not failed, if `strace` is
 unavailable) that the recorder's own `write(2)` calls to fd 1 never exceed 512 bytes for a
 multi-slice record, proving the portable slice size is genuinely enforced rather than
 merely happening to be safe on this box's own (4096) `PIPE_BUF`.
