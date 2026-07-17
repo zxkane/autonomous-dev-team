@@ -9,6 +9,16 @@ failure can never change a wrapper/dispatcher exit code, label transition,
 verdict, or merge decision. Nothing in the pipeline control flow ever reads a
 metrics value back.
 
+> **This lane is NOT the resource-accounting authority.** `metrics.jsonl`'s
+> `token_usage` lines are a best-effort, swallow-all, 90-day-pruned MIRROR for
+> dashboards/reports — nothing a hard gate can be built on. The authoritative,
+> crash-consistent token-accounting store is **`lib-accounting.sh`**
+> ([INV-139](invariants.md#inv-139-the-resource-accounting-store-lib-accountingsh-is-a-separate-mandatory-lock-crash-consistent-authority--metrics_emitmetrics_prune-remain-byte-unchanged-and-provably-cannot-reach-it-and-the-store-is-inert-zero-production-call-sites-until-a-future-issue-wires-enforcement)),
+> a wholly separate library owning `<state_dir>/accounting/<issue>/` — a
+> SIBLING directory this lane's `metrics_prune` provably never reaches. It is
+> inert (no production call sites) as of INV-139; a future admission gate is
+> its intended consumer.
+
 ## Storage
 
 | | |
