@@ -1305,6 +1305,224 @@ _agent_progress_cleanup() {
   return 0
 }
 
+# _agent_progress_write_retry <bytes> — write raw bytes to fd 1 with a
+# bounded EAGAIN retry (issue #508). The wrapper's stdout is
+# `exec > >(tee -a run.log)`, the SAME open file description the Claude CLI
+# (Node.js) inherits as its own stderr; Node sets O_NONBLOCK on that shared
+# pipe (the flag lives on the open file description, not per-fd), so once
+# Node's own writes fill the pipe buffer this recorder's `printf` can get
+# EAGAIN and — bash `printf` does not retry EAGAIN itself — silently drop the
+# record. `tee` is a fast, always-draining reader, so EAGAIN here is
+# transient by construction; retrying the write is correct.
+#
+# A genuinely dead reader raises EPIPE, NOT EAGAIN — but (round-1 review
+# finding) bash's `printf` builtin does NOT die to SIGPIPE on that error the
+# way a raw write(2) caller might expect; it catches the failure internally
+# and returns non-zero with "write error: Broken pipe" on its OWN stderr,
+# same code path as EAGAIN's "Resource temporarily unavailable". Blindly
+# retrying every non-zero `printf` (discarding that message via `2>/dev/null`)
+# would burn the full ~2s retry budget PER RECORD against a dead reader
+# instead of failing fast — this helper captures the message (via a saved
+# fd-dup, so `printf`'s OWN successful output still reaches the real
+# destination) and classifies "Broken pipe" as terminal: drop immediately,
+# don't retry. Only unrecognized/EAGAIN-shaped failures retry.
+#
+# Bytes ALREADY accepted by a partial write() must never be resent — bash's
+# printf can itself return a short count before erroring (observed: an
+# 8000-byte `printf '%s'` into a pipe with ~4096-6000 bytes of room writes
+# exactly one 4096-byte chunk via its own internal write() then fails EAGAIN
+# on the remainder; a sub-PIPE_BUF write is atomic and either fully lands or
+# is fully rejected). Since bash exposes no return value for "how many bytes
+# did printf actually write", this helper writes fixed slices in a loop
+# instead of one `printf` call for the whole string — each slice attempt is
+# retried on EAGAIN, but a slice that reports success is NEVER re-sent, so no
+# byte is ever duplicated. `LC_ALL=C` makes `${#s}` and `${s:off:len}` operate
+# on raw bytes (not multibyte characters), so a slice boundary landing
+# mid-UTF-8-codepoint still round-trips byte-for-byte.
+#
+# The slice size (round-10 review finding [P2]) MUST NOT exceed the platform's
+# actual PIPE_BUF, or the atomicity guarantee above is void: Linux's PIPE_BUF
+# is 4096, but POSIX only guarantees {_POSIX_PIPE_BUF} = 512 — macOS/BSD's
+# PIPE_BUF genuinely is 512. A hard-coded 4096-byte slice on such a platform
+# can itself receive a partial write() below the slice boundary, and this
+# helper has no way to learn how many of THOSE bytes landed — reintroducing
+# the exact resend-duplication risk chunking exists to prevent, just one
+# level down. 512 is the POSIX floor on every conformant platform (including
+# Linux, where it is merely smaller than necessary, not unsafe), so using it
+# unconditionally is correct everywhere without needing a runtime PIPE_BUF
+# probe (`getconf`/`fcntl` are not portably available as plain shell builtins).
+#
+# The retry BUDGET is tracked ONCE for the WHOLE record, not reset per slice
+# (round-2 review finding [P2]): a per-slice `attempts=0` reset let a
+# slowly-draining reader hand each slice of a large record its own fresh ~2s
+# allowance, so a record with N slices could retry for N*2s with no overall
+# bound — the exact "bounded total" the issue's fix contract requires.
+# The fix computes ONE deadline (via `_agent_progress_write_retry_now_seconds`
+# below) from AGENT_PROGRESS_WRITE_RETRY_BUDGET_SECONDS (default 2, overridable so
+# the regression test can force exhaustion in well under a second) BEFORE the
+# slice loop starts; every slice's retry loop checks elapsed time against that
+# SAME deadline, so the total time spent retrying across the entire record is
+# bounded to ~AGENT_PROGRESS_WRITE_RETRY_BUDGET_SECONDS regardless of how many
+# slices it took. `${EPOCHREALTIME:-}` (bash >=5.0, sub-second, this box's
+# shell) is preferred over `date` for a cheap per-attempt clock read inside a
+# tight retry loop; `date +%s.%N` is the intended portable fallback for older
+# bash, BUT (round-10 review finding [P2]) BSD/macOS `date` does not support
+# `%N` and, unlike a genuinely unsupported format, does not fail — it exits 0
+# and echoes the literal characters `%N` (actually just `N`, since `%` is
+# consumed) appended to the seconds, e.g. `1700000000.N`. The `||` fallback
+# above never fires because the command "succeeded"; the result is fed into
+# `_agent_progress_write_retry_clock_ok`, whose numeric-decimal regex REJECTS
+# a `.N` suffix, so this looked identical to the round-4 "clock unavailable"
+# case on every BSD/macOS box even though the machine's clock is perfectly
+# fine and every record would be dropped needlessly. Fixed by validating the
+# `%N` output is purely numeric BEFORE accepting it; a non-numeric result
+# falls back to whole-second `date +%s` (POSIX/BSD-portable) instead of the
+# unusable literal-`%N` string.
+_agent_progress_write_retry_now_seconds() {
+  if [[ -n "${EPOCHREALTIME:-}" ]]; then
+    printf '%s\n' "$EPOCHREALTIME"
+    return
+  fi
+  local frac
+  frac=$(date +%s.%N 2>/dev/null)
+  if [[ "$frac" =~ ^[0-9]+\.[0-9]+$ ]]; then
+    printf '%s\n' "$frac"
+  else
+    date +%s 2>/dev/null
+  fi
+}
+# _agent_progress_write_retry_clock_ok <value> — true iff <value> is a
+# plain, non-empty decimal number (round-4 review finding). On a bash
+# without EPOCHREALTIME (<5.0) whose `date` is ALSO missing/broken, both
+# branches of _agent_progress_write_retry_now_seconds produce an empty
+# string, not a command failure — there is no non-zero exit code to check.
+# Feeding that empty string straight into `awk -v n="$now0" ...` is the
+# actual bug: awk's numeric-string coercion treats an unset variable as 0
+# in arithmetic context, so `deadline` still computes as a plausible-looking
+# "now0 + budget" (0 + budget), and every later exhaustion check re-derives
+# `now=0` the same way, so `0 >= deadline` never holds — the retry loop
+# spins on `sleep 0.05` forever against a never-draining reader. Explicitly
+# validating the clock reading BEFORE it ever reaches awk closes this: a
+# non-numeric/empty reading fails closed immediately, the same posture as
+# the missing-`awk` fail-safe below, instead of silently degrading to an
+# unbounded hang.
+_agent_progress_write_retry_clock_ok() {
+  [[ "$1" =~ ^[0-9]+(\.[0-9]+)?$ ]]
+}
+_agent_progress_write_retry() {
+  local LC_ALL=C
+  local data="$1" total wrote=0 off=0 chunk=512 take piece err
+  local write_fd deadline now now0 attempts=0 awk_rc max_attempts
+  total=${#data}
+  [[ "$total" -eq 0 ]] && return 0
+  # Duplicate the CURRENT fd 1 once so `printf`'s stderr can be captured via
+  # command substitution without losing its (successful-case) stdout to the
+  # substitution's own subshell — the write target is fd 1 at call time,
+  # matching every other write site in this recorder.
+  exec {write_fd}>&1
+  now0=$(_agent_progress_write_retry_now_seconds)
+  if ! _agent_progress_write_retry_clock_ok "$now0"; then
+    printf 'lib-agent.sh: _agent_progress_recorder: dropping output record (%d of %d bytes written) — write error: clock unavailable (no EPOCHREALTIME, date missing or broken)\n' \
+      "$wrote" "$total" >&2 || true  # best-effort diagnostic; a failed write to a full pipe must not itself abort the record-drop path
+    exec {write_fd}>&-
+    return 1
+  fi
+  # LC_ALL=C prefixed directly on the awk invocation (not relying on the
+  # function-local `local LC_ALL=C` above, which only reaches a child
+  # process if LC_ALL was already exported) — an exported LC_NUMERIC/LANG
+  # with a comma decimal separator would otherwise make awk's `%.6f` emit
+  # (and then mis-reparse) a comma, corrupting the deadline math.
+  # A missing/corrupt `awk` on PATH must fail SAFE — collapsing the deadline
+  # to "now" makes the very first exhaustion check below read as already-
+  # exhausted, instead of leaving `deadline` empty and relying on awk's
+  # implicit string/numeric coercion of an empty `-v d=""` to (accidentally)
+  # produce the same outcome in the loop below. The `$?` check must sit
+  # immediately after its assignment (comments preserve `$?`, but any command
+  # in between would not) so a failed awk exec is caught alongside empty output.
+  deadline=$(LC_ALL=C awk -v n="$now0" -v b="${AGENT_PROGRESS_WRITE_RETRY_BUDGET_SECONDS:-2}" 'BEGIN{printf "%.6f", n + b}')
+  [[ $? -eq 0 && -n "$deadline" ]] || deadline="$now0"
+  # max_attempts (round-9 review finding): a SECOND, clock-independent bound
+  # on top of the wall-clock `deadline` above. If the realtime clock steps
+  # BACKWARD mid-retry (e.g. an NTP correction) after `deadline` was computed
+  # from a since-corrected, too-far-in-the-future `now0`, every later
+  # `now >= deadline` reading is a real, valid timestamp that nonetheless
+  # never reaches the stale deadline — the wall-clock check alone would spin
+  # on `sleep 0.05` forever, exactly the unbounded hang this function exists
+  # to prevent. `attempts` is a plain bash integer that only ever increments,
+  # so counting it is immune to any clock behavior (backward jump, freeze, or
+  # missing clock). Sized from the same budget as `deadline` (attempts per
+  # the ~0.05s sleep below) plus a generous fixed margin, so it never fires
+  # before `deadline` under a NORMAL functioning clock — it is a backstop for
+  # the broken-clock case, not a tighter replacement for the primary bound.
+  # Computed once, outside the retry loop, so a missing/broken `awk` here
+  # cannot itself cause a hang: on failure this falls back to a fixed safe
+  # ceiling instead of leaving max_attempts unset (which would make the
+  # `(( attempts >= max_attempts ))` check below error under `set -u`).
+  max_attempts=$(LC_ALL=C awk -v b="${AGENT_PROGRESS_WRITE_RETRY_BUDGET_SECONDS:-2}" 'BEGIN{n=b/0.05; a=int(n); if (a<n) a++; if (a<1) a=1; printf "%d", a+20}')
+  [[ $? -eq 0 && "$max_attempts" =~ ^[0-9]+$ ]] || max_attempts=100
+  while (( off < total )); do
+    take=$(( total - off < chunk ? total - off : chunk ))
+    piece="${data:off:take}"
+    while :; do
+      err=$(printf '%s' "$piece" 2>&1 1>&"$write_fd")
+      if [[ $? -eq 0 ]]; then
+        off=$(( off + take ))
+        wrote=$(( wrote + take ))
+        break
+      fi
+      if [[ "$err" == *"Broken pipe"* ]]; then
+        # Dead reader (EPIPE) — not transient, retrying cannot help. Drop
+        # immediately instead of burning the retry budget.
+        printf 'lib-agent.sh: _agent_progress_recorder: dropping output record (%d of %d bytes written) — write error: Broken pipe\n' \
+          "$wrote" "$total" >&2 || true
+        exec {write_fd}>&-
+        return 1
+      fi
+      attempts=$(( attempts + 1 ))
+      # One deadline for the ENTIRE record (see comment above), not a
+      # per-slice reset — ~2s total budget by default (AGENT_PROGRESS_WRITE_
+      # RETRY_BUDGET_SECONDS), matching the issue's "bounded total (e.g.
+      # ~2s worth)" guidance regardless of how many slices the record took.
+      # Check the clock-independent attempt cap FIRST (cheap bash integer
+      # comparison, no subprocess) — it is the backstop for a broken/jumped
+      # clock, so it must not itself depend on a clock read succeeding.
+      if (( attempts >= max_attempts )); then
+        awk_rc=2
+      else
+        now=$(_agent_progress_write_retry_now_seconds)
+        # Re-validate on EVERY attempt, not just the initial now0 (round-4
+        # review finding) — a clock reading that goes bad mid-loop (e.g. a
+        # transient `date` failure under resource pressure, on a bash
+        # without EPOCHREALTIME) must fail closed here too; otherwise it
+        # feeds awk the same empty-coerces-to-zero value that made this loop
+        # retry forever.
+        if ! _agent_progress_write_retry_clock_ok "$now"; then
+          awk_rc=2
+        else
+          LC_ALL=C awk -v n="$now" -v d="$deadline" 'BEGIN{exit !(n >= d)}'
+          awk_rc=$?
+        fi
+      fi
+      # The awk program only ever exits 0 ("n >= d", deadline reached) or 1
+      # ("n < d", keep retrying) by construction — any OTHER exit code means
+      # awk itself failed to execute (missing/corrupt PATH), not that the
+      # deadline check evaluated false. Fail SAFE and treat that the same as
+      # "deadline reached": `if awk ...; then` would instead read a non-0/1
+      # rc as the `if`'s false branch and spin on `sleep 0.05` forever,
+      # defeating this whole function's bounded-retry contract.
+      if [[ $awk_rc -ne 1 ]]; then
+        printf 'lib-agent.sh: _agent_progress_recorder: dropping output record (%d of %d bytes written) after %d retries — write error: Resource temporarily unavailable\n' \
+          "$wrote" "$total" "$attempts" >&2 || true  # best-effort diagnostic; a failed write to a full pipe must not itself abort the record-drop path
+        exec {write_fd}>&-
+        return 1
+      fi
+      sleep 0.05
+    done
+  done
+  exec {write_fd}>&-
+  return 0
+}
+
 # _agent_progress_recorder_fastpath_now_seconds / _..._clock_ok /
 # _agent_progress_recorder_fastpath_write — bounded-EAGAIN-retry write helper
 # for the zero-AGENT_PROGRESS_FILE fast path ONLY (issue #510). The dev-side
@@ -1456,6 +1674,15 @@ _agent_progress_recorder_fastpath_write() {
 # appended strictly AFTER the CLI's own _run_with_timeout stage, so that
 # index never shifts).
 #
+# Issue #508 scope note: the review-side `cat` here has the SAME un-retried-
+# EAGAIN data-drop hazard the dev-side `printf` had (confirmed empirically:
+# GNU coreutils `cat` drops data under the identical O_NONBLOCK pressure —
+# see TC-LEASE-027's history and #510). #508's own "Mandated fix shape"
+# explicitly scopes the fix to the dev-side write path and requires this
+# fast path be left unchanged, so that hazard is deliberately NOT fixed
+# here; it is tracked in #510 so the fix stays in scope and the known gap
+# isn't silently dropped.
+#
 # A bash read-loop, not an awk filter like the codex/opencode capture
 # filters below: _agent_progress_refresh is a real function call per record,
 # and forking it via awk's system() would either require `export -f` (whose
@@ -1490,7 +1717,7 @@ _agent_progress_recorder() {
     done
     return 0
   fi
-  local line rc
+  local line rc out
   while :; do
     # `|| rc=$?` (not a bare `read`) so a non-zero `read` at EOF — the
     # expected way this loop learns "no trailing newline on the final
@@ -1506,10 +1733,17 @@ _agent_progress_recorder() {
       break
     fi
     if [[ $rc -eq 0 ]]; then
-      printf '%s\n' "$line"
+      out="$line
+"
     else
-      printf '%s' "$line"
+      out="$line"
     fi
+    # `|| true`: a non-zero return here means retry-bound exhaustion (the
+    # record was dropped after the diagnostic inside _agent_progress_write_
+    # retry already fired) — never let that abort the whole read loop under
+    # a caller's `set -e`, the same rationale as the `read -r line || rc=$?`
+    # guard above.
+    _agent_progress_write_retry "$out" || true
     # A complete non-empty output record: under "line" framing every non-empty
     # line counts; under "json" framing only a line that is a COMPLETE JSON
     # object — validated with `jq -e .` so a truncated/mid-write record never

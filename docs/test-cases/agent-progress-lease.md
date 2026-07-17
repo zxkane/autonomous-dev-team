@@ -160,6 +160,72 @@ fixture-driven; no real sleeps.
 **When** `_agent_progress_init` then `_agent_progress_cleanup` run
 **Then** both complete (rc=0, run-id/lease still written unlocked) instead of the caller aborting — proving the `_agent_progress_lock_acquire _lock_fd || true` guard at both call sites is load-bearing: a bare (unguarded) call trips `set -e` on the helper's documented "return 1 when locking is unavailable" contract and aborts the whole wrapper before the agent is ever launched, the opposite of the "best-effort, degrades to unlocked" promise TC-LEASE-022's fix was supposed to preserve.
 
+## TC-LEASE-024: byte-identical passthrough under real EAGAIN pressure (issue #508)
+
+**Given** the recorder's stdout is a real `O_NONBLOCK` pipe (via a python3 `fcntl` helper) whose reader stalls long enough to overflow the pipe buffer and force genuine `EAGAIN`, then drains slowly, and a fixture large enough (>64KB) to guarantee the stall forces at least one real `EAGAIN`
+**When** the fixture (including a final no-trailing-newline `{"type":"result",...}` record) is piped through `_agent_progress_recorder json`
+**Then** the recorder's output is byte-identical to the input (checksum AND line count match, including the final record) and no `write error` diagnostic reaches stderr — `tee`/the test reader always drains, so `EAGAIN` here is transient by construction.
+
+## TC-LEASE-025: no-trailing-newline final-line contract holds under the retry path
+
+**Given** the TC-LEASE-024 fixture/harness (final record has no trailing newline)
+**When** the recorder runs under the same EAGAIN pressure
+**Then** the output's final byte is identical to the fixture's final byte — the retry path never appends a synthesized trailing newline.
+
+## TC-LEASE-026: bounded-retry exhaustion does not hang on a never-draining reader
+
+**Given** a reader that fills the pipe once and never reads again (still open, distinct from a closed/dead reader), and a single-record fixture large enough on its own to force this exact record into the retry-exhaustion path
+**When** the recorder attempts to write it
+**Then** the recorder process still exits within a bounded wall-clock window (not a hang) and emits EXACTLY ONE best-effort stderr diagnostic naming "Resource temporarily unavailable" for the dropped record — never a loud repeating loop of the same error.
+
+## TC-LEASE-027: the zero-`AGENT_PROGRESS_FILE` fast path (bare `cat`) is unchanged by this PR
+
+**Given** `AGENT_PROGRESS_FILE` is unset (the review side's invocation shape)
+**When** the recorder runs under NORMAL, non-adversarial conditions (no EAGAIN pressure)
+**Then** output is byte-identical to the input via an unmodified bare `cat` — proving this PR's retry logic did not touch the fast path, per issue #508's own "Mandated fix shape" text ("must not change the zero-`AGENT_PROGRESS_FILE` fast path"). This test deliberately does NOT assert losslessness under EAGAIN pressure: some `cat` implementations (e.g. GNU coreutils) do not retry `EAGAIN` and drop data under the same pressure TC-LEASE-024 exercises for the dev-side write path — a real hazard (confirmed empirically against a real GNU `cat` binary), but out of this issue's mandated scope and with no completion-detection consumer on the review side (unlike the dev-side drop this issue fixes). Tracked as #510 instead.
+
+## TC-LEASE-028: a genuinely dead reader (EPIPE) fails fast, not the full retry budget (round-1 regression)
+
+**Given** a reader whose read end is closed before the recorder writes anything (a real `EPIPE`, distinct from TC-LEASE-026's open-but-never-draining reader) and a multi-record fixture where every record is individually undeliverable
+**When** the recorder attempts to write each record
+**Then** the whole run completes well under `record_count * per-record retry budget` (fails fast per record instead of burning the ~2s budget on each), and the stderr diagnostic names "Broken pipe" — proving bash `printf`'s own non-SIGPIPE-death `EPIPE` message is classified as terminal, not misclassified as retryable `EAGAIN`.
+
+## TC-LEASE-029: the retry budget is tracked once per RECORD, not reset per slice (round-2 review finding [P2])
+
+**Given** a single JSON record large enough to span several `PIPE_BUF`-sized write slices, and a reader that drains on a fixed interval chosen to be comfortably under any ONE slice's own retry allowance but that takes several such drains to clear the whole record
+**When** the recorder writes the record
+**Then** total wall-clock time stays within one whole-record retry budget (`AGENT_PROGRESS_WRITE_RETRY_BUDGET_SECONDS`, default ~2s) regardless of how many slices the record took — proving the deadline is computed ONCE before the slice loop starts and shared across every slice's retry loop, not reset to a fresh allowance every time a new slice begins (the round-1 shipped shape's `attempts=0` reset inside the slice loop, which would let an N-slice record retry for up to N times the intended per-record bound). A characterization run of the retired per-slice-reset shape (isolated from `lib-agent.sh`, exercised standalone) against the identical drain pattern confirms it DOES exceed the bound for the same input, so this test is proven to discriminate the fix from the bug rather than passing either way.
+
+## TC-LEASE-030: a missing/broken `awk` fails safe instead of retrying forever (round-3 review finding)
+
+**Given** the SAME never-draining-reader harness as TC-LEASE-026 (a single-record fixture large enough to force the retry-exhaustion path, against a reader that fills the pipe once and never reads again), but with the recorder's own `PATH` restricted to a symlink farm that omits `awk` specifically (never a real bin dir, which would still resolve the system `awk` and defeat the fixture)
+**When** the recorder attempts to write the record and its per-attempt deadline-exhaustion check shells out to `awk`
+**Then** the recorder process still exits within the same bounded wall-clock window as TC-LEASE-026 (not a hang) — proving that when `awk` itself cannot execute (as opposed to executing and evaluating "not yet"), the exhaustion check is read as "deadline reached" rather than silently falling through to "keep retrying" and spinning `sleep 0.05` forever. Verified to discriminate fixed from broken: reverting the fix (a bare `if awk ...; then` that cannot distinguish awk's own exit 1 from a shell-level "command not found") makes this exact scenario hang past the test's wall-clock bound.
+
+## TC-LEASE-031: a missing/broken clock (no `EPOCHREALTIME`, no `date`) fails safe instead of retrying forever (round-4 review finding)
+
+**Given** the SAME never-draining-reader harness as TC-LEASE-026/030, but with `EPOCHREALTIME` explicitly `unset` inside the recorder child's own subshell (a bash-internal variable, not resolvable via `PATH` restriction) AND `date` excluded from a TC-LEASE-030-style symlink farm, so `_agent_progress_write_retry_now_seconds` has no usable clock source at all
+**When** the recorder computes its retry deadline and, on each retry attempt, re-checks elapsed time against it
+**Then** the recorder process still exits within the same bounded wall-clock window as TC-LEASE-026/030 (not a hang), and the stderr diagnostic names "clock unavailable" rather than the generic exhaustion message — proving the clock reading is validated as a plain decimal number BEFORE it reaches `awk`. This is distinct from TC-LEASE-030: here `awk` itself runs and exits normally (0 or 1) because it silently coerces the empty clock reading to `0` in arithmetic, so the round-3 exit-code fix alone does not catch it — `deadline` and every later `now` both compute from `0`, and `0 >= deadline` never holds. Verified to discriminate fixed from broken: reverting the round-4 fix (removing the `_agent_progress_write_retry_clock_ok` validation) makes this exact scenario hang past the test's wall-clock bound.
+
+## TC-LEASE-035: a clock that steps backward (or freezes) after the deadline was computed fails safe instead of retrying forever (round-9 review finding)
+
+**Given** the SAME never-draining-reader harness as TC-LEASE-026/030/031, but with `date` stubbed (via a TC-LEASE-030-style symlink farm) to always return the SAME fixed timestamp on every call, and `EPOCHREALTIME` unset so the stub is actually consulted — modeling a realtime clock that steps backward (an NTP correction) or simply freezes after the retry deadline was computed from an earlier, larger reading
+**When** the recorder computes its retry deadline from an early clock reading and, on each retry attempt, re-checks a LATER clock reading against it
+**Then** the recorder process still exits within the same bounded wall-clock window as TC-LEASE-026/030/031 (not a hang), and the stderr diagnostic reports the GENERIC exhaustion message ("Resource temporarily unavailable"), not "clock unavailable" — proving a plain, clock-independent attempt-count ceiling (`max_attempts`), not the clock-validity check, is what terminates this case. This is distinct from TC-LEASE-031: every clock reading here is perfectly valid and well-formed (`_agent_progress_write_retry_clock_ok` passes every time), it simply never advances far enough to reach `deadline` — so the round-4 fix, which only guards a MISSING/malformed reading, does not catch it. Verified to discriminate fixed from broken: reverting the round-9 fix (removing the `max_attempts` counter and its check) makes this exact scenario hang past the test's wall-clock bound.
+
+## TC-LEASE-036: a BSD/macOS-shaped `date` (unsupported `%N`, but exit 0) does not misclassify a healthy clock as unavailable (round-10 review finding [P2])
+
+**Given** `date` stubbed (via a symlink farm, `EPOCHREALTIME` unset) to reproduce BSD/macOS's exact behavior for an unsupported `%N`: `date +%s.%N` exits 0 and echoes the literal leftover `%N`-as-`N` character appended after the seconds (e.g. `1700000000.N`), rather than failing — and a small, always-draining fixture (this test isolates the CLOCK reading, not EAGAIN pressure)
+**When** the recorder computes its retry deadline from this BSD-shaped reading
+**Then** the recorder's output is byte-identical to the input and NO "clock unavailable" diagnostic reaches stderr — proving `_agent_progress_write_retry_now_seconds` validates its OWN `%N` output is purely numeric before accepting it, falling back to whole-second `date +%s` instead of ever handing the unusable `.N`-suffixed string to `_agent_progress_write_retry_clock_ok`. Distinct from TC-LEASE-031: there, no usable clock exists at all; here, `date +%s.%N` "succeeds" but with output that is not actually a number, so the pre-fix `||`-fallback never triggers.
+
+## TC-LEASE-037: the write slice size never exceeds the portable 512-byte PIPE_BUF floor (round-10 review finding [P2])
+
+**Given** a single JSON record large enough to span several write slices, and `strace -ff -e trace=write` attached to the real recorder (line framing, to avoid an unrelated `jq` validation subprocess that also inherits fd 1 under json framing)
+**When** the recorder writes the record
+**Then** every `write(2)` the recorder itself issues to fd 1 is <= 512 bytes — proving the slice size is capped at `{_POSIX_PIPE_BUF}` (the POSIX-guaranteed floor on every platform, including macOS/BSD where the real `PIPE_BUF` is genuinely 512) rather than the earlier 4096, which is only atomic on platforms whose actual `PIPE_BUF` is >= 4096. Skipped (not failed) if `strace` is unavailable — there is no portable way to observe raw `write(2)` sizes from bash alone.
+
 ## TC-LEASE-032: review-side (zero-`AGENT_PROGRESS_FILE`) fast path is byte-identical under EAGAIN pressure (issue #510)
 
 **Given** the recorder's zero-`AGENT_PROGRESS_FILE` fast path (the review-side invocation shape) driven through a real `O_NONBLOCK` pipe (python3 `fcntl` helper) with a reader that stalls long enough to force genuine `EAGAIN`, then drains slowly
@@ -182,6 +248,6 @@ fixture-driven; no real sleeps.
 
 - R1 → TC-LEASE-001, 004-010, 018, 022, 023
 - R2 → TC-LEASE-001, 003, 018
-- R3 → TC-LEASE-011, 016, 017, 019, 020, 020b, 021
+- R3 → TC-LEASE-011, 016, 017, 019, 020, 020b, 021, 024, 025, 026, 027, 028, 029, 030, 031, 035, 036, 037
 - R4 → TC-LEASE-011, 012, 013, 014, 015
 - Issue #510 (review-side fast path EAGAIN retry) → TC-LEASE-032, 033, 034

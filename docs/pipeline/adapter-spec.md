@@ -483,6 +483,39 @@ pipeline that ultimately lands in `/tmp/agent-*-issue-N.log` — anything it
 alters corrupts the log every downstream consumer (`is_session_completed`,
 `metrics_parse_tokens`, the remote probe, an operator `tail -f`) reads.
 
+**R3 amendment — bounded EAGAIN retry (issue #508).** The wrapper's own
+stdout (`exec > >(tee -a run.log)`) is the SAME open file description the
+Claude CLI (Node.js) inherits as its stderr, and Node's `O_NONBLOCK` flag on
+that shared pipe can make the recorder's own write get transient `EAGAIN`
+once the pipe buffer is momentarily full — bash's `printf` does not retry
+`EAGAIN` on its own. `_agent_progress_write_retry` (`lib-agent.sh`) closes
+this gap: both `printf` sites in the read loop go through it instead of a
+bare `printf`, slicing the record into `PIPE_BUF`-sized pieces and retrying
+a failed slice for up to ~2s of TOTAL budget shared across the WHOLE
+record (not reset per slice — a per-slice reset was a round-2 review finding
+that let a multi-slice record retry for multiples of the intended bound)
+before giving up. This does not weaken R3 — the byte-identical contract still
+holds for every write that lands within the retry budget (`tee` always
+drains, so `EAGAIN` here is transient by construction). A genuinely dead
+reader (`EPIPE`) is distinguished from transient `EAGAIN` by inspecting
+`printf`'s own error text and fails FAST instead of consuming the retry
+budget — bash's `printf` does not die to `SIGPIPE` on a broken pipe, so
+without this check `EPIPE` would otherwise be misclassified as retryable
+`EAGAIN` (round-1 review finding). The ONLY carve-outs are bound exhaustion
+(a reader that stalls, not dies, for the full ~2s) and the dead-reader case:
+either way, that record is dropped with exactly one best-effort stderr
+diagnostic, never a silent drop and never an unbounded hang. This bound holds
+even if `awk` itself — used for the retry deadline's floating-point time
+arithmetic — is missing or broken on `PATH` (round-3 review finding): the
+exhaustion check's exit code is captured explicitly, and anything other than
+the `awk` program's own documented "not yet" (rc 1) is treated as exhaustion,
+so a shell-level "command not found" can no longer be misread as "keep
+retrying" and spin the loop unbounded. See
+[INV-135](invariants.md#inv-135-the-agent-progress-lease-is-a-producer-only-signal-refreshed-on-launch-and-per-complete-output-record-never-by-the-heartbeat)
+for the full rationale, the atomic-`PIPE_BUF`-slicing mechanics (why a naive
+whole-string retry would risk resending already-delivered bytes), and the
+EPIPE-vs-EAGAIN classification detail.
+
 **Clause R4 (exit-status transparency).** The recorder's own exit status
 (always `0`) **MUST NOT** be read by any caller. Every call site appends the
 recorder strictly AFTER the CLI's own `_run_with_timeout` stage (and after any
