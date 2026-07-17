@@ -3423,10 +3423,10 @@ dev_report_bot_unfixable() {
   # (#148).
   local marker_counts marker_any marker_matching
   marker_counts=$(itp_list_comments "$issue_num" 2>/dev/null \
-    | jq -r --arg dev "$dev_login" --arg head "$current_head" \
+    | jq -r --arg dev "$dev_login" --arg head "$current_head" --arg since "$since_iso" \
       "[.[]
          | select((.author // \"\") == \$dev)
-         | select(.createdAt > \"${since_iso}\")
+         | select(.createdAt > \$since)
          | (.body // \"\")
          | select((test(\"Review Session:\") or test(\"Review findings\") or test(\"Review Agent:\")) | not)
          | capture(\"<!-- dev-blocked-403: head=(?<h>[^ \\\\n]+) -->\"; \"g\")
@@ -3435,8 +3435,11 @@ dev_report_bot_unfixable() {
     2>/dev/null) || marker_counts="0 0"
   read -r marker_any marker_matching <<<"$marker_counts"
   if [ -n "$marker_any" ] && [ "$marker_any" != "0" ]; then
-    [ -n "$marker_matching" ] && [ "$marker_matching" != "0" ]
-    return $?
+    if [ -n "$marker_matching" ] && [ "$marker_matching" != "0" ]; then
+      return 0
+    else
+      return 1
+    fi
   fi
 
   # (#511 design point 2, success-comment veto — LEGACY PATH ONLY): no marker
@@ -3455,16 +3458,17 @@ dev_report_bot_unfixable() {
   # forensic signal is unavailable (round-4 regression BU-012 depends on this).
   local pre_attempt_head success_exit0 head_moved=0 success_veto=0
   pre_attempt_head=$(itp_list_comments "$issue_num" 2>/dev/null \
-    | jq -r "[.[] | select(.createdAt < \"${since_iso}\") | (.body // \"\") | capture(\"Reviewed HEAD: \`(?<sha>[0-9a-f]{7,40})\`\"; \"g\") | .sha] | last // empty" \
+    | jq -r --arg since "$since_iso" \
+      "[.[] | select(.createdAt < \$since) | (.body // \"\") | capture(\"Reviewed HEAD: \`(?<sha>[0-9a-f]{7,40})\`\"; \"g\") | .sha] | last // empty" \
     2>/dev/null) || pre_attempt_head=""
   if [ -n "$pre_attempt_head" ] && [ -n "$current_head" ] && [ "$pre_attempt_head" != "$current_head" ]; then
     head_moved=1
   fi
   success_exit0=$(itp_list_comments "$issue_num" 2>/dev/null \
-    | jq -r --arg dev "$dev_login" \
+    | jq -r --arg dev "$dev_login" --arg since "$since_iso" \
       "[.[]
          | select((.author // \"\") == \$dev)
-         | select(.createdAt > \"${since_iso}\")
+         | select(.createdAt > \$since)
          | (.body // \"\")
          | select(test(\"Agent Session Report \\\\(Dev\\\\)\"))
          | select(test(\"Exit code: 0\\\\b\"))] | length" \
@@ -3484,10 +3488,10 @@ dev_report_bot_unfixable() {
   # interpolation of the login into the jq program, no regex of it. The fetch
   # moved behind itp_list_comments; the whole select/exact-eq parse stays here.
   hits=$(itp_list_comments "$issue_num" 2>/dev/null \
-    | jq -r --arg dev "$dev_login" \
+    | jq -r --arg dev "$dev_login" --arg since "$since_iso" \
       "[.[]
          | select((.author // \"\") == \$dev)
-         | select(.createdAt > \"${since_iso}\")
+         | select(.createdAt > \$since)
          | (.body // \"\")
          | select((test(\"Review Session:\") or test(\"Review findings\") or test(\"Review Agent:\")) | not)
          | select(test(\"Resource not accessible by integration\"))

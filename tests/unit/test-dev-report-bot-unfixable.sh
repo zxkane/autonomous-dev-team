@@ -301,6 +301,28 @@ _MOCK_COMMENTS_JSON='{"comments":[
 ]}'
 assert_rc "BU-025 exit-0 report but HEAD unmoved → veto does NOT apply → unfixable" 0 dev_report_bot_unfixable 100 "cccc2500"
 
+# BU-026 (marker short-circuits step 3 even when legacy text is ALSO present):
+# a matching structured marker AND a legacy 403-on-PR-edit substring both exist
+# in the same window → the marker (step 1) decides; presence of legacy text
+# alongside it must not change the outcome.
+_MOCK_COMMENTS_JSON='{"comments":[
+  {"createdAt":"2026-06-26T10:45:00Z","author":{"login":"my-claw"},"body":'"$DTOK"'},
+  {"createdAt":"2026-06-26T11:00:00Z","author":{"login":"dev-bot[bot]"},"body":"<!-- dev-blocked-403: head=newsha26 -->\nAlso hit 403 Resource not accessible by integration on gh pr edit for an unrelated reason."},
+  {"createdAt":"2026-06-26T11:10:00Z","author":{"login":"dev-bot[bot]"},"body":"**Agent Session Report (Dev)**\n- Dev Session ID: `s26`\n- Exit code: 1"}
+]}'
+assert_rc "BU-026 matching marker alongside legacy text → marker decides → unfixable" 0 dev_report_bot_unfixable 100 "newsha26"
+
+# BU-027 (success-veto requires actual head-moved evidence, not just its
+# absence): `Exit code: 0` IS present, but there is NO pre-attempt `Reviewed
+# HEAD:` trailer AT ALL (not merely one equal to current head, as in BU-025) →
+# no forensic evidence HEAD moved → veto does NOT apply → still unfixable.
+_MOCK_COMMENTS_JSON='{"comments":[
+  {"createdAt":"2026-06-26T10:45:00Z","author":{"login":"my-claw"},"body":'"$DTOK"'},
+  {"createdAt":"2026-06-26T11:00:00Z","author":{"login":"dev-bot[bot]"},"body":"403 Resource not accessible by integration on gh pr edit (PR body) — cannot make the required metadata change"},
+  {"createdAt":"2026-06-26T11:10:00Z","author":{"login":"dev-bot[bot]"},"body":"**Agent Session Report (Dev)**\n- Dev Session ID: `s27`\n- Exit code: 0"}
+]}'
+assert_rc "BU-027 exit-0 report but NO prior Reviewed-HEAD trailer at all → veto does NOT apply → unfixable" 0 dev_report_bot_unfixable 100 "newsha27"
+
 echo ""
 echo "=== Summary ==="
 echo "  PASS: $PASS"

@@ -157,7 +157,7 @@ Extends `dev_report_bot_unfixable()`'s scoping above with a three-step
 resolution order — see [INV-85](../pipeline/invariants.md) and
 [`dispatcher-flow.md`](../pipeline/dispatcher-flow.md) for the normative spec.
 Cases live in `tests/unit/test-dev-report-bot-unfixable.sh` as `BU-020`
-through `BU-025`.
+through `BU-027`.
 
 ### BU-020 (the #485 regression, pinned): success report + head moved + incidental 403 quote → NOT unfixable
 
@@ -230,3 +230,24 @@ attempt).
 **Expected**: unfixable — the success-comment veto requires BOTH exit-0 AND a
 moved head; a no-commit session that quotes a legacy 403 may genuinely be
 blocked, so a single satisfied condition must not suppress detection.
+
+### BU-026: matching marker alongside legacy text → marker decides → unfixable
+
+**Setup**: a dev-authored, in-window comment carries a matching structured
+marker AND, in the same comment, a legacy 403-on-PR-edit substring.
+
+**Expected**: unfixable — the marker (step 1) decides the outcome regardless
+of what legacy text also appears; presence of legacy text alongside a
+matching marker must not change the result.
+
+### BU-027: exit-0 report but NO prior `Reviewed HEAD:` trailer at all → veto does NOT apply → unfixable
+
+**Setup**: no marker present; a legacy 403 substring is present; the dev
+agent's report shows `Exit code: 0`; there is no `Reviewed HEAD:` trailer
+anywhere in the comment history (not merely one equal to the current head, as
+in BU-025) — no forensic evidence exists that HEAD moved.
+
+**Expected**: unfixable — absence of a prior trailer is treated as "no
+evidence HEAD moved," so the veto does not apply. This is the fail-safe the
+code comment calls out: no forensic signal means the legacy path's original
+all-or-nothing behavior is preserved (protects the BU-012 regression).
