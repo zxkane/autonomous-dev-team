@@ -208,9 +208,15 @@ fixture-driven; no real sleeps.
 **When** the recorder computes its retry deadline and, on each retry attempt, re-checks elapsed time against it
 **Then** the recorder process still exits within the same bounded wall-clock window as TC-LEASE-026/030 (not a hang), and the stderr diagnostic names "clock unavailable" rather than the generic exhaustion message — proving the clock reading is validated as a plain decimal number BEFORE it reaches `awk`. This is distinct from TC-LEASE-030: here `awk` itself runs and exits normally (0 or 1) because it silently coerces the empty clock reading to `0` in arithmetic, so the round-3 exit-code fix alone does not catch it — `deadline` and every later `now` both compute from `0`, and `0 >= deadline` never holds. Verified to discriminate fixed from broken: reverting the round-4 fix (removing the `_agent_progress_write_retry_clock_ok` validation) makes this exact scenario hang past the test's wall-clock bound.
 
+## TC-LEASE-032: a clock that steps backward (or freezes) after the deadline was computed fails safe instead of retrying forever (round-9 review finding)
+
+**Given** the SAME never-draining-reader harness as TC-LEASE-026/030/031, but with `date` stubbed (via a TC-LEASE-030-style symlink farm) to always return the SAME fixed timestamp on every call, and `EPOCHREALTIME` unset so the stub is actually consulted — modeling a realtime clock that steps backward (an NTP correction) or simply freezes after the retry deadline was computed from an earlier, larger reading
+**When** the recorder computes its retry deadline from an early clock reading and, on each retry attempt, re-checks a LATER clock reading against it
+**Then** the recorder process still exits within the same bounded wall-clock window as TC-LEASE-026/030/031 (not a hang), and the stderr diagnostic reports the GENERIC exhaustion message ("Resource temporarily unavailable"), not "clock unavailable" — proving a plain, clock-independent attempt-count ceiling (`max_attempts`), not the clock-validity check, is what terminates this case. This is distinct from TC-LEASE-031: every clock reading here is perfectly valid and well-formed (`_agent_progress_write_retry_clock_ok` passes every time), it simply never advances far enough to reach `deadline` — so the round-4 fix, which only guards a MISSING/malformed reading, does not catch it. Verified to discriminate fixed from broken: reverting the round-9 fix (removing the `max_attempts` counter and its check) makes this exact scenario hang past the test's wall-clock bound.
+
 ## Acceptance mapping
 
 - R1 → TC-LEASE-001, 004-010, 018, 022, 023
 - R2 → TC-LEASE-001, 003, 018
-- R3 → TC-LEASE-011, 016, 017, 019, 020, 020b, 021, 024, 025, 026, 027, 028, 029, 030, 031
+- R3 → TC-LEASE-011, 016, 017, 019, 020, 020b, 021, 024, 025, 026, 027, 028, 029, 030, 031, 032
 - R4 → TC-LEASE-011, 012, 013, 014, 015

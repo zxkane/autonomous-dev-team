@@ -1382,7 +1382,7 @@ _agent_progress_write_retry_clock_ok() {
 _agent_progress_write_retry() {
   local LC_ALL=C
   local data="$1" total wrote=0 off=0 chunk=4096 take piece err
-  local write_fd deadline now now0 attempts=0 awk_rc
+  local write_fd deadline now now0 attempts=0 awk_rc max_attempts
   total=${#data}
   [[ "$total" -eq 0 ]] && return 0
   # Duplicate the CURRENT fd 1 once so `printf`'s stderr can be captured via
@@ -1411,6 +1411,25 @@ _agent_progress_write_retry() {
   # in between would not) so a failed awk exec is caught alongside empty output.
   deadline=$(LC_ALL=C awk -v n="$now0" -v b="${AGENT_PROGRESS_WRITE_RETRY_BUDGET_SECONDS:-2}" 'BEGIN{printf "%.6f", n + b}')
   [[ $? -eq 0 && -n "$deadline" ]] || deadline="$now0"
+  # max_attempts (round-9 review finding): a SECOND, clock-independent bound
+  # on top of the wall-clock `deadline` above. If the realtime clock steps
+  # BACKWARD mid-retry (e.g. an NTP correction) after `deadline` was computed
+  # from a since-corrected, too-far-in-the-future `now0`, every later
+  # `now >= deadline` reading is a real, valid timestamp that nonetheless
+  # never reaches the stale deadline — the wall-clock check alone would spin
+  # on `sleep 0.05` forever, exactly the unbounded hang this function exists
+  # to prevent. `attempts` is a plain bash integer that only ever increments,
+  # so counting it is immune to any clock behavior (backward jump, freeze, or
+  # missing clock). Sized from the same budget as `deadline` (attempts per
+  # the ~0.05s sleep below) plus a generous fixed margin, so it never fires
+  # before `deadline` under a NORMAL functioning clock — it is a backstop for
+  # the broken-clock case, not a tighter replacement for the primary bound.
+  # Computed once, outside the retry loop, so a missing/broken `awk` here
+  # cannot itself cause a hang: on failure this falls back to a fixed safe
+  # ceiling instead of leaving max_attempts unset (which would make the
+  # `(( attempts >= max_attempts ))` check below error under `set -u`).
+  max_attempts=$(LC_ALL=C awk -v b="${AGENT_PROGRESS_WRITE_RETRY_BUDGET_SECONDS:-2}" 'BEGIN{n=b/0.05; a=int(n); if (a<n) a++; if (a<1) a=1; printf "%d", a+20}')
+  [[ $? -eq 0 && "$max_attempts" =~ ^[0-9]+$ ]] || max_attempts=100
   while (( off < total )); do
     take=$(( total - off < chunk ? total - off : chunk ))
     piece="${data:off:take}"
@@ -1434,17 +1453,25 @@ _agent_progress_write_retry() {
       # per-slice reset — ~2s total budget by default (AGENT_PROGRESS_WRITE_
       # RETRY_BUDGET_SECONDS), matching the issue's "bounded total (e.g.
       # ~2s worth)" guidance regardless of how many slices the record took.
-      now=$(_agent_progress_write_retry_now_seconds)
-      # Re-validate on EVERY attempt, not just the initial now0 (round-4
-      # review finding) — a clock reading that goes bad mid-loop (e.g. a
-      # transient `date` failure under resource pressure, on a bash without
-      # EPOCHREALTIME) must fail closed here too; otherwise it feeds awk the
-      # same empty-coerces-to-zero value that made this loop retry forever.
-      if ! _agent_progress_write_retry_clock_ok "$now"; then
+      # Check the clock-independent attempt cap FIRST (cheap bash integer
+      # comparison, no subprocess) — it is the backstop for a broken/jumped
+      # clock, so it must not itself depend on a clock read succeeding.
+      if (( attempts >= max_attempts )); then
         awk_rc=2
       else
-        LC_ALL=C awk -v n="$now" -v d="$deadline" 'BEGIN{exit !(n >= d)}'
-        awk_rc=$?
+        now=$(_agent_progress_write_retry_now_seconds)
+        # Re-validate on EVERY attempt, not just the initial now0 (round-4
+        # review finding) — a clock reading that goes bad mid-loop (e.g. a
+        # transient `date` failure under resource pressure, on a bash
+        # without EPOCHREALTIME) must fail closed here too; otherwise it
+        # feeds awk the same empty-coerces-to-zero value that made this loop
+        # retry forever.
+        if ! _agent_progress_write_retry_clock_ok "$now"; then
+          awk_rc=2
+        else
+          LC_ALL=C awk -v n="$now" -v d="$deadline" 'BEGIN{exit !(n >= d)}'
+          awk_rc=$?
+        fi
       fi
       # The awk program only ever exits 0 ("n >= d", deadline reached) or 1
       # ("n < d", keep retrying) by construction — any OTHER exit code means

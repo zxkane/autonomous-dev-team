@@ -97,6 +97,20 @@ sites in the recorder's read loop with a bounded-retry write:
   rejected the scope expansion (documenting a deviation is not the same as obtaining an
   owner-approved requirement change) — see "Review-side `cat` EAGAIN hazard" below for why
   reverting is safe and where the hazard is tracked instead.
+- **A clock-independent attempt-count ceiling backstops the wall-clock deadline (round-9
+  review finding).** The exhaustion check compares two readings of the SAME wall clock
+  (`now` against `deadline`). If that clock steps BACKWARD after `deadline` was computed —
+  a realistic NTP-correction scenario — every later `now` is a perfectly valid reading
+  (passes `_agent_progress_write_retry_clock_ok`) that nonetheless never satisfies
+  `now >= deadline`: none of the round-1..4 fixes catch this, because they all guard against
+  a MISSING or malformed clock, not a valid one that simply never advances far enough. Fixed
+  by adding `max_attempts` — a plain bash integer counter incremented once per retry attempt,
+  independent of any clock read — computed once (sized from the same
+  `AGENT_PROGRESS_WRITE_RETRY_BUDGET_SECONDS` budget, generously above the attempt count a
+  functioning clock would need, so it never fires before the wall-clock deadline under
+  normal operation) and checked FIRST on every attempt, before the wall-clock check. The two
+  bounds are independent: either one alone terminates the loop, so a fault on one axis
+  (clock) is caught by the other (attempt count).
 
 ## Review-round follow-ups (this PR)
 
@@ -113,6 +127,7 @@ sites in the recorder's read loop with a bounded-retry write:
 | 4 | On a bash without `EPOCHREALTIME` whose `date` fallback is also missing/broken, the clock helper returns an empty string; awk coerces that to `0` in arithmetic (not a failing exit code), so `deadline` and every later `now` both compute from `0` and `0 >= deadline` never holds — an unbounded hang the round-3 `awk`-exit-code fix does not catch, since `awk` itself runs successfully here | `_agent_progress_write_retry_clock_ok` validates the clock reading is a plain decimal number BEFORE it reaches `awk`, checked on the initial `now0` and again on every retry attempt's `now`; an unusable reading fails closed immediately with a "clock unavailable" diagnostic; TC-LEASE-031 |
 | 5 | The literal issue text says the fix "must not change the zero-`AGENT_PROGRESS_FILE` fast path (`cat` short-circuit, review side)" — round 5 recognized a stricter reading was needed but only documented the round-2 removal as a deliberate deviation instead of reverting it | See "Review-side `cat` EAGAIN hazard" below: reverted the round-2 change; the bare `cat` fast path is restored byte-for-byte as it existed before this PR |
 | 6, 7 | Review rejected the round-5 "documented deviation" twice in a row: restore the fast path or obtain an owner-approved requirement change — a design-doc note is neither | Reverted the round-2 fast-path removal outright (this round); filed the underlying `cat`/EAGAIN hazard as #510 instead of fixing it inside #508's scope |
+| 9 (this round) | The exhaustion check bounds retries against a wall clock; if that clock steps backward after `deadline` is computed (e.g. an NTP correction), every later `now` reading is valid but never reaches `deadline` — the loop spins on `sleep 0.05` forever, a hang none of rounds 1–4's clock-validity/missing-`awk` fixes catch (they only guard a MISSING/malformed clock, not a valid non-advancing one) | Added `max_attempts`, a clock-independent bash integer ceiling checked before the wall-clock check on every attempt (see Decision above); TC-LEASE-032 |
 
 ## Review-side `cat` EAGAIN hazard (tracked separately, NOT fixed in this PR)
 

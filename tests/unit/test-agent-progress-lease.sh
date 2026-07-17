@@ -16,7 +16,7 @@
 #   - R4: the Claude stream-json migration does not break the three existing
 #     consumers of the final `{"type":"result",...}` log line.
 #
-# TC-LEASE-024..031 (issue #508): the recorder's shared-nonblocking-pipe
+# TC-LEASE-024..032 (issue #508): the recorder's shared-nonblocking-pipe
 # EAGAIN hazard — the wrapper's `exec > >(tee -a run.log)` stdout is the SAME
 # open file description the Claude CLI (Node.js) inherits as its stderr, and
 # Node's O_NONBLOCK flag on that shared pipe can make the recorder's own
@@ -36,11 +36,15 @@
 # reset on every 4096-byte slice (a per-slice reset let a large multi-slice
 # record retry far past the documented ~2s total), (TC-LEASE-030, round-3
 # review finding) a missing/broken `awk` on PATH failing safe rather than
-# reading its own non-execution as "not yet reached", and (TC-LEASE-031,
+# reading its own non-execution as "not yet reached", (TC-LEASE-031,
 # round-4 review finding) a bash with no EPOCHREALTIME AND a missing/broken
 # `date` fallback — no usable clock at all — also failing safe, distinct
 # from TC-LEASE-030 because here `awk` runs fine and exits normally on an
-# empty clock reading silently coerced to 0.
+# empty clock reading silently coerced to 0, and (TC-LEASE-032, round-9
+# review finding) a clock that steps backward (or freezes) after the retry
+# deadline was computed also failing safe via a clock-independent attempt
+# ceiling, distinct from TC-LEASE-031 because every reading here is a
+# perfectly valid, well-formed number that simply never reaches the deadline.
 #
 # Strategy: source lib-agent.sh (+ lib-dispatch.sh / lib-metrics.sh where
 # needed) in sandboxed subshells with stub CLIs on PATH, mirroring
@@ -971,6 +975,73 @@ SHEOF
     "EXITED" "$noclock_out"
   assert_contains "TC-LEASE-031 diagnostic reports the clock-unavailable reason, not a generic exhaustion" \
     "clock unavailable" "$(cat "$NOCLOCK_ERR" 2>/dev/null)"
+
+  # ---------------------------------------------------------------------
+  # TC-LEASE-032 (round-9 review finding): a realtime clock that goes
+  # BACKWARD (or simply never advances, e.g. an NTP step) after `deadline`
+  # was computed must still bound the retry loop. Unlike TC-LEASE-031 (no
+  # clock at all, caught by `_agent_progress_write_retry_clock_ok`), every
+  # reading here is a perfectly valid, well-formed number — it just never
+  # reaches `deadline` — so the wall-clock check alone would spin on
+  # `sleep 0.05` forever. `date` is stubbed (via a symlink-farm PATH, same
+  # technique as TC-LEASE-030/031) to always return the SAME fixed
+  # timestamp — a frozen/backward-stepped clock is indistinguishable from
+  # the retry loop's point of view, since both mean "now never advances
+  # past deadline" — and EPOCHREALTIME is unset so the stub is actually
+  # consulted. Proves the clock-independent `max_attempts` counter (not the
+  # wall-clock deadline) is what terminates this case.
+  # ---------------------------------------------------------------------
+  NOJUMP_BIN=$(mktemp -d)
+  for _b in bash cat mkdir mktemp stat sh dirname readlink pwd printf tr grep sed ps sleep kill cp basename wc chmod mv rm head timeout setsid env awk; do
+    _bp="$(command -v "$_b" 2>/dev/null)" || continue
+    ln -sf "$_bp" "$NOJUMP_BIN/$_b"
+  done
+  cat > "$NOJUMP_BIN/date" <<'DATEEOF'
+#!/bin/bash
+# Always the same reading — models a clock that steps backward (or simply
+# freezes) after the retry deadline was computed from an earlier reading.
+printf '1000000000.000000\n'
+DATEEOF
+  chmod +x "$NOJUMP_BIN/date"
+
+  NOJUMP_DRIVER="$TMPROOT/run_recorder_nojump.sh"
+  cat > "$NOJUMP_DRIVER" <<'SHEOF'
+#!/bin/bash
+set -uo pipefail
+LIB="$1" FIXTURE="$2" PROGRESS_FILE="$3" FRAMING="$4" ERR_LOG="$5"
+env -u AUTONOMOUS_CONF_DIR \
+  AUTONOMOUS_PID_DIR="$(dirname "$PROGRESS_FILE")" \
+  PROJECT_ID="testproj" \
+  PROJECT_DIR="$(dirname "$PROGRESS_FILE")" \
+  AGENT_CMD=claude \
+  AGENT_PROGRESS_FILE="$PROGRESS_FILE" \
+  RUN_ID="run-nojump" \
+  bash -c '
+    mkdir -p "$AUTONOMOUS_PID_DIR"
+    unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE
+    unset EPOCHREALTIME
+    source "'"$LIB"'"
+    cat "'"$FIXTURE"'" | _agent_progress_recorder "'"$FRAMING"'"
+  ' 2>"$ERR_LOG"
+SHEOF
+  chmod +x "$NOJUMP_DRIVER"
+
+  NOJUMP_ERR="$TMPROOT/nojump-err.log"
+  NOJUMP_PROGRESS_DIR="$TMPROOT/nojump-pd"
+  rm -rf "$NOJUMP_PROGRESS_DIR"
+
+  nojump_out=$(timeout 20 python3 "$STUCK_DRIVER" 10 -- \
+    env PATH="$NOJUMP_BIN" AGENT_PROGRESS_WRITE_RETRY_BUDGET_SECONDS=0.5 \
+    bash "$NOJUMP_DRIVER" "$LIB" "$STUCK_FIXTURE" "$NOJUMP_PROGRESS_DIR/progress.json" json "$NOJUMP_ERR" 2>&1)
+  nojump_driver_rc=$?
+  rm -rf "$NOJUMP_BIN"
+
+  assert_eq "TC-LEASE-032 recorder completes within the wall-clock bound when the clock never advances past deadline (proves no hang)" \
+    "0" "$nojump_driver_rc"
+  assert_contains "TC-LEASE-032 recorder process actually exited (not killed by the test's own timeout)" \
+    "EXITED" "$nojump_out"
+  assert_contains "TC-LEASE-032 diagnostic reports the generic exhaustion reason (a valid, well-formed clock reading — not a clock-unavailable case)" \
+    "Resource temporarily unavailable" "$(cat "$NOJUMP_ERR" 2>/dev/null)"
 
   # ---------------------------------------------------------------------
   # TC-LEASE-028 (round-1 review finding): a dead reader (closed read end,
