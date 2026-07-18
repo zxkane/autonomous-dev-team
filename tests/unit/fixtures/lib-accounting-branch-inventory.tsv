@@ -1,0 +1,75 @@
+# branch_id|status|test_id|source branch outcome
+# Every row binds to exactly one `accounting-branch: <branch_id>` source marker.
+# TC-RESOURCEACCOUNT-080 runs this suite under xtrace and proves covered marker
+# lines executed; an uncovered marker executing is a fail-on-coverage-growth
+# tripwire that requires promoting the row and naming its test.
+B001|covered|TC-RESOURCEACCOUNT-010|accounting directory override selected
+B002|uncovered|-|XDG state accounting directory selected
+B003|uncovered|-|symlinked accounting directory rejected
+B004|covered|TC-RESOURCEACCOUNT-010|mandatory issue lock acquired
+B005|covered|TC-RESOURCEACCOUNT-022|mandatory issue lock times out
+B006|covered|TC-RESOURCEACCOUNT-010|atomic write completes
+B007|covered|TC-RESOURCEACCOUNT-016|atomic writer rejects non-regular target
+B008|covered|TC-RESOURCEACCOUNT-028|atomic writer propagates temp-file sync failure
+B009|covered|TC-RESOURCEACCOUNT-029|no-target-directory rename rejects race
+B010|covered|TC-RESOURCEACCOUNT-028|post-rename parent-directory sync failure propagates
+B011|covered|TC-RESOURCEACCOUNT-010|record read and envelope validation succeeds
+B012|covered|TC-RESOURCEACCOUNT-026|record storage read fails
+B013|covered|TC-RESOURCEACCOUNT-023|record JSON or envelope is malformed
+B014|covered|TC-RESOURCEACCOUNT-027|record tuple does not hash to filename identity
+B015|covered|TC-RESOURCEACCOUNT-009|identity API arity fails
+B016|covered|TC-RESOURCEACCOUNT-007|identity API domain validation fails
+B017|covered|TC-RESOURCEACCOUNT-001|identity construction succeeds
+B018|covered|TC-RESOURCEACCOUNT-009|start API arity fails
+B019|covered|TC-RESOURCEACCOUNT-008|start rejects path-like invocation id
+B020|covered|TC-RESOURCEACCOUNT-008|start rejects tuple-mismatched id
+B021|covered|TC-RESOURCEACCOUNT-017|start rejects non-regular record target
+B022|uncovered|-|start replays an existing valid record
+B023|covered|TC-RESOURCEACCOUNT-010|start persists a new record
+B024|covered|TC-RESOURCEACCOUNT-009|usage commit API arity fails
+B025|covered|TC-RESOURCEACCOUNT-019|usage commit rejects noncanonical integer
+B026|covered|TC-RESOURCEACCOUNT-016|usage commit rejects non-regular target
+B027|covered|TC-RESOURCEACCOUNT-018|usage commit rejects missing start
+B028|uncovered|-|usage commit rejects corrupt existing record
+B029|covered|TC-RESOURCEACCOUNT-011|identical usage replay succeeds without write
+B030|covered|TC-RESOURCEACCOUNT-012|conflicting usage replay is rejected
+B031|uncovered|-|usage commit rejects terminal unknown
+B032|covered|TC-RESOURCEACCOUNT-010|usage commit persists terminal record
+B034|covered|TC-RESOURCEACCOUNT-018|unknown commit rejects missing start
+B035|covered|TC-RESOURCEACCOUNT-028|unknown commit rejects conflicting terminal replay
+B036|covered|TC-RESOURCEACCOUNT-015|unknown commit persists terminal record
+B037|covered|TC-RESOURCEACCOUNT-042b|reconcile leaves unproven owner open
+B038|covered|TC-RESOURCEACCOUNT-047|mismatched progress run-id is ignored
+B039|covered|TC-RESOURCEACCOUNT-042|live PID evidence is recognized
+B040|covered|TC-RESOURCEACCOUNT-040|dead PID proves owner death
+B041|covered|TC-RESOURCEACCOUNT-041|superseded run-id proves owner death
+B042|uncovered|-|review-side started record is not reconciled
+B043|covered|TC-RESOURCEACCOUNT-045|terminal record is skipped by reconcile
+B044|covered|TC-RESOURCEACCOUNT-046|reconcile transition write fails
+B045|covered|TC-RESOURCEACCOUNT-040|reconcile transition write succeeds
+B046|covered|TC-RESOURCEACCOUNT-044|unknown ack append and sync succeeds
+B047|uncovered|-|unknown ack rejects missing record
+B048|uncovered|-|unknown ack rejects non-unknown record
+B049|covered|TC-RESOURCEACCOUNT-022|query lock failure is unavailable
+B050|covered|TC-RESOURCEACCOUNT-026|query record read failure is unavailable
+B051|covered|TC-RESOURCEACCOUNT-023|query marks malformed history corrupt
+B052|covered|TC-RESOURCEACCOUNT-023|query chooses corrupt status
+B053|covered|TC-RESOURCEACCOUNT-021|query chooses usage-unknown status
+B054|covered|TC-RESOURCEACCOUNT-020|query chooses incomplete status
+B055|covered|TC-RESOURCEACCOUNT-030|query chooses complete status
+B056|covered|TC-RESOURCEACCOUNT-037|query accepts current full projection
+B057|covered|TC-RESOURCEACCOUNT-033|query rebuilds projection
+B058|covered|TC-RESOURCEACCOUNT-025|query projection write failure is unavailable
+B059|covered|TC-RESOURCEACCOUNT-010|bounded token-count validation succeeds
+B061|covered|TC-RESOURCEACCOUNT-049|UTC timestamp acquisition fails
+B062|covered|TC-RESOURCEACCOUNT-010|UTC timestamp acquisition succeeds
+B063|uncovered|-|terminal durability confirmation fails
+B064|covered|TC-RESOURCEACCOUNT-011|terminal durability confirmation succeeds
+B065|covered|TC-RESOURCEACCOUNT-028|identical unknown replay succeeds after durability confirmation
+B066|uncovered|-|reconcile cannot confirm terminal-record durability
+B067|covered|TC-RESOURCEACCOUNT-028|reconcile confirms terminal-record durability
+B068|covered|TC-RESOURCEACCOUNT-019|full-scan token sum exceeds exact supported range
+B069|covered|TC-RESOURCEACCOUNT-031|query scan enters usage-committed case arm
+B070|covered|TC-RESOURCEACCOUNT-020|query scan enters started case arm
+B071|covered|TC-RESOURCEACCOUNT-021|query scan enters usage-unknown case arm
+B072|uncovered|-|query scan defensive unknown-state case arm
