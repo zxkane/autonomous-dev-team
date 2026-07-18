@@ -77,6 +77,10 @@ reviewing --> pending_review: CI-rollup gate — reviewed HEAD changed mid-round
 reviewing --> pending_dev: Review wrapper PASS but a red check on the reviewed HEAD (CI-rollup gate, INV-134)
 reviewing --> pending_review: PASS but CI checks still pending / status unavailable — re-queue for re-review (INV-134, bounded by CI_ROLLUP_WAIT_MAX)
 reviewing --> pending_dev: CI checks still not clear after CI_ROLLUP_WAIT_MAX waits — substantive FAIL (INV-134)
+pending_dev --> stalled: durable resource terminal intent [INV-140]
+pending_review --> stalled: durable resource terminal intent [INV-140]
+in_progress --> stalled: durable resource terminal intent overrides dev cleanup [INV-140]
+reviewing --> stalled: durable resource terminal intent overrides review cleanup [INV-140]
 approved --> approved: Step 0 hygiene strips transitional residue (INV-25)
 stalled --> stalled: Step 0 hygiene strips transitional residue (INV-25)
 stalled --> autonomous: Maintainer removes stalled label (autonomous retained → re-enters via Step 2; retry counter resets, INV-05)
@@ -100,6 +104,15 @@ approved --> [*]: PR merged (auto or manual)
 Each `X --> Y: label` edge corresponds 1:1 to a `transitions[]` entry in
 `transitions.json` (the `mermaid` field). The table below adds the preconditions
 (guards) and side effects (actions) the diagram omits.
+
+> **Terminal-intent cleanup override ([INV-140](invariants.md#inv-140-resource-terminal-intent-comments-are-the-durable-authoritative-terminal-control-record-and-wrapper-cleanup-must-resolve-a-live-intent-before-any-pending-state-write)):**
+> a live, trusted resource terminal intent makes the dev/review cleanup trap
+> choose `-> stalled` instead of its normal `-> pending-dev` /
+> `-> pending-review` route. This reuses the existing `stalled` destination,
+> three existing movements, and the atomic `itp_transition_state` operation.
+> The required `in-progress -> stalled` movement is declared above; no label is
+> added. With no live intent, the original pending transition arguments are
+> delegated byte-for-byte.
 
 ## Transition table
 

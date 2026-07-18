@@ -18,7 +18,7 @@
 #      mapped anchor (function name OR greppable predicate) must still resolve
 #      in its cited file. A token with no mapping, or a mapped anchor that no
 #      longer resolves, fails LOUD naming the pair.
-#   C. Label-write-SITE completeness — FIVE sub-checks over the four pipeline
+#   C. Label-write-SITE completeness — FIVE sub-checks over the five pipeline
 #      files (label_swap args + --add-label/--remove-label literals), PLUS a hard
 #      ban on un-allowlisted variable-valued writes (P1.1):
 #        C.1 vocabulary — every label literal WRITTEN must appear in
@@ -107,7 +107,7 @@ for f in "$TRANSITIONS" "$GUARD_MAP" "$CODESITE_MAP"; do
 done
 
 # The four pipeline files whose label writes must be declared.
-PIPELINE_FILES=(autonomous-dev.sh autonomous-review.sh dispatcher-tick.sh lib-dispatch.sh)
+PIPELINE_FILES=(autonomous-dev.sh autonomous-review.sh dispatcher-tick.sh lib-dispatch.sh lib-terminal-control.sh)
 
 FAILED=0
 fail() { echo "::error::$*" >&2; FAILED=1; }
@@ -363,7 +363,7 @@ collect_writes() {
 # single-quoted `--add-label 'frobnicate'` (TC-054) are scanned too — every write
 # style is covered, none can bypass the gate.
 # Accepted scanner boundaries (NOT statically detectable without a real
-# bash parser, and none present in the four PIPELINE_FILES today):
+# bash parser, and none present in the five PIPELINE_FILES today):
 #   1. a flag whose text is itself held in a variable
 #      (`f=--add-label; gh issue edit "$n" $f "$lbl"`); and
 #   2. an UNBALANCED brace inside a string literal *inside an allowlisted

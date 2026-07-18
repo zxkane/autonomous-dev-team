@@ -156,6 +156,7 @@ run_cleanup_with_vanished_shim() {
       [ -n \"\$3\" ] && args+=(--add-label \"\$3\")
       gh issue edit \"\$1\" --repo \"\$REPO\" \"\${args[@]}\"
     }
+    terminal_intent_cleanup_transition() { itp_transition_state \"\$1\" \"\$3\" \"\$4\"; }
     chp_pr_list() { gh pr list \"\$@\"; printf %s '[{\"body\":\"Closes #402\"}]'; }
     drain_agent_pr_create() { gh drain-pr-create-probe; return 0; }
     drain_agent_bot_triggers() { gh drain-bot-triggers-probe; return 0; }
@@ -263,6 +264,7 @@ run_cleanup_intact_shim() {
       [ -n \"\$3\" ] && args+=(--add-label \"\$3\")
       gh issue edit \"\$1\" --repo \"\$REPO\" \"\${args[@]}\"
     }
+    terminal_intent_cleanup_transition() { itp_transition_state \"\$1\" \"\$3\" \"\$4\"; }
     chp_pr_list() { gh pr list \"\$@\"; printf %s '[]'; }
     drain_agent_pr_create() { gh drain-pr-create-probe; return 0; }
     drain_agent_bot_triggers() { gh drain-bot-triggers-probe; return 0; }
@@ -331,6 +333,7 @@ EOF
       [ -n \"\$3\" ] && args+=(--add-label \"\$3\")
       gh issue edit \"\$1\" --repo \"\$REPO\" \"\${args[@]}\"
     }
+    terminal_intent_cleanup_transition() { itp_transition_state \"\$1\" \"\$3\" \"\$4\"; }
     chp_pr_list() { gh pr list \"\$@\"; printf %s '[]'; }   # empty array = the no-PR branch
     drain_agent_pr_create() { gh drain-pr-create-probe; return 0; }
     drain_agent_bot_triggers() { gh drain-bot-triggers-probe; return 0; }

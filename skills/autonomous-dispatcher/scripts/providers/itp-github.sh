@@ -232,6 +232,71 @@ itp_github_read_task() {
       ' <<<"$raw"
 }
 
+# Resolve one configured GitHub App slug using App-JWT authentication. An
+# installation token cannot call `/user` or `/app`, so terminal control derives
+# the exact pipeline identity set from the three configured App credentials.
+_itp_github_app_login() {
+  local app_id="$1" pem="$2" jwt raw slug provider_dir
+  if ! declare -F _generate_jwt >/dev/null 2>&1; then
+    provider_dir="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]:-$0}")")" && pwd)"
+    # shellcheck source=../gh-app-token.sh
+    source "${provider_dir}/../gh-app-token.sh"
+  fi
+  jwt="$(_generate_jwt "$app_id" "$pem")" || return 1
+  raw="$(curl -fsS \
+    -H "Authorization: Bearer $jwt" \
+    -H "Accept: application/vnd.github+json" \
+    -H "X-GitHub-Api-Version: 2022-11-28" \
+    "https://api.github.com/app")" || return 1
+  slug="$(jq -er '.slug | strings | select(length > 0)' <<<"$raw")" || return 1
+  printf '%s[bot]\n' "$slug"
+}
+
+_itp_github_comment_self_logins() {
+  local require="${ITP_REQUIRE_SELF_AUTHOR:-0}" login="${BOT_LOGIN:-}"
+  local app_id pem app_login trusted_json i
+  local -a app_ids app_pems
+  trusted_json="$(jq -cn --arg login "$login" '
+    if $login == "" then [] else [$login] end
+  ')" || return 1
+
+  if [[ "$require" != "1" ]]; then
+    printf '%s\n' "$trusted_json"
+    return 0
+  fi
+
+  if [[ "${GH_AUTH_MODE:-token}" == "app" ]]; then
+    app_ids=(
+      "${DEV_AGENT_APP_ID:-}"
+      "${REVIEW_AGENT_APP_ID:-}"
+      "${DISPATCHER_APP_ID:-}"
+    )
+    app_pems=(
+      "${DEV_AGENT_APP_PEM:-}"
+      "${REVIEW_AGENT_APP_PEM:-}"
+      "${DISPATCHER_APP_PEM:-}"
+    )
+    for i in "${!app_ids[@]}"; do
+      app_id="${app_ids[$i]}"
+      pem="${app_pems[$i]}"
+      if [[ -z "$app_id" && -z "$pem" ]]; then
+        continue
+      fi
+      [[ -n "$app_id" && -n "$pem" ]] || return 1
+      app_login="$(_itp_github_app_login "$app_id" "$pem")" || return 1
+      trusted_json="$(jq -c --arg login "$app_login" '. + [$login] | unique' \
+        <<<"$trusted_json")" || return 1
+    done
+    [[ "$(jq 'length' <<<"$trusted_json")" -gt 0 ]] || return 1
+  elif [[ -z "$login" ]]; then
+    login="$(gh api user --jq '.login // empty')" || return 1
+    [[ -n "$login" ]] || return 1
+    trusted_json="$(jq -cn --arg login "$login" '[$login]')" || return 1
+  fi
+
+  printf '%s\n' "$trusted_json"
+}
+
 # itp_github_list_comments ISSUE — the normalized comment array ([INV-90],
 # spec §3.3): [{id, author, authorKind, body, createdAt}] sorted ascending by
 # createdAt (id tie-break). [#393] REST-sourced (see the in-function comment):
@@ -239,7 +304,10 @@ itp_github_read_task() {
 # authorKind, user.login is VERBATIM incl [bot], id is REST's numeric .id.
 # §3.5 complete set via --paginate; --slurp wraps pages, .[][] flattens.
 itp_github_list_comments() {
-  local issue="$1"
+  local issue="$1" self_logins self_must_be_bot=false allow_stripped_self=true
+  self_logins="$(_itp_github_comment_self_logins)" || return 1
+  [[ "${GH_AUTH_MODE:-token}" != "app" ]] || self_must_be_bot=true
+  [[ "${ITP_REQUIRE_SELF_AUTHOR:-0}" != "1" ]] || allow_stripped_self=false
   # [#393] REST, not GraphQL: `gh issue view --json comments` (GraphQL) STRIPS
   # the `[bot]` suffix from App logins and exposes no author type, so the
   # authorKind derivation classified every App-authored comment as "human" —
@@ -255,19 +323,32 @@ itp_github_list_comments() {
   # arrays jq reads as separate documents); `.[][]` flattens. `self`
   # tolerates BOT_LOGIN in raw or `[bot]`-stripped form (a stripped-form
   # BOT_LOGIN from a GraphQL-era resolver still matches).
-  gh api --paginate --slurp "repos/${REPO}/issues/${issue}/comments" | jq "
+  gh api --paginate --slurp "repos/${REPO}/issues/${issue}/comments" \
+    | jq --argjson self "$self_logins" \
+         --argjson self_must_be_bot "$self_must_be_bot" \
+         --argjson allow_stripped_self "$allow_stripped_self" '
     [ .[][]
       | { id: (.id // null),
           author: (.user.login // null),
-          authorKind: ( (.user.login // \"\") as \$a
-                        | ( \$a | sub(\"\\\\[bot\\\\]\$\"; \"\") ) as \$stripped
-                        | if (\$a != \"\" and \"${BOT_LOGIN:-}\" != \"\" and (\$a == \"${BOT_LOGIN:-}\" or \$stripped == \"${BOT_LOGIN:-}\")) then \"self\"
-                          elif ((.user.type // \"\") == \"Bot\") then \"bot\"
-                          else \"human\" end ),
-          body: (.body // \"\"),
+          authorKind: ( (.user.login // "") as $a
+                        | ( $a | sub("\\[bot\\]$"; "") ) as $stripped
+                        | ($self | map(sub("\\[bot\\]$"; ""))) as $self_stripped
+                        | ((.user.type // "") == "Bot") as $is_bot
+                        | if ($a != ""
+                              and (($self_must_be_bot | not) or $is_bot)
+                              and (
+                                ($self | index($a)) != null
+                                or (
+                                  $allow_stripped_self
+                                  and ($self_stripped | index($stripped)) != null
+                                )
+                              )) then "self"
+                          elif ((.user.type // "") == "Bot") then "bot"
+                          else "human" end ),
+          body: (.body // ""),
           createdAt: (.created_at // null) }
-    ] | sort_by(.createdAt // \"\", .id // 0)
-  "
+    ] | sort_by(.createdAt // "", .id // 0)
+  '
 }
 
 # ===========================================================================
