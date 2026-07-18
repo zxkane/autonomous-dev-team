@@ -40,6 +40,27 @@ frozen/stubbed PIDs and run-ids, no real sleeps.
 **When** `accounting_invocation_id` is called
 **Then** it succeeds (rc 0) and echoes a valid id — proving it performs no I/O against the store.
 
+## TC-RESOURCEACCOUNT-007: identity and start reject tuples outside the pinned D3 domain
+
+**Given** an invalid side, an empty run/member id, a non-positive attempt, or a
+dev-side member other than literal `dev`
+**When** identity construction or `accounting_start` is attempted
+**Then** rc is non-zero and no accounting path is created.
+
+## TC-RESOURCEACCOUNT-008: public APIs reject path-like or tuple-mismatched invocation ids
+
+**Given** an invocation id containing path traversal, or an otherwise valid id
+whose canonical tuple differs from the tuple passed to `accounting_start`
+**When** the API is called
+**Then** rc is non-zero and no file outside the issue directory is touched.
+
+## TC-RESOURCEACCOUNT-009: public APIs return loudly on missing arguments under `set -u`
+
+**Given** a caller running `set -euo pipefail`
+**When** any D8 public API is called with fewer than its required arguments
+**Then** the function returns non-zero with a diagnostic instead of aborting on
+an unbound positional parameter.
+
 ## Strict idempotent commit (D5)
 
 ## TC-RESOURCEACCOUNT-010: first commit for a fresh invocation succeeds
@@ -68,7 +89,7 @@ frozen/stubbed PIDs and run-ids, no real sleeps.
 
 ## TC-RESOURCEACCOUNT-014: commit write failure is loud (rc≠0), not swallowed
 
-**Given** the per-issue directory is unwritable (permissions) or the lock cannot be acquired
+**Given** an injected authoritative-store writer failure
 **When** `accounting_commit_usage` is attempted for a fresh invocation
 **Then** rc≠0 and no partial/malformed file is left in the directory — distinct from `metrics_emit`'s swallow-all contract.
 
@@ -77,6 +98,36 @@ frozen/stubbed PIDs and run-ids, no real sleeps.
 **Given** a `started` record for `Y`
 **When** `accounting_commit_unknown N Y "dead-pid"` runs
 **Then** rc 0 and `Y`'s record is terminal `usage-unknown` with the reason recorded.
+
+## TC-RESOURCEACCOUNT-016: a non-regular record target is rejected before rename
+
+**Given** `<issue>/<invocation_id>.json` already exists as a directory
+**When** `accounting_commit_usage` attempts to persist that invocation
+**Then** rc is non-zero, stderr names the refused non-regular target, and no
+temporary record is moved into the directory.
+
+## TC-RESOURCEACCOUNT-017: `accounting_start` does not treat a non-regular target as an existing record
+
+**Given** `<issue>/<invocation_id>.json` already exists as a directory
+**When** `accounting_start` is called for that invocation
+**Then** rc is non-zero and the directory remains untouched; the call must not
+report the idempotent success reserved for an existing regular record.
+
+## TC-RESOURCEACCOUNT-018: terminal commits require an existing valid `started` record
+
+**Given** a canonical invocation id with no authoritative record
+**When** `accounting_commit_usage` or `accounting_commit_unknown` is called
+**Then** rc is non-zero and no terminal record is synthesized with missing
+identity metadata.
+
+## TC-RESOURCEACCOUNT-019: token counts use one canonical integer spelling
+
+**Given** an existing committed record
+**When** a replay supplies a leading-zero or out-of-range total/input/output
+value
+**Then** the request is rejected as invalid before duplicate comparison, the
+authoritative record remains unchanged, and a full-scan sum that would exceed
+the exact supported range reports `corrupt` instead of wrapping.
 
 ## Lifecycle (D4)
 
@@ -103,6 +154,54 @@ frozen/stubbed PIDs and run-ids, no real sleeps.
 **Given** one invocation file under `<issue>/` contains truncated/invalid JSON
 **When** `accounting_admission_query N` runs
 **Then** the query reports `status=corrupt` (or flags the offending id), does not delete or rewrite the malformed file, and does not fail the whole query if other records are valid (partial-corruption is surfaced, not fatal).
+
+## TC-RESOURCEACCOUNT-024: syntactically valid records with invalid envelopes yield `corrupt`
+
+**Given** JSON records whose `schema_version`, `issue`, or
+filename-to-`invocation_id` binding is wrong, or whose state-specific required
+fields are missing/invalid
+**When** `accounting_admission_query N` runs
+**Then** each record produces `status=corrupt`, contributes no tokens, and is
+left byte-unchanged.
+
+## TC-RESOURCEACCOUNT-025: a projection rebuild write failure yields `unavailable`
+
+**Given** a valid invocation scan whose missing/stale projection cannot be
+atomically written (for example, `projection.json` is a symlink)
+**When** `accounting_admission_query N` runs
+**Then** it emits the normalized `status=unavailable` JSON, returns non-zero,
+and never emits a healthy `complete` result or mutates invocation history.
+
+## TC-RESOURCEACCOUNT-026: an invocation-record read failure yields `unavailable`
+
+**Given** a record path that exists but cannot be read from storage
+**When** `accounting_admission_query N` runs
+**Then** it emits the normalized `status=unavailable` JSON and returns
+non-zero; read failures are not misreported as malformed-history `corrupt`.
+
+## TC-RESOURCEACCOUNT-027: tuple-mismatched records yield `corrupt`
+
+**Given** a structurally valid record whose `invocation_id` and filename match
+but whose `{run_id,side,member_id,attempt}` tuple hashes to another id
+**When** the issue is queried
+**Then** it reports `corrupt` and the record contributes no tokens.
+
+## TC-RESOURCEACCOUNT-028: durability-sync failures are propagated
+
+**Given** a valid `started` record and an injected failure syncing the
+same-directory temporary file or the parent directory after rename
+**When** a terminal commit runs
+**Then** rc is non-zero, the failure is loud, and the authoritative record
+remains `started` when rename was never reached; if rename already installed
+the terminal record, an identical retry re-syncs it and succeeds.
+
+## TC-RESOURCEACCOUNT-029: a directory-target race cannot consume the temporary file
+
+**Given** the record target becomes a directory after the preflight check but
+before rename
+**When** the atomic writer installs the temp file
+**Then** no-target-directory rename fails loudly, rc is non-zero, and no file
+is moved inside the directory.
 
 ## Query / projection (D2)
 
@@ -145,6 +244,21 @@ frozen/stubbed PIDs and run-ids, no real sleeps.
 **Given** a populated issue directory with a valid `projection.json`
 **When** the file is deleted and the SAME query is re-run
 **Then** the rebuilt projection's `total_tokens` and `digest` are byte-identical to the pre-deletion values.
+
+## TC-RESOURCEACCOUNT-037: a current projection is not rewritten
+
+**Given** a valid `projection.json` whose digest matches the locked full scan
+**When** the issue is queried again with the atomic writer replaced by a
+deterministic fail-if-called test double
+**Then** the query succeeds and the writer is never called.
+
+## TC-RESOURCEACCOUNT-038: projection cache validity covers its full envelope
+
+**Given** `projection.json` carries the current digest but has a wrong/missing
+schema version, total, or sorted source-id list
+**When** the issue is queried
+**Then** the cache is treated as corrupt and atomically rebuilt with all four
+fields matching the locked scan.
 
 ## Reconciliation (D6)
 
@@ -196,6 +310,37 @@ frozen/stubbed PIDs and run-ids, no real sleeps.
 **When** `accounting_reconcile N` runs a second time (idempotent re-arm)
 **Then** every existing terminal record's `total_tokens`/state is unchanged — reconcile only ever promotes `started` records, never rewrites/deletes committed or already-unknown ones.
 
+## TC-RESOURCEACCOUNT-046: reconciliation propagates a failed terminal transition write
+
+**Given** positive proof-of-death for a `started` record and an injected atomic
+write failure
+**When** `accounting_reconcile N` runs
+**Then** rc is non-zero, stderr reports the failed transition, and the on-disk
+record remains `started`.
+
+## TC-RESOURCEACCOUNT-047: stale progress from another run is not PID proof
+
+**Given** the run-id sidecar matches a `started` invocation but
+`progress.json.run_id` names another run with a dead PID
+**When** reconciliation runs
+**Then** the record remains `started`; PID evidence is usable only when both
+INV-135 sidecars identify the same current run.
+
+## TC-RESOURCEACCOUNT-048: malformed or non-regular lease evidence is ignored
+
+**Given** a malformed/symlinked run-id or progress sidecar
+**When** reconciliation runs
+**Then** no sticky unknown transition occurs because no validated positive
+proof-of-death exists.
+
+## TC-RESOURCEACCOUNT-049: timestamp acquisition failures abort before mutation
+
+**Given** an injected UTC-clock failure
+**When** a start, terminal commit, reconciliation transition, or ack attempts
+to create a timestamped fact
+**Then** rc is non-zero with a diagnostic and no malformed or partially
+timestamped history is persisted.
+
 ## Remote topology (D7)
 
 ## TC-RESOURCEACCOUNT-050: local backend query executes the library directly (no transport)
@@ -242,8 +387,12 @@ frozen/stubbed PIDs and run-ids, no real sleeps.
 ## TC-RESOURCEACCOUNT-080: new helper branches exceed 80% coverage
 
 **Given** the full unit suite for `lib-accounting.sh`
-**When** run with a coverage-tracking wrapper (e.g. `kcov` or a branch-count harness), or, absent a coverage tool, an explicit manual branch inventory
-**Then** ≥80% of the library's conditional branches are exercised.
+**When** the checked-in semantic-outcome inventory and the source-derived
+shell decision-site denominator are validated under xtrace
+**Then** every source marker has exactly one inventory row, every covered row
+names a real test ID and executes, every shell `if`/`elif`/loop/short-circuit
+site contributes automatically to the independent denominator, and both
+exercised/total ratios are strictly greater than 80%.
 
 ---
 
@@ -263,11 +412,11 @@ frozen/stubbed PIDs and run-ids, no real sleeps.
 
 ## Acceptance mapping
 
-- D2 (storage/projection) → TC-030..036, TC-060, TC-061
-- D3 (identity) → TC-001..006
-- D4 (lifecycle) → TC-020..023
-- D5 (strict commit) → TC-010..015
-- D6 (reconciliation) → TC-040..045
+- D2 (storage/projection) → TC-024..038, TC-060, TC-061
+- D3 (identity) → TC-001..009
+- D4 (lifecycle) → TC-020..027
+- D5 (strict commit) → TC-010..019, TC-028, TC-029
+- D6 (reconciliation) → TC-040..049
 - D7 (remote topology) → TC-050..052
 - Zero production call sites → TC-070
 - Coverage → TC-080

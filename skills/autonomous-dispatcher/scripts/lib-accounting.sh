@@ -58,6 +58,30 @@
 
 ACCOUNTING_SCHEMA_VERSION="${ACCOUNTING_SCHEMA_VERSION:-1}"
 ACCOUNTING_LOCK_WAIT_SECONDS="${ACCOUNTING_LOCK_WAIT_SECONDS:-5}"
+ACCOUNTING_MAX_EXACT_TOKENS=9007199254740991
+
+_accounting_valid_issue() {
+  [[ "${1-}" =~ ^[1-9][0-9]*$ ]]
+}
+
+_accounting_valid_invocation_id() {
+  [[ "${1-}" =~ ^inv-v1-[0-9a-f]{24}$ ]]
+}
+
+_accounting_valid_token_count() {
+  local value="${1-}" max="$ACCOUNTING_MAX_EXACT_TOKENS"
+  [[ "$value" =~ ^(0|[1-9][0-9]*)$ ]] || return 1
+  if (( ${#value} < ${#max} )); then
+    return 0 # accounting-branch: B059
+  fi
+  (( ${#value} == ${#max} )) || return 1
+  (( 10#$value <= max ))
+}
+
+_accounting_path_is_nonregular() {
+  local path="${1-}"
+  [[ -L "$path" ]] || { [[ -e "$path" ]] && [[ ! -f "$path" ]]; }
+}
 
 # accounting_dir [project_id] — echoes <state_dir>/accounting (a SIBLING of
 # lib-metrics.sh's metrics dir; see header). Resolution priority mirrors
@@ -73,11 +97,11 @@ accounting_dir() {
   local dir
 
   if [[ -n "${AUTONOMOUS_ACCOUNTING_DIR:-}" ]]; then
-    dir="${AUTONOMOUS_ACCOUNTING_DIR}"
+    dir="${AUTONOMOUS_ACCOUNTING_DIR}" # accounting-branch: B001
   elif [[ -z "$project_id" ]]; then
     return 1
   elif [[ -n "${XDG_STATE_HOME:-}" ]]; then
-    dir="${XDG_STATE_HOME}/autonomous-${project_id}/accounting"
+    dir="${XDG_STATE_HOME}/autonomous-${project_id}/accounting" # accounting-branch: B002
   elif [[ -n "${HOME:-}" ]]; then
     dir="${HOME}/.local/state/autonomous-${project_id}/accounting"
   else
@@ -85,7 +109,7 @@ accounting_dir() {
   fi
 
   if [[ -L "$dir" ]]; then
-    return 1
+    return 1 # accounting-branch: B003
   fi
   mkdir -p "$dir" 2>/dev/null || return 1
   # A chmod failure (e.g. a foreign-owned pre-existing dir) leaves the dir at
@@ -161,7 +185,7 @@ _accounting_lock() {
   local dir lock_file
   dir="$(_accounting_issue_dir "$issue")" || { echo "_accounting_lock: cannot resolve issue directory" >&2; return 1; }
   lock_file="${dir}/.lock"
-  if [[ -L "$lock_file" ]] || { [[ -e "$lock_file" ]] && [[ ! -f "$lock_file" ]]; }; then
+  if _accounting_path_is_nonregular "$lock_file"; then
     echo "_accounting_lock: refusing non-regular lock path: $lock_file" >&2
     return 1
   fi
@@ -179,9 +203,9 @@ _accounting_lock() {
   if ! flock -w "$ACCOUNTING_LOCK_WAIT_SECONDS" "$fd" 2>/dev/null; then
     exec {fd}>&-
     echo "_accounting_lock: timed out waiting for the lock on issue ${issue}" >&2
-    return 1
+    return 1 # accounting-branch: B005
   fi
-  _out_fd="$fd"
+  _out_fd="$fd" # accounting-branch: B004
   return 0
 }
 
@@ -208,23 +232,148 @@ _accounting_carry_fields() {
   IFS=$'\t' read -r _created_at _run_id _side _member_id _attempt <<<"$tsv"
 }
 
+_accounting_sync_file() {
+  local file="$1"
+  command -v sync >/dev/null 2>&1 || {
+    echo "_accounting_sync_file: sync is required" >&2
+    return 1
+  }
+  sync -d "$file" 2>/dev/null || {
+    echo "_accounting_sync_file: cannot sync file data: $file" >&2
+    return 1
+  }
+}
+
+_accounting_sync_dir() {
+  local dir="$1"
+  command -v sync >/dev/null 2>&1 || {
+    echo "_accounting_sync_dir: sync is required" >&2
+    return 1
+  }
+  sync -f "$dir" 2>/dev/null || {
+    echo "_accounting_sync_dir: cannot sync directory filesystem: $dir" >&2
+    return 1
+  }
+}
+
+_accounting_confirm_durable() {
+  local file="$1" dir="$2"
+  if ! _accounting_sync_file "$file" || ! _accounting_sync_dir "$dir"; then
+    echo "_accounting_confirm_durable: cannot confirm durable record: $file" >&2
+    return 1 # accounting-branch: B063
+  fi
+  return 0 # accounting-branch: B064
+}
+
+_accounting_now() {
+  local now
+  if ! now="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" || [[ -z "$now" ]]; then
+    echo "_accounting_now: cannot acquire UTC timestamp" >&2
+    return 1 # accounting-branch: B061
+  fi
+  printf '%s\n' "$now" # accounting-branch: B062
+}
+
 # _accounting_write_atomic <dir> <target_file> <content> — tmp file in the
-# SAME directory + `mv -f` (the INV-135 idiom), mode 0600. Refuses to write
-# through a pre-existing symlinked target.
+# SAME directory + `mv -fT` (the INV-135 idiom), mode 0600. Refuses to replace
+# any pre-existing target that is not a regular file.
 _accounting_write_atomic() {
   local dir="$1" target="$2" content="$3" tmp
-  [[ -L "$target" ]] && { echo "_accounting_write_atomic: refusing symlinked target: $target" >&2; return 1; }
-  tmp="$(mktemp "${dir}/.acct.XXXXXX" 2>/dev/null)" || return 1
+  if _accounting_path_is_nonregular "$target"; then
+    echo "_accounting_write_atomic: refusing non-regular target: $target" >&2
+    return 1 # accounting-branch: B007
+  fi
+  tmp="$(mktemp "${dir}/.acct.XXXXXX" 2>/dev/null)" || {
+    echo "_accounting_write_atomic: cannot create temporary file in $dir" >&2
+    return 1
+  }
   if printf '%s\n' "$content" > "$tmp" 2>/dev/null; then
     # Best-effort perms (mirrors lib-agent.sh's lease writers): a chmod
     # failure still leaves a valid (if looser-mode) file, never blocks the write.
     chmod 600 "$tmp" 2>/dev/null || true
-    mv -f "$tmp" "$target" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
+    if ! _accounting_sync_file "$tmp"; then
+      rm -f "$tmp" 2>/dev/null
+      echo "_accounting_write_atomic: cannot sync temporary file in $dir" >&2
+      return 1 # accounting-branch: B008
+    fi
+    if ! mv -fT "$tmp" "$target" 2>/dev/null; then
+      rm -f "$tmp" 2>/dev/null
+      echo "_accounting_write_atomic: cannot replace target: $target" >&2
+      return 1 # accounting-branch: B009
+    fi
+    if ! _accounting_sync_dir "$dir"; then
+      echo "_accounting_write_atomic: cannot sync parent directory: $dir" >&2
+      return 1 # accounting-branch: B010
+    fi
   else
     rm -f "$tmp" 2>/dev/null
+    echo "_accounting_write_atomic: cannot write temporary file in $dir" >&2
     return 1
   fi
-  return 0
+  return 0 # accounting-branch: B006
+}
+
+# _accounting_read_valid_record <record_file> <issue>
+#
+# Reads and validates the authoritative envelope before any record contributes
+# to a query or terminal rewrite. Returns 2 for a storage read failure and 1
+# for malformed/conflicting history so admission queries can preserve D4's
+# unavailable-vs-corrupt distinction.
+_accounting_read_valid_record() {
+  local file="$1" issue="$2"
+  [[ -f "$file" && ! -L "$file" ]] || return 1
+
+  local raw record filename_id="${file##*/}"
+  filename_id="${filename_id%.json}"
+  if ! raw="$(cat "$file" 2>/dev/null)"; then
+    return 2 # accounting-branch: B012
+  fi
+  if ! record="$(jq -ce \
+    --argjson sv "$ACCOUNTING_SCHEMA_VERSION" \
+    --argjson max_tokens "$ACCOUNTING_MAX_EXACT_TOKENS" \
+    --argjson expected_issue "$issue" \
+    --arg expected_id "$filename_id" '
+      def token_count: type == "number" and . >= 0 and . <= $max_tokens and floor == .;
+      def posint: type == "number" and . >= 1 and floor == .;
+      if (type == "object"
+      and .schema_version == $sv
+      and .issue == $expected_issue
+      and .invocation_id == $expected_id
+      and ($expected_id | test("^inv-v1-[0-9a-f]{24}$"))
+      and (.side == "dev" or .side == "review")
+      and ((.run_id | type) == "string" and (.run_id | length) > 0)
+      and ((.member_id | type) == "string" and (.member_id | length) > 0)
+      and (if .side == "dev" then .member_id == "dev" else true end)
+      and (.attempt | posint)
+      and ((.state | type) == "string")
+      and ((.created_at | type) == "string" and (.created_at | length) > 0)
+      and ((.updated_at | type) == "string" and (.updated_at | length) > 0)
+      and (
+        if .state == "started" then
+          true
+        elif .state == "usage-committed" then
+          (.total_tokens | token_count)
+          and ((has("input_tokens") | not) or (.input_tokens | token_count))
+          and ((has("output_tokens") | not) or (.output_tokens | token_count))
+        elif .state == "usage-unknown" then
+          ((.reason | type) == "string" and (.reason | length) > 0)
+        else
+          false
+        end
+      )
+      ) then . else empty end
+    ' <<<"$raw" 2>/dev/null)"; then
+    return 1 # accounting-branch: B013
+  fi
+
+  local run_id side member_id attempt expected_id
+  IFS=$'\t' read -r run_id side member_id attempt <<<"$(jq -r \
+    '[.run_id, .side, .member_id, .attempt] | @tsv' <<<"$record")"
+  if ! expected_id="$(accounting_invocation_id "$run_id" "$side" "$member_id" "$attempt" 2>/dev/null)" ||
+    [[ "$expected_id" != "$filename_id" ]]; then
+    return 1 # accounting-branch: B014
+  fi
+  printf '%s\n' "$record" # accounting-branch: B011
 }
 
 # accounting_invocation_id RUN_ID SIDE MEMBER_ID ATTEMPT (D3)
@@ -236,8 +385,19 @@ _accounting_write_atomic() {
 # members distinguished only by their `_agent_session_id` member UUID, and a
 # dev retry's incremented attempt.
 accounting_invocation_id() {
-  local run_id="$1" side="$2" member_id="$3" attempt="$4"
+  if (( $# != 4 )); then
+    echo "accounting_invocation_id: expected RUN_ID SIDE MEMBER_ID ATTEMPT" >&2
+    return 1 # accounting-branch: B015
+  fi
+  local run_id="${1-}" side="${2-}" member_id="${3-}" attempt="${4-}"
   command -v jq >/dev/null 2>&1 || { echo "accounting_invocation_id: jq is required" >&2; return 1; }
+  [[ -n "$run_id" ]] || { echo "accounting_invocation_id: run_id is required" >&2; return 1; }
+  [[ "$side" == "dev" || "$side" == "review" ]] || { echo "accounting_invocation_id: side must be dev or review" >&2; return 1; } # accounting-branch: B016
+  [[ -n "$member_id" ]] || { echo "accounting_invocation_id: member_id is required" >&2; return 1; }
+  if [[ "$side" == "dev" && "$member_id" != "dev" ]]; then
+    echo "accounting_invocation_id: dev-side member_id must be literal dev" >&2
+    return 1
+  fi
   [[ "$attempt" =~ ^[1-9][0-9]*$ ]] || { echo "accounting_invocation_id: attempt must be a positive integer (D3: a positive ordinal)" >&2; return 1; }
 
   local canonical digest
@@ -248,7 +408,7 @@ accounting_invocation_id() {
   digest="$(_accounting_sha256 "$canonical")" || { echo "accounting_invocation_id: no sha256 tool available" >&2; return 1; }
   [[ -n "$digest" ]] || return 1
 
-  printf 'inv-v1-%s\n' "${digest:0:24}"
+  printf 'inv-v1-%s\n' "${digest:0:24}" # accounting-branch: B017
 }
 
 # accounting_start ISSUE INVOCATION_ID SIDE RUN_ID MEMBER_ID ATTEMPT (D8)
@@ -257,10 +417,21 @@ accounting_invocation_id() {
 # INVOCATION_ID already exists (in ANY state), this is a no-op success —
 # never regresses a terminal record back to `started`.
 accounting_start() {
-  local issue="$1" invocation_id="$2" side="$3" run_id="$4" member_id="$5" attempt="$6"
-  [[ -n "$issue" && -n "$invocation_id" ]] || { echo "accounting_start: issue and invocation_id are required" >&2; return 1; }
+  if (( $# != 6 )); then
+    echo "accounting_start: expected ISSUE INVOCATION_ID SIDE RUN_ID MEMBER_ID ATTEMPT" >&2
+    return 1 # accounting-branch: B018
+  fi
+  local issue="${1-}" invocation_id="${2-}" side="${3-}" run_id="${4-}" member_id="${5-}" attempt="${6-}"
+  _accounting_valid_issue "$issue" || { echo "accounting_start: issue must be a positive integer" >&2; return 1; }
+  _accounting_valid_invocation_id "$invocation_id" || { echo "accounting_start: invalid invocation_id" >&2; return 1; } # accounting-branch: B019
   [[ "$attempt" =~ ^[1-9][0-9]*$ ]] || { echo "accounting_start: attempt must be a positive integer (D3: a positive ordinal)" >&2; return 1; }
   command -v jq >/dev/null 2>&1 || { echo "accounting_start: jq is required" >&2; return 1; }
+  local expected_id
+  if ! expected_id="$(accounting_invocation_id "$run_id" "$side" "$member_id" "$attempt")" ||
+    [[ "$expected_id" != "$invocation_id" ]]; then
+    echo "accounting_start: invocation_id does not match the canonical identity tuple" >&2
+    return 1 # accounting-branch: B020
+  fi
 
   local dir
   dir="$(_accounting_issue_dir "$issue")" || { echo "accounting_start: cannot resolve issue directory" >&2; return 1; }
@@ -269,13 +440,32 @@ accounting_start() {
   _accounting_lock "$issue" _lock_fd || return 1
 
   local file="${dir}/${invocation_id}.json"
-  if [[ -e "$file" ]]; then
+  if [[ -e "$file" || -L "$file" ]]; then
+    if _accounting_path_is_nonregular "$file"; then
+      echo "accounting_start: refusing non-regular record target: $file" >&2
+      _accounting_unlock _lock_fd
+      return 1 # accounting-branch: B021
+    fi
+    local existing
+    if ! existing="$(_accounting_read_valid_record "$file" "$issue")"; then
+      echo "accounting_start: existing record for ${invocation_id} is corrupt" >&2
+      _accounting_unlock _lock_fd
+      return 1
+    fi
+    if ! _accounting_confirm_durable "$file" "$dir"; then
+      echo "accounting_start: failed to confirm durable record for ${invocation_id}" >&2
+      _accounting_unlock _lock_fd
+      return 1
+    fi
     _accounting_unlock _lock_fd
-    return 0
+    return 0 # accounting-branch: B022
   fi
 
   local now record
-  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  if ! now="$(_accounting_now)"; then
+    _accounting_unlock _lock_fd
+    return 1
+  fi
   record="$(jq -nc \
     --argjson sv "$ACCOUNTING_SCHEMA_VERSION" --arg id "$invocation_id" --argjson issue "$issue" \
     --arg side "$side" --arg run_id "$run_id" --arg member_id "$member_id" --argjson attempt "$attempt" \
@@ -287,24 +477,39 @@ accounting_start() {
     return 1
   fi
 
-  _accounting_write_atomic "$dir" "$file" "$record"
-  local rc=$?
+  local rc=0
+  if ! _accounting_write_atomic "$dir" "$file" "$record"; then
+    echo "accounting_start: failed to persist ${invocation_id}" >&2
+    rc=1
+  else
+    : # accounting-branch: B023
+  fi
   _accounting_unlock _lock_fd
   return $rc
 }
 
 # accounting_commit_usage ISSUE INVOCATION_ID TOTAL [INPUT|-] [OUTPUT|-] (D5, D8)
 #
-# Strict idempotent commit. No existing record -> write usage-committed.
-# Existing terminal usage-committed record, IDENTICAL payload -> rc 0,
+# Strict idempotent commit. A valid started record is required. Existing
+# terminal usage-committed record, IDENTICAL payload -> rc 0,
 # no write. Existing terminal record, CONFLICTING payload -> rc 1, no
 # mutation, loud stderr. Already usage-unknown -> rc 1 (terminal states
-# never overwrite each other). Any write failure -> rc 1 (no swallow — the
-# rename is the durability boundary).
+# never overwrite each other). Any write or sync failure -> rc 1; a replay
+# re-syncs an already-installed identical terminal record before succeeding.
 accounting_commit_usage() {
-  local issue="$1" invocation_id="$2" total="$3" input="${4:--}" output="${5:--}"
-  [[ -n "$issue" && -n "$invocation_id" ]] || { echo "accounting_commit_usage: issue and invocation_id are required" >&2; return 1; }
-  [[ "$total" =~ ^[0-9]+$ ]] || { echo "accounting_commit_usage: total must be a non-negative integer" >&2; return 1; }
+  if (( $# < 3 || $# > 5 )); then
+    echo "accounting_commit_usage: expected ISSUE INVOCATION_ID TOTAL [INPUT|-] [OUTPUT|-]" >&2
+    return 1 # accounting-branch: B024
+  fi
+  local issue="${1-}" invocation_id="${2-}" total="${3-}" input="${4:--}" output="${5:--}"
+  _accounting_valid_issue "$issue" || { echo "accounting_commit_usage: issue must be a positive integer" >&2; return 1; }
+  _accounting_valid_invocation_id "$invocation_id" || { echo "accounting_commit_usage: invalid invocation_id" >&2; return 1; }
+  _accounting_valid_token_count "$total" ||
+    { echo "accounting_commit_usage: total must be a canonical non-negative integer no greater than ${ACCOUNTING_MAX_EXACT_TOKENS}" >&2; return 1; } # accounting-branch: B025
+  [[ "$input" == "-" ]] || _accounting_valid_token_count "$input" ||
+    { echo "accounting_commit_usage: input must be - or a canonical non-negative integer no greater than ${ACCOUNTING_MAX_EXACT_TOKENS}" >&2; return 1; }
+  [[ "$output" == "-" ]] || _accounting_valid_token_count "$output" ||
+    { echo "accounting_commit_usage: output must be - or a canonical non-negative integer no greater than ${ACCOUNTING_MAX_EXACT_TOKENS}" >&2; return 1; }
   command -v jq >/dev/null 2>&1 || { echo "accounting_commit_usage: jq is required" >&2; return 1; }
 
   local dir
@@ -314,37 +519,63 @@ accounting_commit_usage() {
   _accounting_lock "$issue" _lock_fd || return 1
 
   local file="${dir}/${invocation_id}.json"
-  local created_at="" run_id="" side="" member_id="" attempt="0"
-  if [[ -f "$file" ]]; then
-    local existing existing_state
-    if ! existing="$(jq -e . "$file" 2>/dev/null)"; then
-      echo "accounting_commit_usage: existing record for ${invocation_id} is corrupt" >&2
-      _accounting_unlock _lock_fd
-      return 1
-    fi
-    existing_state="$(jq -r '.state // ""' <<<"$existing")"
-    if [[ "$existing_state" == "usage-committed" ]]; then
-      local ex_total ex_input ex_output
-      IFS=$'\t' read -r ex_total ex_input ex_output <<<"$(jq -r \
-        '[(.total_tokens // ""), (if has("input_tokens") then .input_tokens else "-" end),
-          (if has("output_tokens") then .output_tokens else "-" end)] | @tsv' <<<"$existing")"
-      if [[ "$ex_total" == "$total" && "$ex_input" == "$input" && "$ex_output" == "$output" ]]; then
-        _accounting_unlock _lock_fd
-        return 0
-      fi
-      echo "accounting_commit_usage: conflicting duplicate commit for ${invocation_id} (existing total=${ex_total}, requested=${total})" >&2
-      _accounting_unlock _lock_fd
-      return 1
-    elif [[ "$existing_state" == "usage-unknown" ]]; then
-      echo "accounting_commit_usage: ${invocation_id} is already terminal usage-unknown" >&2
-      _accounting_unlock _lock_fd
-      return 1
-    fi
-    _accounting_carry_fields "$existing" created_at run_id side member_id attempt
+  if _accounting_path_is_nonregular "$file"; then
+    echo "accounting_commit_usage: refusing non-regular record target: $file" >&2
+    _accounting_unlock _lock_fd
+    return 1 # accounting-branch: B026
+  fi
+  if [[ ! -f "$file" ]]; then
+    echo "accounting_commit_usage: no started record for ${invocation_id}" >&2
+    _accounting_unlock _lock_fd
+    return 1 # accounting-branch: B027
   fi
 
+  local created_at="" run_id="" side="" member_id="" attempt="0"
+  local existing existing_state
+  if ! existing="$(_accounting_read_valid_record "$file" "$issue")"; then
+    echo "accounting_commit_usage: existing record for ${invocation_id} is corrupt" >&2
+    _accounting_unlock _lock_fd
+    return 1 # accounting-branch: B028
+  fi
+  existing_state="$(jq -r '.state' <<<"$existing")"
+  if [[ "$existing_state" == "usage-committed" ]]; then
+    if ! _accounting_confirm_durable "$file" "$dir"; then
+      echo "accounting_commit_usage: failed to confirm durable terminal record for ${invocation_id}" >&2
+      _accounting_unlock _lock_fd
+      return 1
+    fi
+    local ex_total ex_input ex_output
+    IFS=$'\t' read -r ex_total ex_input ex_output <<<"$(jq -r \
+      '[.total_tokens, (if has("input_tokens") then .input_tokens else "-" end),
+        (if has("output_tokens") then .output_tokens else "-" end)] | @tsv' <<<"$existing")"
+    if [[ "$ex_total" == "$total" && "$ex_input" == "$input" && "$ex_output" == "$output" ]]; then
+      _accounting_unlock _lock_fd
+      return 0 # accounting-branch: B029
+    fi
+    echo "accounting_commit_usage: conflicting duplicate commit for ${invocation_id} (existing total=${ex_total}, requested=${total})" >&2
+    _accounting_unlock _lock_fd
+    return 1 # accounting-branch: B030
+  elif [[ "$existing_state" == "usage-unknown" ]]; then
+    if ! _accounting_confirm_durable "$file" "$dir"; then
+      echo "accounting_commit_usage: failed to confirm durable terminal record for ${invocation_id}" >&2
+      _accounting_unlock _lock_fd
+      return 1
+    fi
+    echo "accounting_commit_usage: ${invocation_id} is already terminal usage-unknown" >&2
+    _accounting_unlock _lock_fd
+    return 1 # accounting-branch: B031
+  elif [[ "$existing_state" != "started" ]]; then
+    echo "accounting_commit_usage: invalid prior state for ${invocation_id}: ${existing_state}" >&2
+    _accounting_unlock _lock_fd
+    return 1
+  fi
+  _accounting_carry_fields "$existing" created_at run_id side member_id attempt
+
   local now
-  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  if ! now="$(_accounting_now)"; then
+    _accounting_unlock _lock_fd
+    return 1
+  fi
   [[ -n "$created_at" ]] || created_at="$now"
   [[ "$attempt" =~ ^[0-9]+$ ]] || attempt=0
 
@@ -355,20 +586,10 @@ accounting_commit_usage() {
   local body='{schema_version:$sv, invocation_id:$id, issue:$issue, side:$side, run_id:$run_id, member_id:$member_id,
     attempt:$attempt, state:$state, created_at:$created_at, updated_at:$updated_at, total_tokens:$total}'
   if [[ "$input" != "-" ]]; then
-    if [[ ! "$input" =~ ^[0-9]+$ ]]; then
-      echo "accounting_commit_usage: input must be a non-negative integer or -" >&2
-      _accounting_unlock _lock_fd
-      return 1
-    fi
     jq_args+=(--argjson input "$input")
     body+=' + {input_tokens:$input}'
   fi
   if [[ "$output" != "-" ]]; then
-    if [[ ! "$output" =~ ^[0-9]+$ ]]; then
-      echo "accounting_commit_usage: output must be a non-negative integer or -" >&2
-      _accounting_unlock _lock_fd
-      return 1
-    fi
     jq_args+=(--argjson output "$output")
     body+=' + {output_tokens:$output}'
   fi
@@ -380,20 +601,31 @@ accounting_commit_usage() {
     return 1
   fi
 
-  _accounting_write_atomic "$dir" "$file" "$record"
-  local rc=$?
+  local rc=0
+  if ! _accounting_write_atomic "$dir" "$file" "$record"; then
+    echo "accounting_commit_usage: failed to persist ${invocation_id}" >&2
+    rc=1
+  else
+    : # accounting-branch: B032
+  fi
   _accounting_unlock _lock_fd
   return $rc
 }
 
 # accounting_commit_unknown ISSUE INVOCATION_ID REASON (D4, D8)
 #
-# Writes a sticky terminal usage-unknown record. Rejects (rc 1) if the
-# invocation is already terminal (either state) — terminal states never
-# overwrite each other.
+# Writes a sticky terminal usage-unknown record. An identical usage-unknown
+# replay confirms durability and succeeds without rewriting; a conflicting
+# terminal payload is rejected. Terminal states never overwrite each other.
 accounting_commit_unknown() {
-  local issue="$1" invocation_id="$2" reason="$3"
-  [[ -n "$issue" && -n "$invocation_id" ]] || { echo "accounting_commit_unknown: issue and invocation_id are required" >&2; return 1; }
+  if (( $# != 3 )); then
+    echo "accounting_commit_unknown: expected ISSUE INVOCATION_ID REASON" >&2
+    return 1
+  fi
+  local issue="${1-}" invocation_id="${2-}" reason="${3-}"
+  _accounting_valid_issue "$issue" || { echo "accounting_commit_unknown: issue must be a positive integer" >&2; return 1; }
+  _accounting_valid_invocation_id "$invocation_id" || { echo "accounting_commit_unknown: invalid invocation_id" >&2; return 1; }
+  [[ -n "$reason" ]] || { echo "accounting_commit_unknown: reason is required" >&2; return 1; }
   command -v jq >/dev/null 2>&1 || { echo "accounting_commit_unknown: jq is required" >&2; return 1; }
 
   local dir
@@ -403,23 +635,57 @@ accounting_commit_unknown() {
   _accounting_lock "$issue" _lock_fd || return 1
 
   local file="${dir}/${invocation_id}.json"
-  local now created_at="" run_id="" side="" member_id="" attempt="0"
-  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  if _accounting_path_is_nonregular "$file"; then
+    echo "accounting_commit_unknown: refusing non-regular record target: $file" >&2
+    _accounting_unlock _lock_fd
+    return 1
+  fi
+  if [[ ! -f "$file" ]]; then
+    echo "accounting_commit_unknown: no started record for ${invocation_id}" >&2
+    _accounting_unlock _lock_fd
+    return 1 # accounting-branch: B034
+  fi
 
-  if [[ -f "$file" ]]; then
-    local existing existing_state
-    if ! existing="$(jq -e . "$file" 2>/dev/null)"; then
-      echo "accounting_commit_unknown: existing record for ${invocation_id} is corrupt" >&2
+  local now created_at="" run_id="" side="" member_id="" attempt="0"
+
+  local existing existing_state
+  if ! existing="$(_accounting_read_valid_record "$file" "$issue")"; then
+    echo "accounting_commit_unknown: existing record for ${invocation_id} is corrupt" >&2
+    _accounting_unlock _lock_fd
+    return 1
+  fi
+  existing_state="$(jq -r '.state' <<<"$existing")"
+  if [[ "$existing_state" == "usage-unknown" ]]; then
+    if ! _accounting_confirm_durable "$file" "$dir"; then
+      echo "accounting_commit_unknown: failed to confirm durable replay for ${invocation_id}" >&2
       _accounting_unlock _lock_fd
       return 1
     fi
-    existing_state="$(jq -r '.state // ""' <<<"$existing")"
-    if [[ "$existing_state" == "usage-committed" || "$existing_state" == "usage-unknown" ]]; then
-      echo "accounting_commit_unknown: ${invocation_id} is already terminal (${existing_state})" >&2
+    if jq -e --arg reason "$reason" '.reason == $reason' <<<"$existing" >/dev/null; then
+      _accounting_unlock _lock_fd
+      return 0 # accounting-branch: B065
+    fi
+    echo "accounting_commit_unknown: conflicting duplicate for ${invocation_id}" >&2
+    _accounting_unlock _lock_fd
+    return 1 # accounting-branch: B035
+  elif [[ "$existing_state" == "usage-committed" ]]; then
+    if ! _accounting_confirm_durable "$file" "$dir"; then
+      echo "accounting_commit_unknown: failed to confirm durable terminal record for ${invocation_id}" >&2
       _accounting_unlock _lock_fd
       return 1
     fi
-    _accounting_carry_fields "$existing" created_at run_id side member_id attempt
+    echo "accounting_commit_unknown: ${invocation_id} is already terminal (${existing_state})" >&2
+    _accounting_unlock _lock_fd
+    return 1
+  elif [[ "$existing_state" != "started" ]]; then
+    echo "accounting_commit_unknown: invalid prior state for ${invocation_id}: ${existing_state}" >&2
+    _accounting_unlock _lock_fd
+    return 1
+  fi
+  _accounting_carry_fields "$existing" created_at run_id side member_id attempt
+  if ! now="$(_accounting_now)"; then
+    _accounting_unlock _lock_fd
+    return 1
   fi
   [[ -n "$created_at" ]] || created_at="$now"
   [[ "$attempt" =~ ^[0-9]+$ ]] || attempt=0
@@ -436,8 +702,13 @@ accounting_commit_unknown() {
     return 1
   fi
 
-  _accounting_write_atomic "$dir" "$file" "$record"
-  local rc=$?
+  local rc=0
+  if ! _accounting_write_atomic "$dir" "$file" "$record"; then
+    echo "accounting_commit_unknown: failed to persist ${invocation_id}" >&2
+    rc=1
+  else
+    : # accounting-branch: B036
+  fi
   _accounting_unlock _lock_fd
   return $rc
 }
@@ -453,8 +724,12 @@ accounting_commit_unknown() {
 # Never rewrites an already-terminal record (re-arm never deletes known
 # totals).
 accounting_reconcile() {
-  local issue="$1"
-  [[ -n "$issue" ]] || { echo "accounting_reconcile: issue is required" >&2; return 1; }
+  if (( $# != 1 )); then
+    echo "accounting_reconcile: expected ISSUE" >&2
+    return 1
+  fi
+  local issue="${1-}"
+  _accounting_valid_issue "$issue" || { echo "accounting_reconcile: issue must be a positive integer" >&2; return 1; }
   command -v jq >/dev/null 2>&1 || { echo "accounting_reconcile: jq is required" >&2; return 1; }
 
   local dir
@@ -472,35 +747,78 @@ accounting_reconcile() {
   local pdir current_run_id="" current_pid="" current_alive=0
   local have_run_id=0 have_pid=0
   if pdir="$(_accounting_pid_dir 2>/dev/null)"; then
-    if [[ -f "${pdir}/issue-${issue}.run-id" ]]; then
-      current_run_id="$(<"${pdir}/issue-${issue}.run-id")"
-      current_run_id="${current_run_id%%$'\n'*}"
-      [[ -n "$current_run_id" ]] && have_run_id=1
+    local run_file="${pdir}/issue-${issue}.run-id"
+    local progress_file="${pdir}/issue-${issue}.progress.json"
+    if [[ -f "$run_file" && ! -L "$run_file" ]]; then
+      if current_run_id="$(cat "$run_file" 2>/dev/null)" &&
+        [[ -n "$current_run_id" && "$current_run_id" != *$'\n'* ]]; then
+        have_run_id=1
+      else
+        current_run_id=""
+      fi
     fi
-    if [[ -f "${pdir}/issue-${issue}.progress.json" ]]; then
-      current_pid="$(jq -r '.pid // empty' "${pdir}/issue-${issue}.progress.json" 2>/dev/null)"
-      [[ -n "$current_pid" ]] && have_pid=1
+    if [[ -f "$progress_file" && ! -L "$progress_file" ]]; then
+      local progress_fields progress_run_id
+      if progress_fields="$(jq -er '
+          select(
+            type == "object"
+            and .schema_version == 1
+            and ((.run_id | type) == "string" and (.run_id | length) > 0)
+            and ((.pid | type) == "number" and .pid >= 1 and (.pid | floor) == .pid)
+            and ((.updated_at_epoch | type) == "number" and .updated_at_epoch >= 0 and
+              (.updated_at_epoch | floor) == .updated_at_epoch)
+          )
+          | [.run_id, .pid] | @tsv
+        ' "$progress_file" 2>/dev/null)"; then
+        IFS=$'\t' read -r progress_run_id current_pid <<<"$progress_fields"
+        if [[ "$have_run_id" -eq 1 && "$progress_run_id" == "$current_run_id" ]]; then
+          have_pid=1
+        else
+          current_pid="" # accounting-branch: B038
+        fi
+      fi
     fi
   fi
   if [[ "$have_pid" -eq 1 ]] && kill -0 "$current_pid" 2>/dev/null; then
-    current_alive=1
+    current_alive=1 # accounting-branch: B039
   fi
 
-  local f
+  local f rc=0
   for f in "$dir"/*.json; do
     [[ -e "$f" ]] || continue
     [[ "$(basename "$f")" == "projection.json" ]] && continue
 
-    local rec
-    rec="$(jq -e . "$f" 2>/dev/null)" || continue  # corrupt — never mutate
+    local rec read_rc
+    if rec="$(_accounting_read_valid_record "$f" "$issue")"; then
+      :
+    else
+      read_rc=$?
+      if [[ "$read_rc" -eq 2 ]]; then
+        echo "accounting_reconcile: cannot read record ${f##*/}" >&2
+        rc=1
+      fi
+      continue
+    fi
 
     local state
     state="$(jq -r '.state // ""' <<<"$rec")"
-    [[ "$state" == "started" ]] || continue
+    if [[ "$state" != "started" ]]; then
+      : # accounting-branch: B043
+      if ! _accounting_confirm_durable "$f" "$dir"; then
+        echo "accounting_reconcile: failed to confirm durable terminal record ${f##*/}" >&2
+        rc=1 # accounting-branch: B066
+      else
+        : # accounting-branch: B067
+      fi
+      continue
+    fi
 
     local side
     side="$(jq -r '.side // ""' <<<"$rec")"
-    [[ "$side" == "dev" ]] || continue
+    if [[ "$side" != "dev" ]]; then
+      : # accounting-branch: B042
+      continue
+    fi
 
     # dead=1 only on POSITIVE evidence — a superseded run-id (evidence
     # exists and names a different run) or a resolvable-but-dead pid
@@ -512,21 +830,36 @@ accounting_reconcile() {
     local rec_run_id dead=0
     rec_run_id="$(jq -r '.run_id // ""' <<<"$rec")"
     if [[ "$have_run_id" -eq 1 && "$rec_run_id" != "$current_run_id" ]]; then
-      dead=1
+      dead=1 # accounting-branch: B041
     elif [[ "$have_run_id" -eq 1 && "$rec_run_id" == "$current_run_id" && "$have_pid" -eq 1 && "$current_alive" -eq 0 ]]; then
-      dead=1
+      dead=1 # accounting-branch: B040
     fi
-    [[ "$dead" -eq 1 ]] || continue
+    if [[ "$dead" -ne 1 ]]; then
+      : # accounting-branch: B037
+      continue
+    fi
 
     local now updated
-    now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    updated="$(jq -c --arg state "usage-unknown" --arg updated_at "$now" --arg reason "proof-of-death:reconcile" \
-      '.state = $state | .updated_at = $updated_at | .reason = $reason' <<<"$rec")" || continue
-    _accounting_write_atomic "$dir" "$f" "$updated"
+    if ! now="$(_accounting_now)"; then
+      rc=1
+      continue
+    fi
+    if ! updated="$(jq -c --arg state "usage-unknown" --arg updated_at "$now" --arg reason "proof-of-death:reconcile" \
+      '.state = $state | .updated_at = $updated_at | .reason = $reason' <<<"$rec")"; then
+      echo "accounting_reconcile: failed to build terminal record for ${f##*/}" >&2
+      rc=1
+      continue
+    fi
+    if ! _accounting_write_atomic "$dir" "$f" "$updated"; then
+      echo "accounting_reconcile: failed to persist terminal record for ${f##*/}" >&2
+      rc=1 # accounting-branch: B044
+    else
+      : # accounting-branch: B045
+    fi
   done
 
   _accounting_unlock _lock_fd
-  return 0
+  return $rc
 }
 
 # accounting_ack_unknown ISSUE INVOCATION_ID... (D6, D8)
@@ -536,9 +869,13 @@ accounting_reconcile() {
 # usage-unknown record. rc 1 (with per-id stderr) if any id is missing or
 # not currently usage-unknown; other ids in the same call still get acked.
 accounting_ack_unknown() {
-  local issue="$1"
+  if (( $# < 2 )); then
+    echo "accounting_ack_unknown: expected ISSUE INVOCATION_ID..." >&2
+    return 1
+  fi
+  local issue="${1-}"
   shift
-  [[ -n "$issue" && $# -ge 1 ]] || { echo "accounting_ack_unknown: issue and at least one invocation_id are required" >&2; return 1; }
+  _accounting_valid_issue "$issue" || { echo "accounting_ack_unknown: issue must be a positive integer" >&2; return 1; }
   command -v jq >/dev/null 2>&1 || { echo "accounting_ack_unknown: jq is required" >&2; return 1; }
 
   local dir
@@ -548,34 +885,53 @@ accounting_ack_unknown() {
   _accounting_lock "$issue" _lock_fd || return 1
 
   local acks_file="${dir}/acks.jsonl"
-  if [[ -L "$acks_file" ]]; then
-    echo "accounting_ack_unknown: refusing symlinked acks file: $acks_file" >&2
+  if _accounting_path_is_nonregular "$acks_file"; then
+    echo "accounting_ack_unknown: refusing non-regular acks file: $acks_file" >&2
     _accounting_unlock _lock_fd
     return 1
   fi
 
   local id rc=0
   for id in "$@"; do
+    if ! _accounting_valid_invocation_id "$id"; then
+      echo "accounting_ack_unknown: invalid invocation_id: ${id}" >&2
+      rc=1
+      continue
+    fi
     local file="${dir}/${id}.json"
     if [[ ! -f "$file" ]]; then
       echo "accounting_ack_unknown: no record for ${id}" >&2
+      rc=1 # accounting-branch: B047
+      continue
+    fi
+    local record state
+    if ! record="$(_accounting_read_valid_record "$file" "$issue")"; then
+      echo "accounting_ack_unknown: record for ${id} is corrupt or unavailable" >&2
       rc=1
       continue
     fi
-    local state
-    state="$(jq -r '.state // ""' "$file" 2>/dev/null)"
+    state="$(jq -r '.state' <<<"$record")"
     if [[ "$state" != "usage-unknown" ]]; then
       echo "accounting_ack_unknown: ${id} is not in usage-unknown state (state=${state:-corrupt})" >&2
-      rc=1
+      rc=1 # accounting-branch: B048
       continue
     fi
     local now line
-    now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    if ! now="$(_accounting_now)"; then
+      rc=1
+      continue
+    fi
     line="$(jq -nc \
       --argjson sv "$ACCOUNTING_SCHEMA_VERSION" --arg id "$id" --argjson issue "$issue" --arg ts "$now" \
       '{schema_version:$sv, invocation_id:$id, issue:$issue, ts:$ts, event:"ack-unknown"}')"
     if [[ -z "$line" ]] || ! printf '%s\n' "$line" >> "$acks_file" 2>/dev/null; then
+      echo "accounting_ack_unknown: failed to append audit record for ${id}" >&2
       rc=1
+    elif ! _accounting_sync_file "$acks_file" || ! _accounting_sync_dir "$dir"; then
+      echo "accounting_ack_unknown: failed to sync audit record for ${id}" >&2
+      rc=1
+    else
+      : # accounting-branch: B046
     fi
   done
 
@@ -599,38 +955,54 @@ _accounting_unavailable_json() {
 }
 
 accounting_admission_query() {
-  local issue="$1"
-  [[ -n "$issue" ]] || { echo "accounting_admission_query: issue is required" >&2; return 1; }
+  if (( $# != 1 )); then
+    echo "accounting_admission_query: expected ISSUE" >&2
+    return 1
+  fi
+  local issue="${1-}"
+  _accounting_valid_issue "$issue" || { echo "accounting_admission_query: issue must be a positive integer" >&2; return 1; }
   if ! command -v jq >/dev/null 2>&1; then
     # jq is confirmed absent above — the payload is hand-spelled (the one
     # exception to the file's jq -nc-only contract) since jq cannot be
     # invoked to build it.
+    echo "accounting_admission_query: jq is required" >&2
     _accounting_unavailable_json
     return 1
   fi
 
   local dir
   if ! dir="$(_accounting_issue_dir "$issue" 2>/dev/null)"; then
+    echo "accounting_admission_query: accounting store is unavailable for issue ${issue}" >&2
     _accounting_unavailable_json
     return 1
   fi
 
   local _lock_fd
   if ! _accounting_lock "$issue" _lock_fd 2>/dev/null; then
+    echo "accounting_admission_query: accounting lock is unavailable for issue ${issue}" >&2
     _accounting_unavailable_json
-    return 1
+    return 1 # accounting-branch: B049
   fi
 
   local total=0 any_corrupt=0 open_count=0 unknown_count=0
   local open_json="[]" unknown_json="[]" scan_json="[]"
   local f
   for f in "$dir"/*.json; do
-    [[ -e "$f" ]] || continue
+    [[ -e "$f" || -L "$f" ]] || continue
     [[ "$(basename "$f")" == "projection.json" ]] && continue
 
-    local rec id state
-    if ! rec="$(jq -e . "$f" 2>/dev/null)"; then
-      any_corrupt=1
+    local rec id state read_rc
+    if rec="$(_accounting_read_valid_record "$f" "$issue")"; then
+      :
+    else
+      read_rc=$?
+      if [[ "$read_rc" -eq 2 ]]; then
+        echo "accounting_admission_query: cannot read invocation record ${f##*/}" >&2
+        _accounting_unlock _lock_fd
+        _accounting_unavailable_json
+        return 1 # accounting-branch: B050
+      fi
+      any_corrupt=1 # accounting-branch: B051
       continue
     fi
     IFS=$'\t' read -r id state <<<"$(jq -r '[(.invocation_id // ""), (.state // "")] | @tsv' <<<"$rec")"
@@ -638,22 +1010,26 @@ accounting_admission_query() {
     local tk=0
     case "$state" in
       usage-committed)
-        tk="$(jq -r '.total_tokens // 0' <<<"$rec")"
-        if [[ ! "$tk" =~ ^[0-9]+$ ]]; then
-          any_corrupt=1
+        : # accounting-branch: B069
+        tk="$(jq -r '.total_tokens' <<<"$rec")"
+        if (( tk > ACCOUNTING_MAX_EXACT_TOKENS - total )); then
+          any_corrupt=1 # accounting-branch: B068
           continue
         fi
         total=$((total + tk))
         ;;
       started)
+        : # accounting-branch: B070
         open_json="$(jq -c --arg id "$id" '. + [$id]' <<<"$open_json")"
         open_count=$((open_count + 1))
         ;;
       usage-unknown)
+        : # accounting-branch: B071
         unknown_json="$(jq -c --arg id "$id" '. + [$id]' <<<"$unknown_json")"
         unknown_count=$((unknown_count + 1))
         ;;
       *)
+        : # accounting-branch: B072
         any_corrupt=1
         continue
         ;;
@@ -663,36 +1039,63 @@ accounting_admission_query() {
       '. + [{id:$id, state:$state, total_tokens:$tk}]' <<<"$scan_json")"
   done
 
-  local sorted digest
+  local sorted digest ids_sorted
   sorted="$(jq -c 'sort_by(.id)' <<<"$scan_json")"
-  digest="$(_accounting_sha256 "$sorted")" || digest=""
+  ids_sorted="$(jq -c '[.[].id] | sort' <<<"$scan_json")"
+  if ! digest="$(_accounting_sha256 "$sorted")" || [[ -z "$digest" ]]; then
+    echo "accounting_admission_query: cannot compute source digest for issue ${issue}" >&2
+    _accounting_unlock _lock_fd
+    _accounting_unavailable_json
+    return 1
+  fi
 
   local status
   if [[ "$any_corrupt" -eq 1 ]]; then
-    status="corrupt"
+    status="corrupt" # accounting-branch: B052
   elif [[ "$unknown_count" -gt 0 ]]; then
-    status="usage-unknown"
+    status="usage-unknown" # accounting-branch: B053
   elif [[ "$open_count" -gt 0 ]]; then
-    status="incomplete"
+    status="incomplete" # accounting-branch: B054
   else
-    status="complete"
+    status="complete" # accounting-branch: B055
   fi
 
   # Rebuild the projection cache when missing, corrupt, or digest-stale.
   local proj_file="${dir}/projection.json" need_rebuild=1
   if [[ -f "$proj_file" && ! -L "$proj_file" ]]; then
-    local existing_digest
-    existing_digest="$(jq -r '.digest // ""' "$proj_file" 2>/dev/null)"
-    [[ -n "$existing_digest" && "$existing_digest" == "$digest" ]] && need_rebuild=0
+    local projection_raw
+    if ! projection_raw="$(cat "$proj_file" 2>/dev/null)"; then
+      echo "accounting_admission_query: cannot read projection for issue ${issue}" >&2
+      _accounting_unlock _lock_fd
+      _accounting_unavailable_json
+      return 1
+    fi
+    if jq -e \
+      --argjson sv "$ACCOUNTING_SCHEMA_VERSION" \
+      --argjson total "$total" \
+      --argjson ids "$ids_sorted" \
+      --arg digest "$digest" '
+        type == "object"
+        and .schema_version == $sv
+        and .total_tokens == $total
+        and .source_invocation_ids == $ids
+        and .digest == $digest
+      ' <<<"$projection_raw" >/dev/null 2>&1; then
+      need_rebuild=0 # accounting-branch: B056
+    fi
   fi
-  if [[ "$need_rebuild" -eq 1 && -n "$digest" ]]; then
-    local ids_sorted projection
-    ids_sorted="$(jq -c '[.[].id] | sort' <<<"$scan_json")"
+  if [[ "$need_rebuild" -eq 1 ]]; then
+    local projection # accounting-branch: B057
     projection="$(jq -nc \
       --argjson sv "$ACCOUNTING_SCHEMA_VERSION" --argjson total "$total" \
       --argjson ids "$ids_sorted" --arg digest "$digest" \
       '{schema_version:$sv, total_tokens:$total, source_invocation_ids:$ids, digest:$digest}')"
-    [[ -n "$projection" ]] && _accounting_write_atomic "$dir" "$proj_file" "$projection"
+    if [[ -z "$projection" ]] || ! _accounting_write_atomic "$dir" "$proj_file" "$projection"; then
+      echo "accounting_admission_query: failed to rebuild projection for issue ${issue}" >&2
+      _accounting_unlock _lock_fd
+      _accounting_unavailable_json
+      return 1 # accounting-branch: B058
+    fi
   fi
 
   local result

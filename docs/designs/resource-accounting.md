@@ -36,8 +36,10 @@ One atomic JSON document per invocation, no cursors:
 <state_dir>/accounting/<issue>/projection.json   (optional, rebuildable cache)
 ```
 
-- Writes: `mktemp` in the same directory + `mv -f` (the INV-135 idiom — never
-  `mktemp -t`/tmpdir, so the rename stays on one filesystem).
+- Writes: `mktemp` in the same directory, write + sync the temporary file,
+  `mv -fT` into place, then sync the parent-directory filesystem. The
+  no-target-directory rename both stays on one filesystem and rejects a
+  directory target instead of moving the record inside it.
 - All mutation (`accounting_start`, `accounting_commit_usage`,
   `accounting_commit_unknown`, `accounting_reconcile`, `accounting_ack_unknown`)
   and query happen under one exclusive `flock` on `<issue>/.lock`
@@ -77,7 +79,7 @@ enumeration).
 
 ```
 started ──► usage-committed   (terminal)
-   └──────► usage-unknown      (terminal, ONLY via explicit accounting_commit_unknown)
+   └──────► usage-unknown      (terminal, via explicit commit or proven-dead reconcile)
 ```
 
 - A live `started` record is query-state `incomplete` — never sticky, never
@@ -90,14 +92,18 @@ started ──► usage-committed   (terminal)
 
 `accounting_commit_usage <issue> <invocation_id> <total> [input|-] [output|-]`:
 
-- No existing record for `invocation_id` → write `usage-committed`, rc 0.
+- A valid existing `started` record is required; a missing, malformed, or
+  tuple-mismatched record is rejected without synthesizing terminal history.
 - Existing terminal record, byte-identical payload → rc 0, **no write**
   (idempotent replay/restart).
 - Existing terminal record, differing payload → rc≠0, no mutation, loud
   stderr (never silently altered).
-- Any write failure (lock timeout, disk full, tmp/rename failure) → rc≠0.
-  The rename is the durability boundary (fsync-equivalent via `mv` on the
-  same filesystem) — no swallow-all here, unlike `metrics_emit`.
+- Counts use canonical decimal spelling and are bounded at
+  `9007199254740991`, the largest integer represented exactly by the JSON
+  tooling. A full-scan sum beyond that bound reports `corrupt`, never wraps.
+- Any write failure (lock timeout, disk full, temporary-file write/sync,
+  no-target-directory rename, or parent-directory sync) → rc≠0. No failure
+  is swallowed here, unlike `metrics_emit`.
 
 ## D6 — Reconciliation (proof-of-death)
 
@@ -107,8 +113,9 @@ owning wrapper dead for that `run_id`:
 
 - the run-id sidecar (`issue-<N>.run-id`) now names a DIFFERENT run_id
   (superseded), OR
-- the lease's recorded `pid` is no longer alive (`kill -0` fails) on the
-  execution host.
+- the validated run-id sidecar and progress lease name the same current run,
+  and that lease's validated `pid` is no longer alive (`kill -0` fails) on
+  the execution host.
 
 An issue being closed is **not** proof — closing performs no accounting
 mutation. `accounting_ack_unknown <issue> <invocation_id...>` is an explicit,
@@ -157,7 +164,8 @@ Every function: rc 0 on success, rc≠0 loud on failure, safe under
 An issue accumulates tens of invocations across its dev+review lifetime, not
 millions. Per-invocation atomic files + a per-issue flock + full-scan query
 is the simplest shape that is crash-consistent by construction (a crash mid
-`accounting_commit_usage` leaves either the old tmp file — reaped on next
-`mktemp` collision-avoidance — or nothing; never a half-written record). A
-cursor/checkpoint design adds a second, cursor-vs-data consistency problem
+`accounting_commit_usage` leaves either the prior authoritative file or the
+complete renamed replacement, never a torn record; an orphan `.acct.*`
+temporary file can remain before rename but is outside the `*.json` scan).
+A cursor/checkpoint design adds a second, cursor-vs-data consistency problem
 this scale doesn't need.
