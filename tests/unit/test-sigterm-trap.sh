@@ -201,7 +201,7 @@ fi
 # Sets globals: GH_LOG (recorded gh argv), STDERR_LOG (wrapper log output),
 # CALL_COUNT (times chp_pr_list was invoked), SLEEP_COUNT (times sleep ran).
 run_retry_cleanup() {
-  local label="$1" received_sigterm="$2" behavior="$3"
+  local label="$1" received_sigterm="$2" behavior="$3" token_eval_rc="${4:-0}"
   local record="$TMPROOT/gh-${label}.log"
   local stderr_log="$TMPROOT/stderr-${label}.log"
   local call_count_file="$TMPROOT/calls-${label}.log"
@@ -224,7 +224,9 @@ run_retry_cleanup() {
   CALL_COUNT_FILE="$call_count_file" \
   SLEEP_COUNT_FILE="$sleep_count_file" \
   PR_LIST_BEHAVIOR="$behavior" \
+  TOKEN_EVAL_RC="$token_eval_rc" \
   AGENT_RAN="true" \
+  TOKEN_BUDGET_LAUNCH_REFUSED="false" \
   ISSUE_NUMBER="77" \
   REPO="acme/widget" \
   PID_FILE="/dev/null" \
@@ -246,7 +248,18 @@ run_retry_cleanup() {
       [ -n \"\$3\" ] && args+=(--add-label \"\$3\")
       echo \"GH issue edit \$1 --repo \$REPO \${args[*]}\" >> \"\$GH_RECORD\"
     }
-    terminal_intent_cleanup_transition() { itp_transition_state \"\$1\" \"\$3\" \"\$4\"; }
+    terminal_intent_cleanup_transition() {
+      echo \"TERMINAL-CLEANUP \$*\" >> \"\$GH_RECORD\"
+      if [[ \"\$TOKEN_EVAL_RC\" -eq 10 ]]; then
+        itp_transition_state \"\$1\" \"\$3\" stalled
+      else
+        itp_transition_state \"\$1\" \"\$3\" \"\$4\"
+      fi
+    }
+    _token_dev_evaluate_cleanup() {
+      echo \"TOKEN-EVAL rc=\$TOKEN_EVAL_RC\" >> \"\$GH_RECORD\"
+      return \"\$TOKEN_EVAL_RC\"
+    }
     drain_agent_pr_create() { return 0; }
     drain_agent_bot_triggers() { echo \"BOT-TRIGGER-DRAIN \$1\" >> \"\$GH_RECORD\"; return 0; }
     rearm_gh_resolution() { :; }
@@ -348,6 +361,21 @@ run_retry_cleanup "500-05" 0 "fail,pr"
 assert_eq "TC-500-05 exactly 1 chp_pr_list call (no SIGTERM ⇒ no retry)" "1" "$CALL_COUNT"
 assert_eq "TC-500-05 no sleep" "0" "$SLEEP_COUNT"
 assert_contains "TC-500-05 falls through to pending-dev" \
+  "--add-label pending-dev" "$GH_LOG"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- TC-TOKENBUDGET-050: UNKNOWN-defer still routes a durable hard violation ---"
+# ---------------------------------------------------------------------------
+run_retry_cleanup "token-budget-unknown" 1 "fail,fail" 10
+
+assert_contains "TC-TOKENBUDGET-050 evaluates budgets on UNKNOWN-defer" \
+  "TOKEN-EVAL rc=10" "$GH_LOG"
+assert_contains "TC-TOKENBUDGET-050 invokes terminal cleanup routing" \
+  "TERMINAL-CLEANUP 77 in-progress in-progress pending-dev" "$GH_LOG"
+assert_contains "TC-TOKENBUDGET-050 converges to stalled" \
+  "--add-label stalled" "$GH_LOG"
+assert_not_contains "TC-TOKENBUDGET-050 does not resurrect pending-dev" \
   "--add-label pending-dev" "$GH_LOG"
 
 # ---------------------------------------------------------------------------

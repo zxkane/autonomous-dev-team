@@ -13,11 +13,14 @@ metrics value back.
 > `token_usage` lines are a best-effort, swallow-all, 90-day-pruned MIRROR for
 > dashboards/reports — nothing a hard gate can be built on. The authoritative,
 > crash-consistent token-accounting store is **`lib-accounting.sh`**
-> ([INV-139](invariants.md#inv-139-the-resource-accounting-store-lib-accountingsh-is-a-separate-mandatory-lock-crash-consistent-authority--metrics_emitmetrics_prune-remain-byte-unchanged-and-provably-cannot-reach-it-and-the-store-is-inert-zero-production-call-sites-until-a-future-issue-wires-enforcement)),
+> ([INV-139](invariants.md#inv-139-the-resource-accounting-store-lib-accountingsh-is-a-separate-mandatory-lock-crash-consistent-authority-metrics_emitmetrics_prune-remain-byte-unchanged-and-provably-cannot-reach-it)),
 > a wholly separate library owning `<state_dir>/accounting/<issue>/` — a
 > SIBLING directory this lane's `metrics_prune` provably never reaches. It is
-> inert (no production call sites) as of INV-139; a future admission gate is
-> its intended consumer.
+> consumed by the INV-141 token-budget gates through `lib-token-budget.sh`.
+> The two stores remain separate: strict numeric ingest reuses the unchanged
+> `metrics_parse_tokens` parser, but no enforcement decision reads
+> `metrics.jsonl`, and no accounting failure changes INV-70's swallow-all
+> `metrics_emit`/`metrics_prune` behavior.
 
 ## Storage
 

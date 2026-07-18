@@ -76,6 +76,16 @@ for _req in REPO REPO_OWNER PROJECT_ID PROJECT_DIR; do
 done
 unset _req
 
+# [INV-141] Token-budget enforcement. All three libraries are side-effect free
+# when sourced; with budgets unset token_admission_gate returns before store or
+# provider I/O. Source them before lib-dispatch so its standalone-consumer
+# fallback sees the gate already loaded.
+# shellcheck source=lib-accounting.sh
+source "${LIB_DIR}/lib-accounting.sh"
+# shellcheck source=lib-terminal-control.sh
+source "${LIB_DIR}/lib-terminal-control.sh"
+# shellcheck source=lib-token-budget.sh
+source "${LIB_DIR}/lib-token-budget.sh"
 # shellcheck source=lib-dispatch.sh
 source "${LIB_DIR}/lib-dispatch.sh"
 
@@ -122,6 +132,14 @@ source "${LIB_DIR}/lib-auth.sh"
 # post-source `: "${PROJECT_DIR:?}"` guard is needed here.
 
 log() { echo "[dispatcher-tick] $(date -u +%H:%M:%S) $*"; }
+
+# Refuse invalid token-budget configuration before selectors or label writes.
+# The validator prints directly to stderr so command-substitution callers can
+# never receive a diagnostic on stdout.
+if ! token_budget_validate_config; then
+  echo "[dispatcher-tick] FATAL: token-budget configuration is invalid. Fix autonomous.conf before the next tick." >&2
+  exit 1
+fi
 
 # Validate EXECUTION_BACKEND ONCE upfront, before any label transitions.
 # H1 (PR-9 review): if dispatch() returned 1 from inside a step body, the
@@ -405,6 +423,14 @@ for i in $(seq 0 $((new_count - 1))); do
     continue
   fi
 
+  _token_gate_rc=0
+  token_admission_gate "$issue_num" "" "dev-new" || _token_gate_rc=$?
+  if [ "$_token_gate_rc" -eq 10 ]; then
+    continue
+  elif [ "$_token_gate_rc" -ne 0 ]; then
+    exit "$_token_gate_rc"
+  fi
+
   log "  dispatching dev-new for issue #${issue_num}"
   label_swap "$issue_num" "" "in-progress"
   # [INV-70] Metrics: the issue is first picked up for autonomous work — the
@@ -506,6 +532,14 @@ for i in $(seq 0 $((pr_count - 1))); do
     continue
   fi
 
+  _token_gate_rc=0
+  token_admission_gate "$issue_num" "pending-review" "review" || _token_gate_rc=$?
+  if [ "$_token_gate_rc" -eq 10 ]; then
+    continue
+  elif [ "$_token_gate_rc" -ne 0 ]; then
+    exit "$_token_gate_rc"
+  fi
+
   log "  dispatching review for issue #${issue_num}"
   label_swap "$issue_num" "pending-review" "reviewing"
   post_dispatch_token "$issue_num" "review"
@@ -580,9 +614,13 @@ for i in $(seq 0 $((pd_count - 1))); do
   # would loop the same review against the same code every tick. The
   # helper keeps such issues in pending-dev with an idempotent
   # stale-verdict notice; only NEW commits or first-review issues flip.
-  if handle_pending_dev_pr_exists "$issue_num"; then
+  _pending_pr_route_rc=0
+  handle_pending_dev_pr_exists "$issue_num" || _pending_pr_route_rc=$?
+  if [ "$_pending_pr_route_rc" -eq 0 ]; then
     JUST_DISPATCHED+=("$issue_num")
     continue
+  elif [ "$_pending_pr_route_rc" -ne 1 ]; then
+    exit "$_pending_pr_route_rc"
   fi
 
   session_id=$(extract_dev_session_id "$issue_num")
@@ -611,6 +649,13 @@ for i in $(seq 0 $((pd_count - 1))); do
         # Step-5 protection for the concurrent winner — see the Step 2 comment.
         JUST_DISPATCHED+=("$issue_num")
         continue
+      fi
+      _token_gate_rc=0
+      token_admission_gate "$issue_num" "pending-dev" "dev-new" || _token_gate_rc=$?
+      if [ "$_token_gate_rc" -eq 10 ]; then
+        continue
+      elif [ "$_token_gate_rc" -ne 0 ]; then
+        exit "$_token_gate_rc"
       fi
       log "  issue #${issue_num} session ${session_id} hit prompt_too_long — clearing for fresh dispatch"
       notice_marker="INV-12-prompt-too-long:${session_id}"
@@ -690,7 +735,12 @@ for i in $(seq 0 $((pd_count - 1))); do
     #   - flips back to pending-review (non-substantive review failure), OR
     #   - mints a fresh dev-new session via PTL pattern (substantive failure).
     # See docs/pipeline/dispatcher-flow.md § Step 4b.5.1 and INV-35.
-    handle_completed_session_routing "$issue_num" "$session_id" "$_session_end_iso"
+    _completed_route_rc=0
+    handle_completed_session_routing "$issue_num" "$session_id" "$_session_end_iso" \
+      || _completed_route_rc=$?
+    if [ "$_completed_route_rc" -ne 0 ]; then
+      exit "$_completed_route_rc"
+    fi
     JUST_DISPATCHED+=("$issue_num")
     continue
   fi
@@ -701,6 +751,14 @@ for i in $(seq 0 $((pd_count - 1))); do
     # Step-5 protection for the concurrent winner — see the Step 2 comment.
     JUST_DISPATCHED+=("$issue_num")
     continue
+  fi
+
+  _token_gate_rc=0
+  token_admission_gate "$issue_num" "pending-dev" "dev-resume" || _token_gate_rc=$?
+  if [ "$_token_gate_rc" -eq 10 ]; then
+    continue
+  elif [ "$_token_gate_rc" -ne 0 ]; then
+    exit "$_token_gate_rc"
   fi
 
   log "  dispatching dev-resume for issue #${issue_num} (session: ${session_id:-<none>})"
@@ -899,7 +957,8 @@ for i in $(seq 0 $((cand_count - 1))); do
 
     itp_post_comment "$issue_num" \
       "Dev process still alive but PR #${pr_num} is ready (all CI checks passed, PR inactive ${idle_seconds}s, no agent progress for ${snap_age}s). ${kill_note}. Moving to pending-review."
-    label_swap "$issue_num" "in-progress" "pending-review"
+    terminal_intent_cleanup_transition "$issue_num" "in-progress" "in-progress" "pending-review" \
+      || { log "  token-budget terminal recovery deferred for issue #${issue_num}"; continue; }
 
   else
     # DEAD branch — Step 5b.
@@ -991,7 +1050,48 @@ for i in $(seq 0 $((cand_count - 1))); do
       esac
     fi
 
+    _token_pending_rc=0
     if [ "$kind" = "issue" ]; then
+      token_budget_recover_pending_intent "$issue_num" dev-wrapper \
+        || _token_pending_rc=$?
+      _token_pending_owner="in-progress"
+    else
+      token_budget_recover_pending_intent "$issue_num" review-wrapper \
+        || _token_pending_rc=$?
+      _token_pending_owner="reviewing"
+    fi
+    if [ "$_token_pending_rc" -eq 10 ]; then
+      terminal_intent_cleanup_transition "$issue_num" \
+        "$_token_pending_owner" "$_token_pending_owner" "pending-dev" \
+        || { log "  token-budget pending-intent recovery deferred for issue #${issue_num}"; continue; }
+      continue
+    elif [ "$_token_pending_rc" -ne 0 ]; then
+      log "  token-budget pending-intent read/write unavailable for issue #${issue_num}; preserving ${_token_pending_owner}"
+      continue
+    fi
+
+    if [ "$kind" = "issue" ]; then
+      # A hard per-invocation budget without a recoverable decision must distinguish
+      # an accounting-start refusal (retry after repair) from a possible
+      # triple-persistence terminal failure (fail closed). The exact self-authored
+      # refusal marker is accepted only after this attempt's dispatch token.
+      if [[ -n "${AGENT_TOKEN_BUDGET+x}" ]] \
+          && [[ "$(token_budget_effective_mode)" == "hard" ]]; then
+        _token_launch_refusal_rc=0
+        token_budget_recent_launch_refusal "$issue_num" dev \
+          || _token_launch_refusal_rc=$?
+        if [ "$_token_launch_refusal_rc" -eq 0 ]; then
+          itp_post_comment "$issue_num" \
+            "Dev launch was refused by strict token accounting. Moving to pending-dev so the repaired accounting store can retry the launch." \
+            || log "  token-budget dev launch-refusal retry notice failed for issue #${issue_num}"
+          terminal_intent_cleanup_transition "$issue_num" "in-progress" "in-progress" "pending-dev" \
+            || { log "  token-budget dev launch-refusal recovery deferred for issue #${issue_num}"; continue; }
+          continue
+        fi
+        log "  hard invocation-budget recovery has no durable generation for issue #${issue_num}; preserving in-progress"
+        continue
+      fi
+
       # DEAD + in-progress: branch on whether a PR exists, and if it does,
       # branch again on whether its HEAD has new commits since the last
       # review trailer ([INV-04], [INV-07]).
@@ -1033,7 +1133,8 @@ for i in $(seq 0 $((cand_count - 1))); do
             "Task appears to have crashed (no PR found). Moving to pending-dev for retry."
         fi
         unset _env_summary
-        label_swap "$issue_num" "in-progress" "pending-dev"
+        terminal_intent_cleanup_transition "$issue_num" "in-progress" "in-progress" "pending-dev" \
+          || { log "  token-budget terminal recovery deferred for issue #${issue_num}"; continue; }
         continue
       fi
 
@@ -1046,13 +1147,15 @@ for i in $(seq 0 $((cand_count - 1))); do
         # "crashed" / "process not found" so Step 4a doesn't count this.)
         itp_post_comment "$issue_num" \
           "Dev process exited (no new commits since last review at \`${last_head}\`). Moving to pending-dev for retry."
-        label_swap "$issue_num" "in-progress" "pending-dev"
+        terminal_intent_cleanup_transition "$issue_num" "in-progress" "in-progress" "pending-dev" \
+          || { log "  token-budget terminal recovery deferred for issue #${issue_num}"; continue; }
       else
         # PR has new commits OR no prior trailer — let review assess
         # ([INV-07] empty-trailer fallthrough).
         itp_post_comment "$issue_num" \
           "Dev process exited (PR found). Moving to pending-review for assessment."
-        label_swap "$issue_num" "in-progress" "pending-review"
+        terminal_intent_cleanup_transition "$issue_num" "in-progress" "in-progress" "pending-review" \
+          || { log "  token-budget terminal recovery deferred for issue #${issue_num}"; continue; }
       fi
     else
       # DEAD + reviewing: review wrapper appears to have crashed.
@@ -1073,6 +1176,52 @@ for i in $(seq 0 $((cand_count - 1))); do
         echo "INFO: issue ${issue_num} review wrapper pid_alive miss but PR-state signal positive; deferring crash declaration (#111 INV-24)" >&2
         continue
       fi
+      _stale_review_verdict=none
+      _stale_review_cause=""
+      _stale_review_cutoff=""
+      _stale_review_cutoff_rc=0
+      _stale_review_cutoff="$(token_budget_latest_dispatch_cutoff "$issue_num" review)" \
+        || _stale_review_cutoff_rc=$?
+      if [ "$_stale_review_cutoff_rc" -eq 0 ]; then
+        classify_recent_review_verdict "$issue_num" "$_stale_review_cutoff" \
+          _stale_review_verdict _stale_review_cause
+      else
+        log "  no trusted current-generation review dispatch cutoff for issue #${issue_num}; ignoring historical token-budget retry trailers"
+      fi
+      if [ "$_stale_review_verdict" = "failed-non-substantive" ] \
+          && { [ "$_stale_review_cause" = "token-budget-unavailable" ] \
+               || [ "$_stale_review_cause" = "token-budget-launch-refused" ]; }; then
+        itp_post_comment "$issue_num" \
+          "Review process exited after a token-budget ${_stale_review_cause#token-budget-}. Moving to pending-review so accounting and projection gates are retried without dispatching development."
+        terminal_intent_cleanup_transition "$issue_num" "reviewing" "reviewing" "pending-review" \
+          || { log "  token-budget review-retry recovery deferred for issue #${issue_num}"; continue; }
+        continue
+      fi
+
+      # After explicit review retry classifications, a hard per-invocation
+      # budget with no durable generation remains irreducibly uncertain.
+      # Preserve reviewing rather than launch another member; changing or
+      # unsetting AGENT_TOKEN_BUDGET explicitly re-arms legacy recovery.
+      if [[ -n "${AGENT_TOKEN_BUDGET+x}" ]] \
+          && [[ "$(token_budget_effective_mode)" == "hard" ]]; then
+        log "  hard invocation-budget recovery has no durable generation for issue #${issue_num}; preserving reviewing"
+        continue
+      fi
+
+      # Accounting-start refusal and unavailable-hold paths deliberately leave
+      # `reviewing` untouched. If their code-host trailer/transition also
+      # failed, hard-mode budgeting is the remaining retry classification:
+      # retry review, while still allowing a live INV-140 intent to redirect
+      # this cleanup to stalled.
+      if token_budget_enabled \
+          && [[ "$(token_budget_effective_mode)" == "hard" ]]; then
+        itp_post_comment "$issue_num" \
+          "Review process exited while token budgeting was active. Moving to pending-review so accounting and projection gates are retried before any development dispatch."
+        terminal_intent_cleanup_transition "$issue_num" "reviewing" "reviewing" "pending-review" \
+          || { log "  token-budget review retry recovery deferred for issue #${issue_num}"; continue; }
+        continue
+      fi
+
       # [INV-70] Metrics: dispatcher declared a review wrapper DEAD. Class
       # false-stall (the review_near_success cross-check above already cleared).
       if declare -F metrics_emit >/dev/null 2>&1; then
@@ -1091,7 +1240,8 @@ for i in $(seq 0 $((cand_count - 1))); do
           "Review process appears to have crashed. Moving to pending-dev for retry."
       fi
       unset _env_summary
-      label_swap "$issue_num" "reviewing" "pending-dev"
+      terminal_intent_cleanup_transition "$issue_num" "reviewing" "reviewing" "pending-dev" \
+        || { log "  token-budget terminal recovery deferred for issue #${issue_num}"; continue; }
     fi
   fi
 done

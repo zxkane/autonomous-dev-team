@@ -141,15 +141,17 @@ echo "=== TC-MG-SRC-12: emit_verdict_trailer grew by exactly 2 (gate's two block
 # wait + the max-waits substantive FAIL) → 13; the INV-134 CI-rollup gate
 # (issue #489) adds four (head-changed non-substantive + failed-check
 # substantive + awaiting-ci/unavailable non-substantive wait + the wait-max
-# substantive give-up) → 17. All sit OUTSIDE the per-agent collection loop.
+# substantive give-up) → 17; INV-141 adds three non-substantive token-budget
+# retry trailers (two launch-refused sites + unavailable hold) → 20. All sit
+# OUTSIDE the per-agent collection loop.
 #
 # [Lane-GC PR-3 / INV-112] The crash-trap call site (inside cleanup()) is now
 # wrapped as `_teardown_call emit_verdict_trailer …` (bounded network call) —
 # the regex tolerates an optional `_teardown_call ` prefix so the call-SITE
-# count stays semantically 17 even though one site's literal text changed.
-EMIT_COUNT=$(grep -cE '^\s*(_teardown_call )?emit_verdict_trailer ' "$WRAPPER")
-assert_eq "TC-MG-SRC-12 emit_verdict_trailer call count is 17 (6 existing + 2 INV-44 gate + 2 INV-46 E2E gate + 1 INV-64 smoke abort + 2 INV-79 bot-review gate + 4 INV-134 CI-rollup gate)" \
-  "17" "$EMIT_COUNT"
+# count stays semantic even though one site's literal text changed.
+EMIT_COUNT=$(grep -cE '^\s*(if ! )?(_teardown_call )?emit_verdict_trailer ' "$WRAPPER")
+assert_eq "TC-MG-SRC-12 emit_verdict_trailer call count is 20 (17 existing + 3 INV-141 token-budget retry trailers)" \
+  "20" "$EMIT_COUNT"
 
 # ---------------------------------------------------------------------------
 echo ""

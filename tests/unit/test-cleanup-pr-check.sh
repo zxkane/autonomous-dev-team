@@ -165,6 +165,7 @@ bash -c "
     echo \"GH issue edit \$1 --repo \$REPO \${args[*]}\" >> \"\$GH_RECORD\"
   }
   terminal_intent_cleanup_transition() { itp_transition_state \"\$1\" \"\$3\" \"\$4\"; }
+  _token_dev_evaluate_cleanup() { return 0; }
   drain_agent_pr_create() { return 0; }
   drain_agent_bot_triggers() { echo \"BOT-TRIGGER-DRAIN \$1\" >> \"\$GH_RECORD\"; return 0; }
   rearm_gh_resolution() { :; }

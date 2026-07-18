@@ -757,6 +757,7 @@ _build_harness() {
     echo 'is_within_grace_period() { return 1; }'
     echo 'itp_post_comment() { POSTED=$((POSTED + 1)); POSTED_BODY="$2"; }'
     echo 'label_swap() { LABEL_SWAPS=$((LABEL_SWAPS + 1)); }'
+    echo 'terminal_intent_cleanup_transition() { label_swap "$1" "$3" "$4"; }'
     echo 'pid_alive() { return 0; }'
     echo "get_pid() { echo '${get_pid_after_dispatch}'; }"
     echo 'fetch_pr_for_issue() { echo "{\"number\":77,\"updatedAt\":\"2020-01-01T00:00:00Z\"}"; }'
@@ -808,6 +809,7 @@ _build_harness_remote_cas() {
     echo 'is_within_grace_period() { return 1; }'
     echo 'itp_post_comment() { POSTED=$((POSTED + 1)); POSTED_BODY="$2"; }'
     echo 'label_swap() { LABEL_SWAPS=$((LABEL_SWAPS + 1)); }'
+    echo 'terminal_intent_cleanup_transition() { label_swap "$1" "$3" "$4"; }'
     echo 'pid_alive() { return 0; }'
     echo 'get_pid() { echo ""; }'
     echo 'fetch_pr_for_issue() { echo "{\"number\":77,\"updatedAt\":\"2020-01-01T00:00:00Z\"}"; }'

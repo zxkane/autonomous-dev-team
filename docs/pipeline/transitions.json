@@ -49,6 +49,19 @@
       "note": "Deps resolved per INV-11 (state includes MERGED)."
     },
     {
+      "id": "dispatch-token-budget-stall-new",
+      "from": "autonomous",
+      "to": "stalled",
+      "event": "token-budget-hard-admission-block",
+      "actor": "dispatcher",
+      "guards": ["only-autonomous-label", "token-budget-hard-admission-block"],
+      "actions": ["add-label:stalled", "comment:token-budget-stop-report"],
+      "code_site": "lib-token-budget.sh token_admission_gate(): hard cumulative equality/overshoot or fail-closed accounting status at the dev-new empty-owner site -> terminal intent + itp_transition_state with empty remove and stalled add",
+      "mermaid": "autonomous --> stalled: token-budget admission at cumulative cap or fail-closed history [INV-141]",
+      "inv_refs": ["INV-141", "INV-140"],
+      "note": "The dispatcher holds the dev-new ownership marker until the stalled transition and structured report complete. autonomous is retained. Projection unavailable blocks this tick without stalling."
+    },
+    {
       "id": "dev-trap-success-pr",
       "from": "in_progress",
       "to": "pending_review",
@@ -82,7 +95,7 @@
       "actor": "dispatcher",
       "guards": ["pid-alive", "pr-exists-for-issue", "ci-all-success", "pr-idle-5min"],
       "actions": ["sigterm-wrapper", "remove-label:in-progress", "add-label:pending-review", "comment:pr-ready-moving-to-review"],
-      "code_site": "dispatcher-tick.sh Step 5a: label_swap \"$issue_num\" \"in-progress\" \"pending-review\"",
+      "code_site": "dispatcher-tick.sh Step 5a: terminal_intent_cleanup_transition in-progress pending-review",
       "mermaid": "in_progress --> pending_review: Dispatcher Step 5a (ALIVE+PR ready, idle 5min, CI green) and wrapper trap converge (INV-15 PR-6)",
       "inv_refs": ["INV-09", "INV-10", "INV-15"],
       "note": "Convergent with the wrapper SIGTERM trap (RECEIVED_SIGTERM rewrite, PR-6)."
@@ -108,7 +121,7 @@
       "actor": "dispatcher",
       "guards": ["pid-dead", "pr-exists-for-issue", "head-differs-from-reviewed"],
       "actions": ["remove-label:in-progress", "add-label:pending-review", "comment:dev-exited-pr-found"],
-      "code_site": "dispatcher-tick.sh Step 5b: label_swap \"$issue_num\" \"in-progress\" \"pending-review\"",
+      "code_site": "dispatcher-tick.sh Step 5b: terminal_intent_cleanup_transition in-progress pending-review",
       "mermaid": "in_progress --> pending_review: Dispatcher Step 5b (DEAD+PR, new commits)",
       "inv_refs": ["INV-04", "INV-06", "INV-07", "INV-24"],
       "note": "current headRefOid != last Reviewed HEAD trailer."
@@ -121,7 +134,7 @@
       "actor": "dispatcher",
       "guards": ["pid-dead", "pr-exists-for-issue", "head-equals-reviewed"],
       "actions": ["remove-label:in-progress", "add-label:pending-dev", "comment:dev-exited-no-new-commits"],
-      "code_site": "dispatcher-tick.sh Step 5b: label_swap \"$issue_num\" \"in-progress\" \"pending-dev\"",
+      "code_site": "dispatcher-tick.sh Step 5b: terminal_intent_cleanup_transition in-progress pending-dev",
       "mermaid": "in_progress --> pending_dev: Dispatcher Step 5b (DEAD+PR, no new commits)",
       "inv_refs": ["INV-04", "INV-06", "INV-24"],
       "note": "current headRefOid == last Reviewed HEAD trailer."
@@ -134,7 +147,7 @@
       "actor": "dispatcher",
       "guards": ["pid-dead", "no-pr-for-issue", "no-near-success"],
       "actions": ["remove-label:in-progress", "add-label:pending-dev", "comment:crashed-no-pr"],
-      "code_site": "dispatcher-tick.sh Step 5b: label_swap \"$issue_num\" \"in-progress\" \"pending-dev\"",
+      "code_site": "dispatcher-tick.sh Step 5b: terminal_intent_cleanup_transition in-progress pending-dev",
       "mermaid": "in_progress --> pending_dev: Dispatcher Step 5b (DEAD, no PR)",
       "inv_refs": ["INV-06", "INV-24"],
       "note": "DEAD requires pid_alive miss AND no near-success PR signal AND no recent heartbeat (INV-24)."
@@ -290,7 +303,7 @@
       "actor": "dispatcher",
       "guards": ["pid-dead", "still-reviewing", "no-near-success"],
       "actions": ["remove-label:reviewing", "add-label:pending-dev", "comment:review-crashed"],
-      "code_site": "dispatcher-tick.sh Step 5b: label_swap \"$issue_num\" \"reviewing\" \"pending-dev\"",
+      "code_site": "dispatcher-tick.sh Step 5b: terminal_intent_cleanup_transition reviewing pending-dev",
       "mermaid": "reviewing --> pending_dev: Dispatcher Step 5b (DEAD reviewing)",
       "inv_refs": ["INV-24"],
       "note": "Same DEAD contract as the dev side (INV-24)."
@@ -608,6 +621,32 @@
       "note": "The check never resolved (stuck/misconfigured) after CI_ROLLUP_WAIT_MAX brokered waits on this HEAD. Substantive FAIL: gh pr review --request-changes + pending-dev, mirrors the INV-79 bot-gate give-up."
     },
     {
+      "id": "review-token-budget-projection-unavailable",
+      "from": "reviewing",
+      "to": "pending_review",
+      "event": "review-pass-but-token-projection-unavailable",
+      "actor": "review-wrapper",
+      "guards": ["verdict-pass", "pr-still-open", "token-budget-projection-unavailable"],
+      "actions": ["remove-label:reviewing", "add-label:pending-review", "comment:review-held-token-budget-unavailable"],
+      "code_site": "autonomous-review.sh token-budget issue gate: token_budget_evaluate_issue rc=20 immediately before approval -> itp_transition_state reviewing pending-review",
+      "mermaid": "reviewing --> pending_review: token-budget projection unavailable; hold approval and retry [INV-141]",
+      "inv_refs": ["INV-141", "INV-134"],
+      "note": "Hard mode only. The wrapper emits a durable failed-non-substantive token-budget-unavailable trailer before transition. No terminal intent, approval, merge, or crash verdict is emitted. RESULT_PARSED=true suppresses crash teardown; if the transition fails, dispatcher Step 5 recognizes the trailer and restores pending-review rather than routing to pending-dev."
+    },
+    {
+      "id": "dispatch-review-token-budget-retry",
+      "from": "reviewing",
+      "to": "pending_review",
+      "event": "dispatcher-step5b-token-budget-review-retry",
+      "actor": "dispatcher",
+      "guards": ["pid-dead", "still-reviewing", "no-near-success", "token-budget-review-retry"],
+      "actions": ["remove-label:reviewing", "add-label:pending-review", "comment:token-budget-review-retry"],
+      "code_site": "dispatcher-tick.sh Step 5b token-budget retry: terminal_intent_cleanup_transition reviewing pending-review",
+      "mermaid": "reviewing --> pending_review: token-budget launch refusal or unavailable-hold recovery [INV-141]",
+      "inv_refs": ["INV-141", "INV-140"],
+      "note": "A durable token-budget-launch-refused/token-budget-unavailable trailer survives later config removal. If both hold writes failed, active hard-mode budgeting supplies the fallback retry class. Terminal control lets any live hard intent override this retry to stalled."
+    },
+    {
       "id": "resource-terminal-intent-stall-pending-dev",
       "from": "pending_dev",
       "to": "stalled",
@@ -616,9 +655,9 @@
       "guards": ["resource-terminal-intent-live", "expected-owner-state-present", "terminal-control-not-already-stalled"],
       "actions": ["remove-label:pending-dev", "add-label:stalled"],
       "code_site": "lib-terminal-control.sh _terminal_control_transition_pending_dev(): itp_transition_state pending-dev stalled",
-      "mermaid": "pending_dev --> stalled: durable resource terminal intent [INV-140]",
-      "inv_refs": ["INV-140"],
-      "note": "Owner-aware terminal-control helper. The expected-state read prevents a stale actor from mutating labels; the transition itself is one atomic itp_transition_state call and retains autonomous."
+      "mermaid": "pending_dev --> stalled: durable resource terminal intent, including hard token-budget admission [INV-140/141]",
+      "inv_refs": ["INV-140", "INV-141"],
+      "note": "Owner-aware terminal-control helper. INV-141 writes a digest-derived issue intent when hard cumulative admission reaches equality or sees fail-closed history. The expected-state read prevents a stale actor from mutating labels; the transition itself is one atomic itp_transition_state call and retains autonomous."
     },
     {
       "id": "resource-terminal-intent-stall-pending-review",
@@ -629,9 +668,9 @@
       "guards": ["resource-terminal-intent-live", "expected-owner-state-present", "terminal-control-not-already-stalled"],
       "actions": ["remove-label:pending-review", "add-label:stalled"],
       "code_site": "lib-terminal-control.sh _terminal_control_transition_pending_review(): itp_transition_state pending-review stalled",
-      "mermaid": "pending_review --> stalled: durable resource terminal intent [INV-140]",
-      "inv_refs": ["INV-140"],
-      "note": "Owner-aware terminal-control helper. The expected-state read prevents a stale actor from mutating labels; the transition itself is one atomic itp_transition_state call and retains autonomous."
+      "mermaid": "pending_review --> stalled: durable resource terminal intent, including hard token-budget admission [INV-140/141]",
+      "inv_refs": ["INV-140", "INV-141"],
+      "note": "Owner-aware terminal-control helper. INV-141 writes a digest-derived issue intent when hard cumulative admission reaches equality or sees fail-closed history. The expected-state read prevents a stale actor from mutating labels; the transition itself is one atomic itp_transition_state call and retains autonomous."
     },
     {
       "id": "resource-terminal-intent-stall-in-progress",
@@ -642,9 +681,9 @@
       "guards": ["resource-terminal-intent-live", "expected-owner-state-present", "terminal-control-not-already-stalled"],
       "actions": ["remove-label:in-progress", "add-label:stalled", "comment:resource-terminal-intent-consume"],
       "code_site": "lib-terminal-control.sh _terminal_control_transition_in_progress(): itp_transition_state in-progress stalled",
-      "mermaid": "in_progress --> stalled: durable resource terminal intent overrides dev cleanup [INV-140]",
-      "inv_refs": ["INV-140"],
-      "note": "The dev cleanup trap resolves the durable intent before any pending-state write. It transitions first and consumes second, so a crash between them replays without resurrecting pending."
+      "mermaid": "in_progress --> stalled: hard token-budget intent overrides dev cleanup [INV-140/141]",
+      "inv_refs": ["INV-140", "INV-141"],
+      "note": "INV-141 writes an invocation-id or digest-derived issue intent after the completed dev launch. Invocation writes stage an accounting-backed recovery pointer and an exact whole-body trusted pending marker first; if provider writes fail, dispatcher Step 5 retries only that pinned hard decision and confirms its generation is live before terminal routing. The dev cleanup trap resolves a durable intent before any pending-state write, transitions first, and consumes second, so a crash between them replays without resurrecting pending."
     },
     {
       "id": "resource-terminal-intent-stall-reviewing",
@@ -655,9 +694,9 @@
       "guards": ["resource-terminal-intent-live", "expected-owner-state-present", "terminal-control-not-already-stalled"],
       "actions": ["remove-label:reviewing", "add-label:stalled", "comment:resource-terminal-intent-consume"],
       "code_site": "lib-terminal-control.sh _terminal_control_transition_reviewing(): itp_transition_state reviewing stalled",
-      "mermaid": "reviewing --> stalled: durable resource terminal intent overrides review cleanup [INV-140]",
-      "inv_refs": ["INV-140"],
-      "note": "The review cleanup trap resolves the durable intent before any pending-state write. It transitions first and consumes second, so a crash between them replays without resurrecting pending."
+      "mermaid": "reviewing --> stalled: hard token-budget intent overrides review routing [INV-140/141]",
+      "inv_refs": ["INV-140", "INV-141"],
+      "note": "INV-141 writes an invocation-id or digest-derived issue intent after verdict publication and explicitly invokes terminal_intent_cleanup_transition on the normal path. Invocation writes stage an accounting-backed recovery pointer and an exact whole-body trusted pending marker first; if provider writes fail, dispatcher Step 5 retries only that pinned hard decision and confirms its generation is live before terminal routing. The helper transitions first and consumes second, so a crash between them replays without resurrecting pending."
     },
     {
       "id": "hygiene-strip-residue-approved",

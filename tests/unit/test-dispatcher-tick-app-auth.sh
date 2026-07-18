@@ -30,6 +30,12 @@ LIB_ERROR_SRC="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-error.sh"
 # Both need to be stageable in the sandbox for the tick to run at all.
 LIB_AUTH_SRC="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-auth.sh"
 LIB_CODE_HOST_SRC="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-code-host.sh"
+# [INV-141] dispatcher-tick.sh sources the accounting, terminal-control, and
+# token-budget libraries before its scan loops. They are side-effect free in
+# this auth-only sandbox but must be present beside the copied tick script.
+LIB_ACCOUNTING_SRC="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-accounting.sh"
+LIB_TERMINAL_CONTROL_SRC="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-terminal-control.sh"
+LIB_TOKEN_BUDGET_SRC="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-token-budget.sh"
 # [INV-128] dispatcher-tick.sh now sources lib-liveness.sh (real, pure
 # helpers only — no I/O) right after lib-dispatch.sh. Auth tests don't
 # exercise Step 6, but the stub lib-dispatch.sh below must still define
@@ -93,6 +99,9 @@ cp "$LIB_ERROR_SRC" "$SANDBOX/lib-error.sh"
 # sources lib-auth.sh; lib-auth.sh sources lib-code-host.sh at module init.
 cp "$LIB_AUTH_SRC" "$SANDBOX/lib-auth.sh"
 cp "$LIB_CODE_HOST_SRC" "$SANDBOX/lib-code-host.sh"
+cp "$LIB_ACCOUNTING_SRC" "$SANDBOX/lib-accounting.sh"
+cp "$LIB_TERMINAL_CONTROL_SRC" "$SANDBOX/lib-terminal-control.sh"
+cp "$LIB_TOKEN_BUDGET_SRC" "$SANDBOX/lib-token-budget.sh"
 cp "$LIB_LIVENESS_SRC" "$SANDBOX/lib-liveness.sh"
 
 # Stub lib-dispatch.sh: provide every helper dispatcher-tick.sh expects, but

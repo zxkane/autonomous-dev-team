@@ -85,6 +85,8 @@ chmod +x "$STUB_DIR/gh"
 run_cleanup() {
   local label="$1" agent_ran="$2" issue_num="$3" want_exit="$4" mode="${5:-new}"
   local agent_cmd="${6-claude}" agent_dev_model="${7-sonnet}"
+  local token_launch_refused="${8:-false}"
+  local token_evaluate_rc="${9:-0}"
   local record="$TMPROOT/gh-${label}.log"
   local stderr_log="$TMPROOT/stderr-${label}.log"
   : > "$record"
@@ -93,6 +95,8 @@ run_cleanup() {
   PATH="$STUB_DIR:$PATH" \
   GH_RECORD="$record" \
   AGENT_RAN="$agent_ran" \
+  TOKEN_BUDGET_LAUNCH_REFUSED="$token_launch_refused" \
+  TOKEN_EVALUATE_RC="$token_evaluate_rc" \
   ISSUE_NUMBER="$issue_num" \
   REPO="acme/widget" \
   PID_FILE="/dev/null" \
@@ -130,7 +134,11 @@ run_cleanup() {
     }
     # This extraction harness does not source lib-terminal-control.sh. Model
     # the universal pre-#506 case: no live intent, exact normal delegation.
-    terminal_intent_cleanup_transition() { itp_transition_state \"\$1\" \"\$3\" \"\$4\"; }
+    terminal_intent_cleanup_transition() {
+      echo \"TERMINAL \$*\" >> \"\$GH_RECORD\"
+      itp_transition_state \"\$1\" \"\$3\" \"\$4\"
+    }
+    _token_dev_evaluate_cleanup() { return \"\$TOKEN_EVALUATE_RC\"; }
     $CLEANUP_FN
     (exit $want_exit); cleanup
   " 2>"$stderr_log"
@@ -166,6 +174,26 @@ assert_not_contains "no gh issue comment when ISSUE_NUMBER unset" \
   "GH issue comment" "$GH_LOG"
 assert_not_contains "no gh issue edit when ISSUE_NUMBER unset" \
   "GH issue edit" "$GH_LOG"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-TOKENBUDGET-050: hard accounting-start refusal preserves label ownership ==="
+# ---------------------------------------------------------------------------
+run_cleanup "token-refused" "false" "42" 1 "new" "claude" "sonnet" "true"
+
+assert_not_contains "token refusal posts no startup-failure comment" \
+  "GH issue comment" "$GH_LOG"
+assert_not_contains "token refusal performs no label mutation" \
+  "GH issue edit" "$GH_LOG"
+
+echo ""
+echo "=== TC-TOKENBUDGET-069: prior violation wins over later retry refusal ==="
+run_cleanup "token-prior-violation" "true" "42" 1 "resume" "claude" "sonnet" "true" 10
+
+assert_contains "durable prior violation still invokes terminal cleanup" \
+  "TERMINAL 42 in-progress in-progress pending-dev" "$GH_LOG"
+assert_contains "terminal cleanup performs the immediate owner transition" \
+  "GH issue edit 42" "$GH_LOG"
 
 # ---------------------------------------------------------------------------
 echo ""

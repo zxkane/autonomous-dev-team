@@ -240,6 +240,25 @@ AGENT_PERMISSION_MODE="auto"
 # see AGENT_REVIEW_TIMEOUT below.
 AGENT_TIMEOUT="4h"
 
+# Token budgets (INV-141, #506). Both budgets are UNSET by default, preserving
+# existing launch and dispatch behavior with no accounting-store reads.
+#
+# AGENT_TOKEN_BUDGET limits one dev attempt or one review fan-out member.
+# ISSUE_TOKEN_BUDGET limits cumulative committed dev + review usage for an issue.
+# Values must be positive base-10 integers; 0, empty, negative, and non-integer
+# values are configuration errors that refuse the affected launch/dispatch.
+#
+# TOKEN_BUDGET_MODE is `warn` or `hard`. When either budget is configured and
+# mode is unset, it defaults to `warn`. Warn mode posts one idempotent breadcrumb
+# and preserves routing. Hard mode allows the current invocation to finish, then
+# routes overshoot/unknown usage to stalled and blocks cumulative dispatch at
+# equality. Claude and codex currently expose accountable usage; hard mode
+# refuses kiro, agy, and other adapters without a metrics_parse_tokens format.
+#
+# AGENT_TOKEN_BUDGET=200000
+# ISSUE_TOKEN_BUDGET=1000000
+# TOKEN_BUDGET_MODE="warn"
+
 # Step 5a's agent-progress freshness threshold (DEV_PROGRESS_STALE_SECONDS,
 # INV-137, #485) is a FIXED constant (1800s) in lib-dispatch.sh — it is
 # deliberately NOT a conf knob here. Step 5a SIGTERMs a live dev wrapper only

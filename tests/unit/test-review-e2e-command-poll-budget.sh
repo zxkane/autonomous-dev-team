@@ -243,8 +243,8 @@ assert_grep "TC-RPB-REG-03 _aggregate_review_verdicts call unchanged (no INV-40 
 # the regex tolerates an optional `_teardown_call ` prefix so the call-SITE
 # count stays semantically 17 even though one site's literal text changed.
 EMIT_COUNT=$(grep -cE '^\s*(_teardown_call )?emit_verdict_trailer ' "$WRAPPER")
-assert_eq "TC-RPB-REG-04 emit_verdict_trailer call count is 17 (6 legacy + 2 INV-44 gate + 2 INV-46 E2E gate + 1 INV-64 smoke abort + 2 INV-79 bot-review gate + 4 INV-134 CI-rollup gate)" \
-  "17" "$EMIT_COUNT"
+assert_eq "TC-RPB-REG-04 emit_verdict_trailer call count is 19 (17 prior sites + INV-141 launch-refusal and unavailable-hold trailers)" \
+  "19" "$EMIT_COUNT"
 
 # ---------------------------------------------------------------------------
 echo ""

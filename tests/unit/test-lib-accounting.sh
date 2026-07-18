@@ -4,7 +4,7 @@
 # Covers lib-accounting.sh: identity construction (D3), strict idempotent
 # commit (D5), lifecycle states (D4), locked full-scan query + rebuildable
 # projection cache (D2), reconciliation proof-of-death (D6), and the
-# metrics-isolation + zero-production-call-site guards.
+# metrics isolation + production-ingress choke-point guards.
 # Test IDs: TC-RESOURCEACCOUNT-001..080.
 #
 # Isolation (tests/unit/README.md): every path this test touches is under a
@@ -828,14 +828,27 @@ assert_eq "TC-RESOURCEACCOUNT-060 accounting dir is a sibling of metrics.jsonl, 
 rm -rf "$ISO_WORK"
 
 # ---------------------------------------------------------------------------
-# Zero production call sites — TC-RESOURCEACCOUNT-070
+# Production call-site choke point — TC-RESOURCEACCOUNT-070
 # ---------------------------------------------------------------------------
-echo "== zero production call sites =="
+echo "== production accounting choke point =="
 
-PROD_HITS="$(grep -rlE 'accounting_(invocation_id|start|commit_usage|commit_unknown|reconcile|ack_unknown|admission_query)' \
-  "$PROJECT_ROOT/skills/autonomous-dispatcher/scripts" \
-  --include='*.sh' 2>/dev/null | grep -v 'lib-accounting\.sh$' || true)"
-assert_eq "TC-RESOURCEACCOUNT-070 no production script calls any accounting_* function" "" "$PROD_HITS"
+PROD_HITS="$(
+  while IFS= read -r candidate; do
+    if awk '
+      /^[[:space:]]*#/ { next }
+      /^[[:space:]]*(if[[:space:]]+![[:space:]]+)?accounting_(invocation_id|start|commit_usage|commit_unknown|reconcile|ack_unknown|admission_query)([[:space:]]|$)/ { found = 1 }
+      /\$\([[:space:]]*accounting_(invocation_id|start|commit_usage|commit_unknown|reconcile|ack_unknown|admission_query)([[:space:]]|$)/ { found = 1 }
+      END { exit(found ? 0 : 1) }
+    ' "$candidate"; then
+      printf '%s\n' "$candidate"
+    fi
+  done < <(
+    find "$PROJECT_ROOT/skills/autonomous-dispatcher/scripts" -type f -name '*.sh' \
+      ! -name 'lib-accounting.sh' -print | sort
+  )
+)"
+assert_eq "TC-RESOURCEACCOUNT-070 lib-token-budget is the sole production accounting consumer" \
+  "$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-token-budget.sh" "$PROD_HITS"
 
 # ---------------------------------------------------------------------------
 # Deterministic branch inventory — TC-RESOURCEACCOUNT-080

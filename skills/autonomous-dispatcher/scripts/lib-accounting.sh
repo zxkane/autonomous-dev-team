@@ -2,13 +2,13 @@
 # lib-accounting.sh — INV-139 crash-consistent token-accounting store
 # (issue #505, parent #450).
 #
-# This is the AUTHORITATIVE resource-accounting store the future admission
-# gate (#506) and terminal-control helpers (#515) will read. It is a
+# This is the AUTHORITATIVE resource-accounting store the token-budget
+# admission gate (#506) and terminal-control helpers (#515) read. It is a
 # deliberately SEPARATE library and storage directory from lib-metrics.sh:
 # metrics_emit's swallow-all, best-effort, 90-day-pruned JSONL log stays
 # exactly as-is (INV-70) — it is not durable enough to gate anything on.
-# This lib is INERT in production: nothing sources or calls it outside its
-# own tests as of this issue (grep-pinned — see test-lib-accounting.sh).
+# Production ingest and projection are centralized in lib-token-budget.sh.
+# Metrics remains an independent observe-only mirror.
 #
 # Storage model (D2): one atomic JSON document per invocation, no cursors.
 #   <accounting_dir>/<issue>/<invocation_id>.json   — one per invocation

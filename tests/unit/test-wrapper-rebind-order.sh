@@ -118,7 +118,8 @@ build_sandbox() {
   # resolve relative to SCRIPT_DIR=$sandbox. Mimics the per-project
   # symlink-vendor topology that real deployments use.
   for f in lib-error.sh lib-agent.sh lib-auth.sh lib-config.sh lib-review-bots.sh \
-           lib-review-verdict.sh gh-app-token.sh gh-with-token-refresh.sh; do
+           lib-review-verdict.sh lib-accounting.sh lib-token-budget.sh \
+           gh-app-token.sh gh-with-token-refresh.sh; do
     ln -sf "$SCRIPTS_DIR/$f" "$sandbox/$f"
   done
 

@@ -60,6 +60,23 @@ if ! declare -F itp_list_comments >/dev/null 2>&1; then
   unset _ld_self _ld_dir
 fi
 
+# [INV-141] Shared token-budget admission. Standalone lib-dispatch tests source
+# this file directly, so resolve the accounting and terminal dependencies here
+# as well as in dispatcher-tick.sh. Every source is inert.
+if ! declare -F token_admission_gate >/dev/null 2>&1; then
+  _ld_self="${BASH_SOURCE[0]:-$0}"
+  _ld_dir="$(cd "$(dirname "$(readlink -f "$_ld_self")")" && pwd 2>/dev/null)" || _ld_dir=""
+  if [ -n "$_ld_dir" ]; then
+    # shellcheck source=lib-accounting.sh
+    source "${_ld_dir}/lib-accounting.sh"
+    # shellcheck source=lib-terminal-control.sh
+    source "${_ld_dir}/lib-terminal-control.sh"
+    # shellcheck source=lib-token-budget.sh
+    source "${_ld_dir}/lib-token-budget.sh"
+  fi
+  unset _ld_self _ld_dir
+fi
+
 # [INV-87] Code-Host Provider dispatch (#282). `ci_is_green` (and, via
 # lib-pr-linkage.sh, the PR↔issue resolvers) route their innermost `gh pr *`
 # leaf through the `chp_*` shims (`chp_<verb>` → `chp_${CODE_HOST}_<verb>`)
@@ -1132,12 +1149,13 @@ _reset_session_log() {
 # INV-35: review-verdict classification for completed dev sessions.
 # ---------------------------------------------------------------------------
 #
-# classify_recent_review_verdict <issue_num> <session_end_iso> <verdict_var> <cause_var> [dev_actionable_var]
+# classify_recent_review_verdict <issue_num> <session_end_iso_or_cutoff> <verdict_var> <cause_var> [dev_actionable_var]
 #
 # Reads issue comments, finds the newest comment that:
 #   (a) was authored by ${BOT_LOGIN} (or matches the session-id-binding
 #       fallback when BOT_LOGIN is empty per the gh-api-user-403 pattern),
-#   (b) was created strictly after <session_end_iso>,
+#   (b) was created strictly after <session_end_iso>, or after the
+#       `<createdAt>\t<id>` token-budget dispatch cutoff,
 #   (c) has body containing a `<!-- review-verdict: ... -->` HTML-comment
 #       trailer — OR is a generic verdict comment without a trailer (legacy).
 #
@@ -1156,6 +1174,8 @@ _reset_session_log() {
 classify_recent_review_verdict() {
   local issue_num="$1"
   local session_end="$2"
+  local cutoff_ts="$session_end"
+  local cutoff_id=9007199254740991
   local verdict_var="$3"
   local cause_var="$4"
   # INV-92 (#298): optional 5th out-param. "${5:-}" is set -u-safe; the write
@@ -1167,6 +1187,18 @@ classify_recent_review_verdict() {
   # Default the dev-actionable out-var to "true" (absent token ⇒ today's
   # behavior). Guarded so a 4-arg caller (empty name) is a no-op.
   [ -n "$_da_var" ] && printf -v "$_da_var" '%s' "true"
+
+  # Legacy callers pass an ISO timestamp and retain strict createdAt `>`
+  # semantics. Token-budget Step 5 passes a timestamp+comment-id tuple so a
+  # valid retry trailer posted in the same GitHub timestamp second as its
+  # dispatch token is ordered by the monotonic comment id.
+  if [[ "$session_end" == *$'\t'* ]]; then
+    cutoff_ts="${session_end%%$'\t'*}"
+    cutoff_id="${session_end#*$'\t'}"
+    if [[ -z "$cutoff_ts" || ! "$cutoff_id" =~ ^[0-9]+$ ]]; then
+      return 0
+    fi
+  fi
 
   # Build the actor predicate. When BOT_LOGIN is empty (the gh-api-user-403
   # fallback), drop actor-binding and rely on FALLBACK_SESSION_ID embedded
@@ -1231,15 +1263,41 @@ classify_recent_review_verdict() {
     fi
   fi
 
-  # Pull the newest qualifying comment body. Strict `>` on createdAt
-  # excludes a comment timestamped exactly at session end (rare, but the
-  # design pins this for determinism). `.id` tie-breaks same-second
-  # comments (monotonic per issue; mirrors the sibling breaker's
-  # `sort_by(.createdAt // "", .id // 0)` — codex review, PR #390).
+  # Pull the newest qualifying comment body. Legacy ISO cutoffs keep strict
+  # `>` on createdAt. Tuple cutoffs admit a same-second comment only when its
+  # monotonic issue-comment id is newer. Non-string bodies/timestamps are
+  # malformed provider rows, not verdict evidence.
   local newest_body
-  newest_body=$(itp_list_comments "$issue_num" 2>/dev/null \
-    | jq -r "[.[] | select(${actor_predicate} and (.createdAt > \"${session_end}\"))] | sort_by(.createdAt // \"\", .id // 0) | last | .body // empty" \
-    2>/dev/null)
+  if ! newest_body=$(itp_list_comments "$issue_num" 2>/dev/null \
+      | jq -r \
+        --arg cutoff_ts "$cutoff_ts" \
+        --argjson cutoff_id "$cutoff_id" \
+        --argjson max_id 9007199254740991 \
+        "[
+          .[]
+          | select(
+              (.body? | type) == \"string\"
+              and (.createdAt? | type) == \"string\"
+              and (.id? | type) == \"number\"
+              and .id >= 0
+              and .id <= \$max_id
+              and (.id | floor) == .id
+              and (${actor_predicate})
+              and (
+                .createdAt > \$cutoff_ts
+                or (
+                  .createdAt == \$cutoff_ts
+                  and ((.id // 0) > \$cutoff_id)
+                )
+              )
+            )
+        ]
+        | sort_by(.createdAt, (.id // 0))
+        | last
+        | .body // empty" \
+        2>/dev/null); then
+    return 0
+  fi
 
   [ -n "$newest_body" ] || return 0
 
@@ -1718,6 +1776,13 @@ handle_completed_session_routing() {
         log "  issue #${issue_num} dev-new dispatch marker held by a concurrent tick — skipping INV-12 no-PR fresh-dev ([INV-108])"
         return 0
       fi
+      local _nopr_token_gate_rc=0
+      token_admission_gate "$issue_num" "pending-dev" "dev-new" || _nopr_token_gate_rc=$?
+      if [ "$_nopr_token_gate_rc" -eq 10 ]; then
+        return 0
+      elif [ "$_nopr_token_gate_rc" -ne 0 ]; then
+        return "$_nopr_token_gate_rc"
+      fi
       log "  issue #${issue_num} completed session ${session_id} has verdict=none and NO PR — minting bounded fresh dev session ([INV-123])"
       local _nopr_marker="INV-12-no-pr-fresh-dev:${session_id}"
       if itp_list_comments "$issue_num" 2>/dev/null \
@@ -2131,6 +2196,13 @@ CBREPORT
       if ! acquire_dispatch_marker "$issue_num" "dev-new"; then
         log "  issue #${issue_num} dev-new dispatch marker held by a concurrent tick — skipping INV-35 fresh-dev ([INV-108])"
         return 0
+      fi
+      local _fresh_token_gate_rc=0
+      token_admission_gate "$issue_num" "pending-dev" "dev-new" || _fresh_token_gate_rc=$?
+      if [ "$_fresh_token_gate_rc" -eq 10 ]; then
+        return 0
+      elif [ "$_fresh_token_gate_rc" -ne 0 ]; then
+        return "$_fresh_token_gate_rc"
       fi
       log "  issue #${issue_num} substantive review failure on completed session ${session_id} — minting fresh dev session"
       local _fresh_marker="INV-35-fresh-dev:${session_id}"
@@ -2704,6 +2776,14 @@ _dispatch_marker_pending_drop() {
 # launched). Drops the pair from the pending list so the EXIT-trap release
 # below leaves this marker alone on disk; it lives out its normal TTL.
 dispatch_marker_confirm_launched() {
+  _dispatch_marker_pending_drop "$1" "$2"
+}
+
+# retain_dispatch_marker <issue_num> <mode> — keep an owned marker on disk
+# through this tick's EXIT trap without claiming a wrapper launched. Terminal
+# admission uses this when it cannot safely clear/consume the durable intent;
+# the marker then lives out its TTL and prevents an immediate competing tick.
+retain_dispatch_marker() {
   _dispatch_marker_pending_drop "$1" "$2"
 }
 
@@ -3988,6 +4068,13 @@ _same_head_verdict_aware_recovery() {
       log "  issue #${issue_num} ${cause} dev-new dispatch marker held by a concurrent tick — skipping ([INV-108])"
       return 1
     fi
+    local _recovery_token_gate_rc=0
+    token_admission_gate "$issue_num" "pending-dev" "dev-new" || _recovery_token_gate_rc=$?
+    if [ "$_recovery_token_gate_rc" -eq 10 ]; then
+      return 0
+    elif [ "$_recovery_token_gate_rc" -ne 0 ]; then
+      return 2
+    fi
     log "  issue #${issue_num} PR ${pr_ref} HEAD \`${current_head}\` reviewed FAILED (${cause}) with no live wrapper — dispatching a bounded fresh dev-new"
     # [Lane-GC PR-6 / INV-119] — see the earlier INV-35 fresh-dev comment in
     # this file for the rc=75 rationale; identical shape.
@@ -4089,7 +4176,10 @@ handle_pending_dev_pr_exists() {
       fi
       # _term_reason == "completed" (the only other rc=0 case). Route the
       # verdict to the dev/review side via the shared INV-35 router.
-      handle_completed_session_routing "$issue_num" "$_sid" "$_end_iso"
+      local _completed_route_rc=0
+      handle_completed_session_routing "$issue_num" "$_sid" "$_end_iso" \
+        || _completed_route_rc=$?
+      [[ "$_completed_route_rc" -eq 0 ]] || return 2
       return 0
     fi
 
@@ -4134,7 +4224,15 @@ handle_pending_dev_pr_exists() {
     local _recovery_cause="crashed-session"
     [ -z "$_sid" ] && _recovery_cause="self-heal"
     if may_stall_now "$issue_num"; then
-      _same_head_verdict_aware_recovery "$issue_num" "$pr_ref" "$current_head" "$_recovery_cause" "$pr_num" && return 0
+      local _same_head_recovery_rc=0
+      _same_head_verdict_aware_recovery \
+        "$issue_num" "$pr_ref" "$current_head" "$_recovery_cause" "$pr_num" \
+        || _same_head_recovery_rc=$?
+      if [[ "$_same_head_recovery_rc" -eq 0 ]]; then
+        return 0
+      elif [[ "$_same_head_recovery_rc" -ne 1 ]]; then
+        return "$_same_head_recovery_rc"
+      fi
     fi
 
     # Residual park: a dev wrapper IS still alive (`may_stall_now` deferred —
