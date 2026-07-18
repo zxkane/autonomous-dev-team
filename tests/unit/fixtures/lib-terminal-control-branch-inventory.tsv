@@ -1,0 +1,71 @@
+# branch_id|status|test_id|source branch outcome
+# Every row binds to exactly one `terminal-control-branch: <branch_id>` source
+# marker. TC-TERMCTRL-073 runs the suite under xtrace and verifies every
+# covered marker executes and every uncovered marker remains explicit.
+B001|covered|TC-TERMCTRL-011|comment provider read fails
+B002|covered|TC-TERMCTRL-011|comment provider returns a malformed envelope
+B003|covered|TC-TERMCTRL-001|comment provider returns a valid array
+B004|covered|TC-TERMCTRL-010|write API arity fails
+B005|covered|TC-TERMCTRL-010|write rejects an invalid issue
+B006|covered|TC-TERMCTRL-010|write rejects an invalid intent id
+B007|covered|TC-TERMCTRL-010|write rejects an invalid invocation id
+B008|covered|TC-TERMCTRL-001|write accepts a supported reason
+B009|covered|TC-TERMCTRL-010|write rejects an unsupported reason
+B010|covered|TC-TERMCTRL-001|write accepts a supported owner
+B011|covered|TC-TERMCTRL-010|write rejects an unsupported owner
+B012|covered|TC-TERMCTRL-002|exact trusted write replay is a no-op
+B013|uncovered|-|write comment post fails
+B014|covered|TC-TERMCTRL-001|write comment post succeeds
+B015|covered|TC-TERMCTRL-015|read API arity fails
+B016|covered|TC-TERMCTRL-015|read rejects an invalid issue
+B017|uncovered|-|read jq program fails after array validation
+B018|covered|TC-TERMCTRL-001|read parser succeeds
+B019|covered|TC-TERMCTRL-015|consume API arity fails
+B020|covered|TC-TERMCTRL-015|consume rejects an invalid issue
+B021|covered|TC-TERMCTRL-015|consume rejects an invalid intent id
+B022|covered|TC-TERMCTRL-012|consume rejects an unknown intent
+B023|covered|TC-TERMCTRL-006|current consume replay is a no-op
+B024|covered|TC-TERMCTRL-049|consume comment post fails
+B025|covered|TC-TERMCTRL-006|consume comment post succeeds
+B026|covered|TC-TERMCTRL-015|clear API arity fails
+B027|covered|TC-TERMCTRL-015|clear rejects an invalid issue
+B028|covered|TC-TERMCTRL-015|clear rejects an invalid intent id
+B029|covered|TC-TERMCTRL-015|clear rejects an invalid reason
+B030|covered|TC-TERMCTRL-012|clear rejects an unknown intent
+B031|covered|TC-TERMCTRL-007|current clear replay is a no-op
+B032|uncovered|-|clear comment post fails
+B033|covered|TC-TERMCTRL-007|clear comment post succeeds
+B034|covered|TC-TERMCTRL-027|label provider read fails
+B035|covered|TC-TERMCTRL-027|label provider returns a malformed envelope
+B036|covered|TC-TERMCTRL-024|already-stalled transition is a no-op
+B037|covered|TC-TERMCTRL-025|expected owner state is absent
+B038|covered|TC-TERMCTRL-028|atomic stalled transition fails
+B039|covered|TC-TERMCTRL-020|atomic stalled transition succeeds
+B040|covered|TC-TERMCTRL-026|pending helper arity fails
+B041|covered|TC-TERMCTRL-026|pending helper rejects an invalid issue
+B042|covered|TC-TERMCTRL-026|pending helper rejects an invalid intent id
+B043|covered|TC-TERMCTRL-020|pending helper accepts its state domain
+B044|covered|TC-TERMCTRL-026|pending helper rejects an active state
+B045|covered|TC-TERMCTRL-026|active helper arity fails
+B046|covered|TC-TERMCTRL-026|active helper rejects an invalid issue
+B047|covered|TC-TERMCTRL-026|active helper rejects an invalid intent id
+B048|covered|TC-TERMCTRL-022|active helper accepts its state domain
+B049|covered|TC-TERMCTRL-026|active helper rejects a pending state
+B050|covered|TC-TERMCTRL-051|cleanup helper arity fails
+B051|covered|TC-TERMCTRL-042|cleanup accepts a pending target
+B052|covered|TC-TERMCTRL-051|cleanup rejects a non-pending target
+B053|covered|TC-TERMCTRL-047|cleanup intent read fails closed
+B054|covered|TC-TERMCTRL-051|normal cleanup transition fails
+B055|covered|TC-TERMCTRL-042|normal cleanup transition succeeds
+B056|covered|TC-TERMCTRL-040|cleanup selects the live-intent route
+B057|uncovered|-|cleanup read returns malformed nonempty intent JSON
+B058|covered|TC-TERMCTRL-048|live-intent stalled transition fails
+B059|covered|TC-TERMCTRL-049|post-transition consume fails
+B060|covered|TC-TERMCTRL-040|live-intent cleanup converges
+B061|covered|TC-TERMCTRL-052|cleanup detects consumed newest decision
+B062|covered|TC-TERMCTRL-052|consumed decision is already stalled
+B063|covered|TC-TERMCTRL-016|operator clear suppresses a stale consume
+B064|covered|TC-TERMCTRL-020|pending-dev selects its literal transition
+B065|covered|TC-TERMCTRL-021|pending-review selects its literal transition
+B066|covered|TC-TERMCTRL-022|in-progress selects its literal transition
+B067|covered|TC-TERMCTRL-023|reviewing selects its literal transition

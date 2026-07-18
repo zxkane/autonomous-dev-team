@@ -192,8 +192,8 @@ echo "=== PER-SITE: migrated verb call + caller-side fail-safe framing (P1) ==="
 
 # A1 dev:835 — the PR-found success block.
 dev_block=$(awk '/PR found: move to pending-review for the review agent/{f=1} f{print} /Failed to update issue labels/{if(f)exit}' "$DEV")
-assert_contains "TC-ITV-020 A1 dev migrated to itp_transition_state CSV multi-remove" \
-  'itp_transition_state "$ISSUE_NUMBER" "in-progress,pending-dev" "pending-review"' "$dev_block"
+assert_contains "TC-ITV-020 A1 dev routes the CSV multi-remove through the terminal-intent guard" \
+  'terminal_intent_cleanup_transition "$ISSUE_NUMBER" "in-progress" "in-progress,pending-dev" "pending-review"' "$dev_block"
 assert_contains "TC-ITV-020 A1 preserves the || log fail-safe framing" \
   '|| log "WARNING: Failed to update issue labels"' "$dev_block"
 assert_not_contains "TC-ITV-020 A1 no raw gh issue edit survives in the block" \

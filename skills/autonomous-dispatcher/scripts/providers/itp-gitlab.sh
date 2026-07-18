@@ -327,6 +327,24 @@ itp_gitlab_edit_comment() {
   _gl_api --method PUT --body "$req_body" "/projects/${GITLAB_PROJECT}/issues/${issue}/notes/${comment_id}"
 }
 
+# Resolve the active credential plus the operator-configured cross-role
+# identities for callers that opt into terminal-control authority checks.
+_itp_gitlab_comment_self_logins() {
+  local login="${BOT_LOGIN:-}" raw
+  if [[ "${ITP_REQUIRE_SELF_AUTHOR:-0}" == "1" && -z "$login" ]]; then
+    raw=$(_gl_api "/user") || return 1
+    login="$(printf '%s' "$raw" | jq -er '.username | strings | select(length > 0)')" \
+      || return 1
+  fi
+  jq -cn --arg login "$login" \
+    --arg csv "$([[ "${ITP_REQUIRE_SELF_AUTHOR:-0}" == "1" ]] \
+      && printf '%s' "${TERMINAL_CONTROL_TRUSTED_AUTHORS:-}")" '
+    (if $login == "" then [] else [$login] end)
+    + ($csv | split(",") | map(select(length > 0)))
+    | unique
+  '
+}
+
 # itp_gitlab_list_comments <issue>
 #
 # Spec §3.3 [INV-90]. Return the normalized ISSUE-level notes array:
@@ -352,7 +370,8 @@ itp_gitlab_edit_comment() {
 #       - `human` otherwise.
 #   - `body` = `.body // ""`. `createdAt` = `.created_at`.
 itp_gitlab_list_comments() {
-  local issue="$1" raw
+  local issue="$1" raw self_logins
+  self_logins="$(_itp_gitlab_comment_self_logins)" || return 1
   # Fail-CLOSED capture-then-check (spec §3.5 discipline, matches
   # itp_read_task's posture): a bare `_gl_api … | jq …` pipe under
   # pipefail catches an _gl_api non-zero rc, but rc-0 with EMPTY stdout
@@ -370,14 +389,14 @@ itp_gitlab_list_comments() {
   # a transport-hook oddity would slip past jq's `.[]` with a hard error
   # under set -e, but the graceful pattern is to fail-CLOSED loud here.
   printf '%s' "$raw" | jq -e 'type == "array"' >/dev/null 2>&1 || return 1
-  printf '%s' "$raw" | jq --arg bot "${BOT_LOGIN:-}" '
+  printf '%s' "$raw" | jq --argjson self "$self_logins" '
         [ .[]
           | select((.system // false) == false)
           | (.author.username // "") as $a
           | { id: (.id // null),
               author: (if $a == "" then null else $a end),
               authorKind: (
-                if   ($a != "" and $bot != "" and $a == $bot) then "self"
+                if   ($a != "" and ($self | index($a)) != null) then "self"
                 elif ($a | test("^(project|group)_[0-9]+_bot(_[a-z0-9]+)?$")) then "bot"
                 else "human"
                 end

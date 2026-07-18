@@ -737,6 +737,13 @@ DISPATCHER_APP_PEM=""
 # separately. Example: `group%2Fsubgroup%2Fproject`.
 # GITLAB_PROJECT=""
 #
+# TERMINAL_CONTROL_TRUSTED_AUTHORS — comma-separated GitLab usernames for
+# other pipeline roles allowed to author resource terminal-intent markers.
+# Required when dispatcher, dev, and review use distinct GitLab identities;
+# the active identity is resolved separately. Exact usernames only, no spaces.
+# This setting is ignored by ordinary comment reads and by the GitHub provider.
+# TERMINAL_CONTROL_TRUSTED_AUTHORS=""
+#
 # GITLAB_TRANSPORT_HOOK — Path to an operator-owned shell file sourced
 # before provider init that MAY replace the default transport function; leave
 # unset for the standard PAT transport. Contract:

@@ -608,6 +608,58 @@
       "note": "The check never resolved (stuck/misconfigured) after CI_ROLLUP_WAIT_MAX brokered waits on this HEAD. Substantive FAIL: gh pr review --request-changes + pending-dev, mirrors the INV-79 bot-gate give-up."
     },
     {
+      "id": "resource-terminal-intent-stall-pending-dev",
+      "from": "pending_dev",
+      "to": "stalled",
+      "event": "resource-terminal-intent-owner-transition",
+      "actor": "dispatcher",
+      "guards": ["resource-terminal-intent-live", "expected-owner-state-present", "terminal-control-not-already-stalled"],
+      "actions": ["remove-label:pending-dev", "add-label:stalled"],
+      "code_site": "lib-terminal-control.sh _terminal_control_transition_pending_dev(): itp_transition_state pending-dev stalled",
+      "mermaid": "pending_dev --> stalled: durable resource terminal intent [INV-140]",
+      "inv_refs": ["INV-140"],
+      "note": "Owner-aware terminal-control helper. The expected-state read prevents a stale actor from mutating labels; the transition itself is one atomic itp_transition_state call and retains autonomous."
+    },
+    {
+      "id": "resource-terminal-intent-stall-pending-review",
+      "from": "pending_review",
+      "to": "stalled",
+      "event": "resource-terminal-intent-owner-transition",
+      "actor": "dispatcher",
+      "guards": ["resource-terminal-intent-live", "expected-owner-state-present", "terminal-control-not-already-stalled"],
+      "actions": ["remove-label:pending-review", "add-label:stalled"],
+      "code_site": "lib-terminal-control.sh _terminal_control_transition_pending_review(): itp_transition_state pending-review stalled",
+      "mermaid": "pending_review --> stalled: durable resource terminal intent [INV-140]",
+      "inv_refs": ["INV-140"],
+      "note": "Owner-aware terminal-control helper. The expected-state read prevents a stale actor from mutating labels; the transition itself is one atomic itp_transition_state call and retains autonomous."
+    },
+    {
+      "id": "resource-terminal-intent-stall-in-progress",
+      "from": "in_progress",
+      "to": "stalled",
+      "event": "resource-terminal-intent-cleanup-override",
+      "actor": "dev-wrapper-trap",
+      "guards": ["resource-terminal-intent-live", "expected-owner-state-present", "terminal-control-not-already-stalled"],
+      "actions": ["remove-label:in-progress", "add-label:stalled", "comment:resource-terminal-intent-consume"],
+      "code_site": "lib-terminal-control.sh _terminal_control_transition_in_progress(): itp_transition_state in-progress stalled",
+      "mermaid": "in_progress --> stalled: durable resource terminal intent overrides dev cleanup [INV-140]",
+      "inv_refs": ["INV-140"],
+      "note": "The dev cleanup trap resolves the durable intent before any pending-state write. It transitions first and consumes second, so a crash between them replays without resurrecting pending."
+    },
+    {
+      "id": "resource-terminal-intent-stall-reviewing",
+      "from": "reviewing",
+      "to": "stalled",
+      "event": "resource-terminal-intent-cleanup-override",
+      "actor": "review-wrapper-trap",
+      "guards": ["resource-terminal-intent-live", "expected-owner-state-present", "terminal-control-not-already-stalled"],
+      "actions": ["remove-label:reviewing", "add-label:stalled", "comment:resource-terminal-intent-consume"],
+      "code_site": "lib-terminal-control.sh _terminal_control_transition_reviewing(): itp_transition_state reviewing stalled",
+      "mermaid": "reviewing --> stalled: durable resource terminal intent overrides review cleanup [INV-140]",
+      "inv_refs": ["INV-140"],
+      "note": "The review cleanup trap resolves the durable intent before any pending-state write. It transitions first and consumes second, so a crash between them replays without resurrecting pending."
+    },
+    {
       "id": "hygiene-strip-residue-approved",
       "from": "approved",
       "to": "approved",

@@ -128,6 +128,9 @@ run_cleanup() {
       [ -n \"\$3\" ] && args+=(--add-label \"\$3\")
       gh issue edit \"\$1\" --repo \"\$REPO\" \"\${args[@]}\"
     }
+    # This extraction harness does not source lib-terminal-control.sh. Model
+    # the universal pre-#506 case: no live intent, exact normal delegation.
+    terminal_intent_cleanup_transition() { itp_transition_state \"\$1\" \"\$3\" \"\$4\"; }
     $CLEANUP_FN
     (exit $want_exit); cleanup
   " 2>"$stderr_log"

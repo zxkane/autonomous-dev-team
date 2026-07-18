@@ -249,6 +249,11 @@ if ! declare -F itp_post_comment >/dev/null 2>&1; then
   # shellcheck source=lib-issue-provider.sh
   source "${LIB_DIR}/lib-issue-provider.sh"
 fi
+# [INV-140] Durable terminal-intent cleanup override. Load-bearing on the
+# crash path; an empty intent read delegates the original reviewing ->
+# pending-dev transition unchanged.
+# shellcheck source=lib-terminal-control.sh
+source "${LIB_DIR}/lib-terminal-control.sh"
 # Per-side AGENT_CMD override (INV-37). See autonomous-dev.sh for the
 # matching dev-side override. Together they let one project run dev
 # and review on different agent CLIs (e.g. claude for dev, agy for
@@ -992,7 +997,7 @@ cleanup() {
     # INV-92 (#298): a wrapper crash is ALWAYS dev-actionable (fail-open) — a
     # fresh dev session is the right recovery, never an escalation.
     _teardown_call emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-substantive" "" "true" 2>/dev/null || true
-    _teardown_call itp_transition_state "$ISSUE_NUMBER" "reviewing" "pending-dev" 2>/dev/null || true
+    _teardown_call terminal_intent_cleanup_transition "$ISSUE_NUMBER" "reviewing" "reviewing" "pending-dev" 2>/dev/null || true
 
     log "Issue #${ISSUE_NUMBER} moved to pending-dev due to crash."
   fi

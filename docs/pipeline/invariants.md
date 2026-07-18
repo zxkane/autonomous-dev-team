@@ -8581,3 +8581,124 @@ Writes use a hardened form of [INV-135](#inv-135-the-agent-progress-lease-is-a-p
 - [`docs/pipeline/metrics.md`](metrics.md) — cross-references this invariant as the authoritative accounting store, distinct from the observe-only mirror `metrics.jsonl` remains.
 
 ---
+
+## INV-140: resource-terminal-intent comments are the durable authoritative terminal-control record, and wrapper cleanup must resolve a live intent before any pending-state write
+
+_Triage (issue #236): [machine-checked: tests/unit/test-terminal-control.sh, tests/e2e/run-terminal-control-e2e.sh]_
+
+**Rule**: `lib-terminal-control.sh` owns a provider-neutral issue-comment
+protocol for resource-cap terminal decisions. The fully anchored, versioned
+marker grammar is:
+
+```text
+<!-- resource-terminal-intent-v1: issue=<N> intent=<id> invocation=<invocation_id> reason=<token-cap|turn-cap|usage-unknown> owner=<dispatcher|dev-wrapper|review-wrapper> -->
+<!-- resource-terminal-intent-consume-v1: issue=<N> intent=<id> invocation=<invocation_id> -->
+<!-- resource-terminal-intent-clear-v1: issue=<N> intent=<id> invocation=<invocation_id> reason=<token> -->
+```
+
+`intent`, `invocation`, and clear-reason tokens match
+`[A-Za-z0-9][A-Za-z0-9._:-]{0,127}`. The issue number is a positive canonical
+integer. Only comments normalized by `itp_list_comments` as `authorKind=self`
+are trusted. Terminal control privately opts into provider-side authority
+classification: GitHub PAT and GitLab resolve `/user` exactly; GitHub App
+installation tokens cannot call a supported self-identity endpoint, so the
+configured dev, review, and dispatcher App slugs are resolved exactly using
+their App JWTs and `GET /app`. GitLab deployments with distinct role
+identities list the other exact usernames in
+`TERMINAL_CONTROL_TRUSTED_AUTHORS`. Human-authored and unrelated-bot copies
+remain inert. GitHub terminal-control classification uses exact logins only,
+and App-mode matches also require REST `user.type=Bot`; neither a human matching
+an App slug nor an App matching a PAT login is trusted. Identity-resolution
+failure fails closed. Marker parsing is full-body and fully anchored. Read
+excludes a write generation only when a matching lifecycle marker follows its
+first trusted write, then returns the newest remaining generation as compact
+JSON, or no output.
+
+The public API is fixed:
+
+```text
+terminal_intent_write  ISSUE INTENT_ID INVOCATION_ID REASON OWNER
+terminal_intent_read   ISSUE
+terminal_intent_consume ISSUE INTENT_ID
+terminal_intent_clear   ISSUE INTENT_ID REASON
+stall_from_pending ISSUE EXPECTED_STATE INTENT_ID
+stall_from_active  ISSUE EXPECTED_STATE INTENT_ID
+```
+
+Exact trusted write replays are rc-0 no-ops. An intent ID may be reused by a
+new invocation; `(intent, invocation)` identifies its generation. Consume and
+clear target the newest live generation for the requested intent and fall back
+to the newest generation for idempotent terminal replay. A lifecycle marker is
+effective only after a matching trusted write, while a delayed duplicate write
+cannot resurrect a generation already consumed or cleared. Within a generation,
+any operator clear dominates stale cleanup consumes regardless of comment
+order, including when clear lands inside consume's read/post window. Re-arm
+therefore permits a future write with the same intent ID and a new invocation.
+A lifecycle verb without a trusted write fails loudly. All reads and writes use only
+`itp_list_comments` / `itp_post_comment`; a process-local cache is never an
+authority. `clear` is the explicit operator re-arm action. The issue-comment
+history therefore distinguishes a live decision, a decision whose terminal
+transition was consumed, and a decision an operator cleared, across wrapper
+crashes and remote-host boundaries.
+
+`stall_from_pending` accepts only `pending-dev|pending-review`;
+`stall_from_active` accepts only `in-progress|reviewing`. Both read labels
+through `itp_read_task`, return rc 0 without mutation when already `stalled`,
+fail without mutation when the expected owner state is absent, and otherwise
+perform exactly one atomic
+`itp_transition_state ISSUE EXPECTED_STATE stalled`. The transition preserves
+`autonomous`. These helpers never call or alter `mark_stalled`; its
+retry-exhaustion wording, liveness gate, and every existing call site remain
+unchanged.
+
+**Cleanup ordering**: every dev/review wrapper cleanup route whose normal
+target is `pending-dev` or `pending-review` first calls
+`terminal_intent_read`. An empty successful read delegates the original
+transition arguments byte-for-byte. A live intent performs
+`stall_from_active` first and `terminal_intent_consume` second. Thus:
+
+1. intent persisted, wrapper dies before transition: the next cleanup reads
+   and honors it;
+2. transition lands, wrapper dies before consume: re-entry observes
+   `stalled`, then idempotently consumes without a second transition;
+3. after transition and consume are both durable, repeated cleanup recognizes
+   the consumed newest decision plus `stalled` and makes no pending write;
+4. wrong-owner race or authoritative comment-read failure: no pending
+   transition and no consume; the intent remains live for reconciliation.
+
+The cleanup guard retains the invocation from its authoritative read and binds
+the post-transition consume to that exact generation. A newer same-ID
+invocation written during the label transition remains live rather than being
+mistaken for the generation that caused the transition.
+
+This guard reuses the existing `stalled` destination and three existing
+movements. Because the dev cleanup path moves directly from `in-progress`,
+`in-progress -> stalled` is one required new movement and is declared in
+`transitions.json`; all four helper movements are literal write sites scanned
+by the executable spec-drift gate. No label is introduced. The guard is
+dormant until #506 writes an intent from production budget enforcement.
+
+**Producer**: `lib-terminal-control.sh::terminal_intent_write` (no production
+call site yet; #506 is the first planned producer).
+**Consumer**: `autonomous-dev.sh::cleanup()` and
+`autonomous-review.sh::cleanup()` through
+`terminal_intent_cleanup_transition`; operators through
+`terminal_intent_clear`.
+**Status**: **ENFORCED** for protocol, transition ownership, and cleanup
+override; production intent creation remains intentionally inert.
+**Test**: `tests/unit/test-terminal-control.sh`
+(`TC-TERMCTRL-001..074`: grammar, generation-aware idempotency, trusted-author filtering,
+lifecycle/newest selection, owner-aware transitions, unchanged pending routes,
+wrong-owner and both crash windows, provider authority classification,
+`mark_stalled` checksum pins, provider-neutrality, executable-spec coverage,
+and greater-than-80-percent decision coverage);
+`tests/e2e/run-terminal-control-e2e.sh` (`TC-TERMCTRL-090`: separate write and
+cleanup processes converge to `autonomous,stalled` with one consume marker and
+no pending resurrection).
+
+**Cross-references**:
+- [INV-25](#inv-25-terminal-labels-approved-stalled-are-sticky-transitional-residue-is-healed-at-tick-start) - terminal-label stickiness this guard protects before pending residue can be written.
+- [INV-139](#inv-139-the-resource-accounting-store-lib-accountingsh-is-a-separate-mandatory-lock-crash-consistent-authority--metrics_emitmetrics_prune-remain-byte-unchanged-and-provably-cannot-reach-it-and-the-store-is-inert-zero-production-call-sites-until-a-future-issue-wires-enforcement) - the resource-accounting authority #506 will consult before writing an intent.
+- [`dev-agent-flow.md`](dev-agent-flow.md#exit-trap-cleanup) and [`review-agent-flow.md`](review-agent-flow.md#exit-trap-cleanup) - wrapper-specific cleanup ordering.
+
+---

@@ -80,6 +80,12 @@ source "${LIB_DIR}/lib-lane.sh" 2>/dev/null || true
 # must succeed), so sourced UNGUARDED from the skill tree like lib-agent.sh.
 # shellcheck source=lib-issue-provider.sh
 source "${LIB_DIR}/lib-issue-provider.sh"
+# [INV-140] Durable terminal-intent cleanup override. Load-bearing: when a
+# future resource gate (#506) persists an intent, cleanup must not resurrect a
+# pending state. With no intent, the helper delegates the original transition
+# argv unchanged.
+# shellcheck source=lib-terminal-control.sh
+source "${LIB_DIR}/lib-terminal-control.sh"
 # Per-side AGENT_CMD override (INV-37). Empty-string fallback already
 # applied inside lib-agent.sh; this just rebinds AGENT_CMD so the case
 # statements in run_agent / resume_agent dispatch to the dev-side CLI.
@@ -965,7 +971,7 @@ not on PATH (set \`REAL_GH\` in autonomous.conf — see #92), missing
 required env, or auth setup failure. Inspect the log file above.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)
 EOF
 )" 2>/dev/null || log "WARNING: Failed to post startup-failure report"
-      _teardown_call itp_transition_state "$ISSUE_NUMBER" "in-progress" "pending-dev" 2>/dev/null \
+      _teardown_call terminal_intent_cleanup_transition "$ISSUE_NUMBER" "in-progress" "in-progress" "pending-dev" 2>/dev/null \
         || log "WARNING: Failed to update issue labels on startup failure"
     else
       log "Exiting with code $exit_code (agent never ran, no ISSUE_NUMBER or CLI proxy — silent)."
@@ -1185,7 +1191,7 @@ EOF
       # PR found: move to pending-review for the review agent
       # [INV-97] CSV multi-remove: route the atomic 2-remove+1-add flip through
       # the ITP verb (REMOVE is a comma-separated list). Byte-identical edit.
-      _teardown_call itp_transition_state "$ISSUE_NUMBER" "in-progress,pending-dev" "pending-review" || log "WARNING: Failed to update issue labels"
+      _teardown_call terminal_intent_cleanup_transition "$ISSUE_NUMBER" "in-progress" "in-progress,pending-dev" "pending-review" || log "WARNING: Failed to update issue labels"
     else
       # Agent exited 0 but no PR was created — retry development
       log "WARNING: Agent exited 0 but no PR was created for issue #${ISSUE_NUMBER}"
@@ -1193,13 +1199,13 @@ EOF
         "Agent exited successfully but no PR was created. Moving to pending-dev for retry.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
       # [INV-111] (#402 r3 [P1]) re-arm between the two writes: the comment
       # above re-hashes `gh` to the shim path; a vanish here would strand the
-      # flip. (Short: the C.5 anchor above must stay within ±8 of the flip.)
+      # guarded cleanup transition below.
       rearm_gh_resolution
-      _teardown_call itp_transition_state "$ISSUE_NUMBER" "in-progress" "pending-dev" || log "WARNING: Failed to update issue labels"
+      _teardown_call terminal_intent_cleanup_transition "$ISSUE_NUMBER" "in-progress" "in-progress" "pending-dev" || log "WARNING: Failed to update issue labels"
     fi
   else
     # Failure: move back to pending-dev so dispatcher can retry
-    _teardown_call itp_transition_state "$ISSUE_NUMBER" "in-progress" "pending-dev" || log "WARNING: Failed to update issue labels"
+    _teardown_call terminal_intent_cleanup_transition "$ISSUE_NUMBER" "in-progress" "in-progress" "pending-dev" || log "WARNING: Failed to update issue labels"
     log "Agent failed (exit $exit_code). Issue remains in pending-dev for retry."
   fi
 

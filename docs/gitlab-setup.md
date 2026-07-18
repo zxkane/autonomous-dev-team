@@ -89,6 +89,9 @@ GITLAB_HOST="gitlab.com"                     # or your self-hosted host
 GITLAB_TOKEN="glpat-xxxxxxxxxxxxxxxxxxxx"    # PAT / project / group token
 GITLAB_PROJECT="group%2Fsubgroup%2Fproject"  # URL-encoded path
 
+# Required when terminal-control writers use distinct GitLab usernames.
+# TERMINAL_CONTROL_TRUSTED_AUTHORS="dispatcher-bot,dev-bot,review-bot"
+
 # Optional; leave unset for the default curl transport.
 # GITLAB_TRANSPORT_HOOK="/path/to/operator-owned/hook.sh"
 ```
@@ -103,6 +106,7 @@ The keys — matching the block in
 | `GITLAB_HOST` | API host (no scheme). | Defaults to `gitlab.com`. |
 | `GITLAB_TOKEN` | The PAT / project / group access token. | Scope: `api`. Sent as `PRIVATE-TOKEN` on every request. |
 | `GITLAB_PROJECT` | The project's URL-encoded `namespace/name` (or `group/subgroup/name`). | Stored **already** URL-encoded (spec §3.4). Used **verbatim** by the leaves — never re-encoded. Example: `group%2Fsubgroup%2Fproject`. Dynamic path segments (label names, file paths) go through `_gl_urlencode` separately. |
+| `TERMINAL_CONTROL_TRUSTED_AUTHORS` | Comma-separated GitLab usernames for other pipeline roles that may author resource terminal-intent markers. | Required only when dispatcher, dev, and review use distinct identities. Exact usernames, no spaces. Ordinary comment reads are unaffected. |
 | `GITLAB_TRANSPORT_HOOK` | Optional path to a custom transport hook. | See next section. |
 
 Store `GITLAB_TOKEN` outside version control. The standard shape
