@@ -62,8 +62,8 @@ B057|uncovered|-|cleanup read returns malformed nonempty intent JSON
 B058|covered|TC-TERMCTRL-048|live-intent stalled transition fails
 B059|covered|TC-TERMCTRL-049|post-transition consume fails
 B060|covered|TC-TERMCTRL-040|live-intent cleanup converges
-B061|covered|TC-TERMCTRL-052|cleanup detects consumed newest decision
-B062|covered|TC-TERMCTRL-052|consumed decision is already stalled
+B061|covered|TC-TERMCTRL-052|cleanup detects a retired newest decision
+B062|covered|TC-TERMCTRL-054|retired decision is already stalled
 B063|covered|TC-TERMCTRL-016|operator clear suppresses a stale consume
 B064|covered|TC-TERMCTRL-020|pending-dev selects its literal transition
 B065|covered|TC-TERMCTRL-021|pending-review selects its literal transition

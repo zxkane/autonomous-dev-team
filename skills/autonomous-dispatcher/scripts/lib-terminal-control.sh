@@ -225,7 +225,7 @@ _terminal_control_clear_marker_exists() {
   ' >/dev/null 2>&1 <<<"$events"
 }
 
-_terminal_control_newest_consumed_intent() {
+_terminal_control_newest_retired_intent() {
   local events="$1" issue="$2"
   jq -r --arg issue "$issue" '
     ([ .[] | select(.kind == "write" and .issue == $issue) ] | last) as $write
@@ -239,20 +239,16 @@ _terminal_control_newest_consumed_intent() {
                and .invocation == $write.invocation
              )
          ] | first) as $first_write
-        |
-        [ .[]
-          | select(
-              (.kind == "consume" or .kind == "clear")
-              and .issue == $issue
-              and .intent == $write.intent
-              and .invocation == $write.invocation
-              and .seq > $first_write.seq
-            )
-        ] as $lifecycle
-        | if any($lifecycle[]; .kind == "clear") then empty
-          elif any($lifecycle[]; .kind == "consume") then $write.intent
-          else empty
-          end
+        | [ .[]
+            | select(
+                (.kind == "consume" or .kind == "clear")
+                and .issue == $issue
+                and .intent == $write.intent
+                and .invocation == $write.invocation
+                and .seq > $first_write.seq
+              )
+          ]
+        | if length > 0 then $write.intent else empty end
       end
   ' <<<"$events"
 }
@@ -544,17 +540,17 @@ terminal_intent_cleanup_transition() {
     *) _terminal_control_error "invalid cleanup target: $target"; return 1 ;; # terminal-control-branch: B052
   esac
 
-  local intent_json intent invocation consumed_intent labels comments events
+  local intent_json intent invocation retired_intent labels comments events
   terminal_intent_read "$issue" >/dev/null || return 1 # terminal-control-branch: B053
   intent_json="${_TERMINAL_INTENT_READ_RESULT:-}"
   if [[ -z "$intent_json" ]]; then
-    consumed_intent="$(
-      _terminal_control_newest_consumed_intent \
+    retired_intent="$(
+      _terminal_control_newest_retired_intent \
         "${_TERMINAL_INTENT_READ_EVENTS:-[]}" "$issue"
     )" || return 1
-    if [[ -n "$consumed_intent" ]]; then
+    if [[ -n "$retired_intent" ]]; then
       : # terminal-control-branch: B061
-      labels="$(_terminal_control_labels "$issue" "$consumed_intent")" || return 1
+      labels="$(_terminal_control_labels "$issue" "$retired_intent")" || return 1
       if jq -e 'index("stalled") != null' >/dev/null <<<"$labels"; then
         return 0 # terminal-control-branch: B062
       fi

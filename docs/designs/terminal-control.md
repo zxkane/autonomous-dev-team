@@ -76,7 +76,11 @@ expected state present -> one itp_transition_state expected -> stalled
 
 The transition removes only the expected state and therefore preserves
 `autonomous`. The intent id is validated for attribution but does not change
-label semantics. Neither helper calls `mark_stalled`.
+label semantics. If an already-invalid state carries another transitional label
+(for example `in-progress` plus `pending-dev`), the helper deliberately leaves
+that non-owner residue for INV-25 tick-start hygiene instead of widening the
+pinned expected-state-only transition contract. Neither helper calls
+`mark_stalled`.
 
 ## Cleanup Ordering
 
@@ -102,6 +106,11 @@ in its place.
 If consume is durable, re-entry sees no live intent and the already-stalled
 state remains terminal: cleanup recognizes that the newest decision was
 consumed, confirms the current `stalled` label, and makes no pending write. A
+clear that races between the stalled transition and consume has the same
+re-entry protection: clear remains authoritative even if the stale consume
+posts after it, then cleanup recognizes the cleared generation plus `stalled`
+and makes no pending write.
+Clear re-arms the marker generation only; it does not itself move labels. A
 wrong-owner race leaves the intent unconsumed so the next legitimate owner can
 reconcile it.
 

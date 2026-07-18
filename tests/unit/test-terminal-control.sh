@@ -302,8 +302,9 @@ assert_rc "TC-TERMCTRL-016 clear replay after stale consume succeeds" 0 \
 assert_eq "TC-TERMCTRL-016 clear replay stays idempotent after stale consume" \
   "$before" "$(comment_count)"
 events="$(_terminal_control_events "$(cat "$COMMENTS")")"
-assert_eq "TC-TERMCTRL-016 stale consume cannot override clear" "" \
-  "$(_terminal_control_newest_consumed_intent "$events" 515)"
+assert_rc "TC-TERMCTRL-016 stale consume cannot override clear" 0 \
+  "$(run_rc _terminal_control_intent_is_cleared \
+    "$events" 515 clear-wins inv-v1-clear-wins)"
 
 reset_store
 terminal_intent_write 515 clear-race inv-v1-clear-race token-cap dispatcher >/dev/null
@@ -311,8 +312,6 @@ INJECT_CLEAR_BEFORE_CONSUME=1
 assert_rc "TC-TERMCTRL-016 clear inside consume read/post window succeeds" 0 \
   "$(run_rc terminal_intent_consume 515 clear-race)"
 events="$(_terminal_control_events "$(cat "$COMMENTS")")"
-assert_eq "TC-TERMCTRL-016 in-window clear dominates later consume" "" \
-  "$(_terminal_control_newest_consumed_intent "$events" 515)"
 assert_rc "TC-TERMCTRL-016 in-window clear is intent-authoritative" 0 \
   "$(run_rc _terminal_control_intent_is_cleared \
     "$events" 515 clear-race inv-v1-clear-race)"
@@ -560,6 +559,8 @@ assert_rc "TC-TERMCTRL-042 no-intent PR route succeeds" 0 \
   "$(run_rc terminal_intent_cleanup_transition 515 in-progress in-progress,pending-dev pending-review)"
 assert_contains "TC-TERMCTRL-042 original pending-review argv unchanged" \
   'transition|515|in-progress,pending-dev|pending-review' "$(cat "$CALLS")"
+assert_eq "TC-TERMCTRL-042 marker-free route adds no label read" 0 \
+  "$(grep -c '^read|' "$CALLS" 2>/dev/null || true)"
 
 reset_store
 assert_rc "TC-TERMCTRL-043 no-intent retry route succeeds" 0 \
@@ -670,6 +671,34 @@ assert_contains "TC-TERMCTRL-053 cleanup consumes the generation it read" \
   "$(cat "$CALLS")"
 assert_eq "TC-TERMCTRL-053 newer generation is not consumed by stale cleanup" inv-v1-new \
   "$(intent_read 515 | jq -r '.invocation')"
+
+reset_store
+terminal_intent_write 515 clear-race inv-v1-clear-race token-cap dev-wrapper >/dev/null
+: > "$CALLS"
+INJECT_CLEAR_BEFORE_CONSUME=1
+assert_rc "TC-TERMCTRL-054 clear during stall-then-consume cleanup succeeds" 0 \
+  "$(run_rc terminal_intent_cleanup_transition 515 in-progress in-progress pending-dev)"
+assert_eq "TC-TERMCTRL-054 clear lands before the racing stale consume" \
+  "clear,consume" \
+  "$(jq -r '
+      [.[].body
+       | if startswith("<!-- resource-terminal-intent-clear-v1: issue=515 intent=clear-race ")
+         then "clear"
+         elif startswith("<!-- resource-terminal-intent-consume-v1: issue=515 intent=clear-race ")
+         then "consume"
+         else empty
+         end]
+      | join(",")
+    ' "$COMMENTS")"
+events="$(_terminal_control_events "$(cat "$COMMENTS")")"
+assert_rc "TC-TERMCTRL-054 clear remains authoritative over stale consume" 0 \
+  "$(run_rc _terminal_control_intent_is_cleared \
+    "$events" 515 clear-race inv-v1-clear-race)"
+assert_rc "TC-TERMCTRL-054 cleared stalled cleanup re-entry succeeds" 0 \
+  "$(run_rc terminal_intent_cleanup_transition 515 in-progress in-progress pending-dev)"
+assert_eq "TC-TERMCTRL-054 re-entry makes no pending transition" 1 "$(transition_count)"
+assert_eq "TC-TERMCTRL-054 clear race converges to autonomous stalled" \
+  '["autonomous","stalled"]' "$(jq -c . "$LABELS")"
 
 echo ""
 echo "== TC-TERMCTRL-070..073: source and coverage pins =="

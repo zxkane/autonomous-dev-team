@@ -62,6 +62,7 @@ provider.
 | TC-TERMCTRL-051 | Cleanup receives bad arguments or its normal transition fails | rc is nonzero and no successful mutation is reported |
 | TC-TERMCTRL-052 | Cleanup re-enters after a completed stall and consume | Already-stalled is a no-op; no pending label is resurrected |
 | TC-TERMCTRL-053 | A new same-ID invocation is written between cleanup's intent read and consume | Cleanup consumes the exact generation that caused the stall; the newer generation remains live |
+| TC-TERMCTRL-054 | Operator clear lands after cleanup stalls but before its consume post | Re-entry recognizes the cleared decision plus `stalled` and makes no pending transition |
 
 ## Crash Recovery And Conformance
 

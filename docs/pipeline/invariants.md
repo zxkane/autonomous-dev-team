@@ -8647,7 +8647,13 @@ through `itp_read_task`, return rc 0 without mutation when already `stalled`,
 fail without mutation when the expected owner state is absent, and otherwise
 perform exactly one atomic
 `itp_transition_state ISSUE EXPECTED_STATE stalled`. The transition preserves
-`autonomous`. These helpers never call or alter `mark_stalled`; its
+`autonomous`. The expected-state-only removal is deliberate: if an issue
+already has an invalid second transitional label (for example `in-progress`
+plus `pending-dev` on the dev PR-found route), the helper does not widen its
+pinned D3 transition. It may therefore leave that pre-existing residue beside
+`stalled`; [INV-25](#inv-25-terminal-labels-approved-stalled-are-sticky-transitional-residue-is-healed-at-tick-start)
+removes it at the next tick before selection. The guard never creates that
+residue or adds a pending label. These helpers never call or alter `mark_stalled`; its
 retry-exhaustion wording, liveness gate, and every existing call site remain
 unchanged.
 
@@ -8663,7 +8669,12 @@ transition arguments byte-for-byte. A live intent performs
    `stalled`, then idempotently consumes without a second transition;
 3. after transition and consume are both durable, repeated cleanup recognizes
    the consumed newest decision plus `stalled` and makes no pending write;
-4. wrong-owner race or authoritative comment-read failure: no pending
+4. operator clear lands after the stalled transition but before consume
+   completes: clear remains authoritative even if the racing stale consume
+   posts after it; re-entry recognizes the cleared newest decision plus
+   `stalled` and makes no pending write. Clear re-arms the marker generation
+   only and never moves issue labels;
+5. wrong-owner race or authoritative comment-read failure: no pending
    transition and no consume; the intent remains live for reconciliation.
 
 The cleanup guard retains the invocation from its authoritative read and binds
@@ -8689,7 +8700,7 @@ override; production intent creation remains intentionally inert.
 **Test**: `tests/unit/test-terminal-control.sh`
 (`TC-TERMCTRL-001..074`: grammar, generation-aware idempotency, trusted-author filtering,
 lifecycle/newest selection, owner-aware transitions, unchanged pending routes,
-wrong-owner and both crash windows, provider authority classification,
+wrong-owner, clear/consume races, and both crash windows, provider authority classification,
 `mark_stalled` checksum pins, provider-neutrality, executable-spec coverage,
 and greater-than-80-percent decision coverage);
 `tests/e2e/run-terminal-control-e2e.sh` (`TC-TERMCTRL-090`: separate write and
