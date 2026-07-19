@@ -360,6 +360,57 @@ Two layers:
 
 2. **Wrapper-side fallback** in `autonomous-dev.sh` MODE=resume: if `resume_agent` exits non-zero (e.g. PTL hits the wrapper before the next dispatcher tick can route around it), the wrapper mints `NEW_SESSION_ID=$(uuidgen)`, **posts a standalone `Dev Session ID: \`<NEW_SESSION_ID>\` (mode: resume-fallback)` comment**, then runs `run_agent` with the new id. The standalone Dev-Session-ID post is a separate `gh issue comment` from the explanatory "Resume failed... Starting new session..." comment so a single failed post can't orphan the fresh session id from the dispatcher's view (`extract_dev_session_id` would otherwise read the dead session id and the next tick would resume into the same crash).
 
+## Token accounting and post-run gates ([INV-141])
+
+When either token budget is configured, every agent launch in this wrapper run
+is a separate strict accounting invocation. `_token_dev_launch_begin` increments
+a wrapper-local ordinal, derives
+`accounting_invocation_id(RUN_ID,dev,dev,attempt)`, persists
+`accounting_start`, then captures a fresh byte offset of the shared `LOG_FILE`
+immediately before the launch. `_token_dev_launch_finish` runs immediately after
+that one `run_agent`/`resume_agent` exits, parses only the bytes appended since
+its own offset through the unchanged `metrics_parse_tokens`, and commits usage
+or `no-usage-in-log`. Thus the initial/resume launch is attempt 1 and the
+in-wrapper resume fallback is attempt 2; neither can consume the other
+attempt's token record. The wrapper-level `METRICS_LOG_OFFSET` used by the
+observe-only INV-70 event remains separate and unchanged.
+
+Budget checks are post-run: the invocation that crosses a limit finishes and is
+never token-killed. Immediately before the cleanup transition block,
+`token_budget_evaluate_dev_run` checks each invocation and then
+`token_issue_projection ISSUE RUN_ID`. Completed usage violates only at
+`total_tokens > limit`; equality is allowed. In hard mode, an invocation
+overage/unknown writes an invocation-keyed INV-140 intent, while cumulative
+overage or fail-closed history writes a digest-keyed issue intent. The existing
+`terminal_intent_cleanup_transition` below resolves that intent to
+`in-progress -> stalled`; no parallel label route is introduced. A projection
+mechanism failure is loud but preserves normal dev cleanup so dispatcher
+admission can retry next tick. Warn mode posts a deduplicated breadcrumb and
+preserves routing. With both budgets unset these helpers return before
+accounting I/O. If an invocation violation already persisted its intent, the
+cumulative projection still runs but cannot create a second live intent. If
+the required hard intent cannot be persisted, cleanup refuses every pending
+transition and leaves `in-progress` unchanged. Invocation intent writes first
+stage a trusted `token-budget-intent-pending-v1` marker and resolve it only
+after the INV-140 write succeeds. If the wrapper exits between those writes,
+dispatcher Step 5 retries the pinned dev-wrapper intent before ordinary crash
+routing, confirms that exact generation is live, and then enters the same
+cleanup guard. Exact whole-body self-authored markers are required. A failed
+recovery preserves `in-progress` for another tick; a generation already
+consumed by an earlier stall is resolved without a second terminal route.
+Before provider writes, the helper stages an invocation-keyed recovery pointer
+beside the strict record. If both provider writes fail, Step 5 validates that
+pointer against the immutable dev record and retries only that actual hard
+decision before ordinary crash routing; unrelated historical records are inert.
+
+Configuration is validated before cleanup ownership or agent launch. Hard mode
+refuses an unaccountable adapter or failed `accounting_start` with no cleanup
+label mutation; the startup-failure report/transition is also bypassed for that
+refusal. If an earlier attempt in the same wrapper run already committed a hard
+violation, its terminal evaluation takes precedence over a later retry's
+`accounting_start` refusal: cleanup still consumes the durable violation intent
+and transitions to `stalled`. Warn mode logs the degradation and proceeds.
+
 ## Exit trap (`cleanup`)
 
 The trap is the wrapper's actual contract with the dispatcher — it runs on every exit path, including SIGTERM from the dispatcher's Step 5a. Its job is to (a) reap the lane's process groups, (b) free the PID file, (c) post the Session Report, (d) update labels, (e) tear down auth.
@@ -404,7 +455,7 @@ flowchart TD
   - **If the wrapper exits before reaching that point AND `ISSUE_NUMBER` was parsed** (e.g. `gh-with-token-refresh.sh` couldn't find a real `gh` per #92, fetch issue failed, etc.), the trap posts an `Agent Session Report (Dev) ... Mode: startup-failure` comment with non-zero exit code and flips the label to `pending-dev`. This routes the failure through the dispatcher's `count_agent_failures` counter (rather than the dispatcher-detected-crash counter) and surfaces the underlying error on the issue itself, instead of stalling silently after `MAX_RETRIES`.
   - **If the wrapper exits before `ISSUE_NUMBER` is parsed** (very early arg-parse error or pre-auth failure), the trap stays silent — there's nowhere to post and no PID context to clean up. The dispatcher's Step 5b sees DEAD-no-PR and increments the crash counter as a last-resort safety net.
 - **PR existence verification on exit-0**: added in #40. Without it, an agent that exits 0 without creating a PR (e.g. errored after partial work, decided no change needed) would push the issue to `pending-review` and confuse the review wrapper, which would then fail with "no PR found" and bounce it back to `pending-dev` anyway. The verification short-circuits that round-trip.
-- **Resource terminal-intent override** ([INV-140](invariants.md#inv-140-resource-terminal-intent-comments-are-the-durable-authoritative-terminal-control-record-and-wrapper-cleanup-must-resolve-a-live-intent-before-any-pending-state-write)): immediately before every cleanup transition to `pending-dev` or `pending-review`, `terminal_intent_cleanup_transition` reads the authoritative issue-comment history. No live intent delegates the exact original transition arguments. A live trusted intent instead calls `stall_from_active ISSUE in-progress INTENT_ID` and posts the consume marker only after the atomic `in-progress -> stalled` transition succeeds. A crash after intent write but before cleanup is recovered by the next cleanup; a crash after the transition but before consume re-enters idempotently, observes `stalled`, and finishes the consume. An operator clear in that stall-then-consume window remains authoritative even if the racing stale consume posts after it; re-entry recognizes the cleared generation plus `stalled` and makes no pending write. The helper's pinned expected-state-only removal means an already-invalid `in-progress + pending-dev` combination can retain `pending-dev` beside `stalled`; INV-25 heals that pre-existing residue at the next tick before selection. The guard itself never adds pending residue. A wrong-owner race or unreadable comment history makes no pending mutation and leaves the intent live. Production remains inert until #506 writes an intent.
+- **Resource terminal-intent override** ([INV-140](invariants.md#inv-140-resource-terminal-intent-comments-are-the-durable-authoritative-terminal-control-record-and-wrapper-cleanup-must-resolve-a-live-intent-before-any-pending-state-write)): immediately before every cleanup transition to `pending-dev` or `pending-review`, `terminal_intent_cleanup_transition` reads the authoritative issue-comment history. No live intent delegates the exact original transition arguments. A live trusted intent instead calls `stall_from_active ISSUE in-progress INTENT_ID` and posts the consume marker only after the atomic `in-progress -> stalled` transition succeeds. A crash after intent write but before cleanup is recovered by the next cleanup; a crash after the transition but before consume re-enters idempotently, observes `stalled`, and finishes the consume. An operator clear in that stall-then-consume window remains authoritative even if the racing stale consume posts after it; re-entry recognizes the cleared generation plus `stalled` and makes no pending write. The helper's pinned expected-state-only removal means an already-invalid `in-progress + pending-dev` combination can retain `pending-dev` beside `stalled`; INV-25 heals that pre-existing residue at the next tick before selection. The guard itself never adds pending residue. A wrong-owner race or unreadable comment history makes no pending mutation and leaves the intent live. INV-141 token-budget evaluation is the first production intent writer.
 - **Session Report format**: see [INV-03](invariants.md#inv-03-dev-session-report-comment-format). The dispatcher's Step 4a parses these to count agent failures.
 - **Session Report is posted FIRST, before the INV-79 brokers** ([INV-111](invariants.md#inv-111-the-dev-wrappers-session-report-is-the-first-durable-write-in-cleanup-gh-resolution-is-re-armed-per-write-against-a-vanished-auth-shim-and-a-same-head-review-fail-with-no-resolvable-session-id-self-heals-via-a-bounded-fresh-dev-new-instead-of-parking-forever), #402): the report needs only `itp_post_comment` + `$SESSION_ID` + the exit code already known at trap entry — none of that is produced by `drain_agent_pr_create` / `drain_agent_bot_triggers` / the `PR_EXISTS` lookup, so there is no ordering reason to post it after them. The `Dev Session ID:` marker it carries is the dispatcher's ONLY cross-box session-identity channel; losing it (the pre-fix ordering, combined with the `gh`-resolution failure below) permanently blocks [INV-98]'s same-HEAD delegation for that issue. The report's `Exit code:` field is therefore the RAW exit code, captured BEFORE the SIGTERM+`PR_EXISTS` [INV-15] rewrite further down — a SIGTERM+PR-ready handoff renders `Exit code: 143` in the report even though the label transition still correctly routes to `pending-review`. `count_agent_failures` already excludes 0/143/137 unconditionally, so this changes no consumer's behavior. The label flip itself is **not** reordered — it still depends on `PR_EXISTS`, which depends on the (now-later) broker steps.
 - **`gh`-resolution rearm against a vanished auth shim** ([INV-111], #402): the trap calls a shared helper, `rearm_gh_resolution` (`lib-auth.sh`), **immediately before EACH load-bearing `gh`-touching write** — the Session Report post, `drain_agent_pr_create`, the `PR_EXISTS` lookup, `drain_agent_bot_triggers`, and the label flip — not once at trap entry. The incident that motivated this proved the shim dir can vanish at ANY point mid-cleanup (alive at a token-daemon refresh, gone nine minutes later), so an entry-time-only probe can pass and never re-arm for a write further down the same trap body. The helper unconditionally drops bash's stale command hash (`hash -d gh` — cheap even when the shim is alive, since the next call just re-resolves and re-hashes the same path) and, ONLY when `${GH_WRAPPER_DIR}/gh` is actually missing, strips the dead `PATH` entry (`_strip_path_entry`, `lib-auth.sh`). Bash's command hash caches a resolved binary's path and is not invalidated when that path's file disappears — `PATH` is only re-searched when there is no cached location, never when a cached one stops existing — so every subsequent bare `gh` call in this shell would otherwise fail `rc=127` regardless of how healthy the rest of auth is. Resolution then falls back to the system `gh` using the token just refreshed. A no-op, and harmless, when the shim is intact. `autonomous-review.sh`'s own cleanup path has the identical vanished-shim class at its `drain_agent_bot_triggers` call site; adopting the shared helper there is a documented follow-up.

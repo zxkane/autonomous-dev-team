@@ -339,6 +339,214 @@ In environments without Layer 3 (server-side), Layers 1 and 2 must both be insta
 
 ---
 
+## INV-141: token budgets use strict accounting for post-run wrapper gates and pre-dispatch admission, with durable terminal routing
+
+_Triage (issue #236): [machine-checked: tests/unit/test-lib-token-budget.sh, tests/unit/test-token-budget-wiring.sh, tests/unit/test-token-budget-e2e.sh, tests/e2e/run-token-budget-gates-e2e.sh]_
+
+**Configuration and refusal:** `AGENT_TOKEN_BUDGET` limits one agent invocation;
+`ISSUE_TOKEN_BUDGET` limits cumulative committed dev plus review usage for one
+issue; `TOKEN_BUDGET_MODE` is `warn|hard` and defaults to `warn` when either
+budget is set. A set budget must match `^[1-9][0-9]*$`. Invalid or empty values,
+zero, negatives, non-integers, and an invalid mode are loud configuration
+errors. The affected dispatcher or wrapper refuses before launch/label mutation
+and retries after the operator repairs configuration. With both budgets unset,
+all wrapper accounting adapters return before store I/O and every dispatcher
+admission call returns before store or provider I/O, preserving prior behavior.
+Hard mode also refuses a launch whose adapter has no
+`metrics_parse_tokens` format; claude and codex are currently accountable,
+while kiro, agy, gemini, opencode, and every unknown/future adapter are not.
+This is an allowlist, so a new adapter cannot silently bypass hard accounting.
+
+**Invocation identity and ingest:** numeric usage comes ONLY from the unchanged
+`metrics_parse_tokens` last-record parser. Dev launches use
+`(RUN_ID,dev,dev,attempt)` with a wrapper-local ordinal and a fresh byte offset
+captured immediately before each launch, including the in-wrapper resume
+fallback. Each launch gets `accounting_start` immediately before execution and
+a strict commit immediately after it exits. Review fan-out members use
+`(RUN_ID,review,<member-session-UUID>,1)`, so same-named members remain distinct;
+while budgets are configured their controller logs also include that UUID, so
+they never parse a shared file. With budgets unset the legacy path is unchanged.
+`AGENT_CONTROLLER_LOGS` retains the actual tee path for durable run artifacts;
+the separate generic-log array selects the usage parser's source. Codex
+internal bounded reruns stay within that one invocation and commit the final
+parser record. A parsed total commits through `accounting_commit_usage`;
+no parsed total commits `usage-unknown` with `no-usage-in-log`; dropped or timed
+out review members commit `member-dropped`. A commit failure is loud and
+normalizes to unknown: warn mode preserves routing, while hard mode follows the
+same terminal path as unknown usage. `accounting_start` failure is launch-fatal
+in hard mode and observe-only degradation in warn mode. The review wrapper's
+browser-E2E lane and INV-64 smoke probes remain intentionally uncounted because
+they have no INV-70 usage emit; this known undercount is out of scope rather
+than a second parser or ingest path.
+
+If a later fan-out member's hard `accounting_start` fails after earlier members
+already ran, those started members still commit and run through the member gate
+before the launch refusal is handled. A prior member violation therefore wins
+and routes terminal. Otherwise the wrapper leaves `reviewing` unchanged and
+posts `failed-non-substantive cause=token-budget-launch-refused`; Step 5 uses
+that durable retry class to restore `pending-review`.
+
+**Projection:** `token_issue_projection ISSUE [CURRENT_RUN_ID]` runs
+`accounting_reconcile`, inspects all remaining opens, commits every open whose
+`run_id` differs from `CURRENT_RUN_ID` as `orphaned-by-crash` (with no current
+run, every open is orphaned), then runs `accounting_admission_query`. A current
+wrapper's own open record is untouched. Reconcile/sweep/query failure and a
+residual `incomplete` status normalize to `unavailable`; `usage-unknown` and
+`corrupt` remain fail-closed evidence; `complete` supplies `total_tokens`.
+The label state machine and held dispatch marker permit at most one wrapper per
+issue/side; if the conservative sweep races a live commit, strict replay
+conflict makes the later commit fail loudly and hard mode fails closed. Under
+`remote-aws-ssm`, dispatcher projection runs synchronously on the execution host
+through `token-budget-projection-remote-aws-ssm.sh`; transport failure is
+`unavailable`, never controller-local fallback.
+
+**Comparison boundaries:** completed usage is over budget only when
+`total_tokens > limit`; equality is within the allowance. Pre-dispatch
+cumulative admission alone blocks at `total_tokens >= ISSUE_TOKEN_BUDGET`,
+because a new launch at exact equality guarantees overshoot. The crossing
+invocation is never killed: enforcement is post-run.
+
+**Wrapper routing:** dev evaluates every committed invocation and the issue
+projection immediately before INV-140 cleanup transitions. Review starts and
+commits every launched member regardless of verdict, publishes the verdict
+unchanged, then evaluates member limits; immediately before approval, after the
+CI-rollup gate, it evaluates cumulative usage once. In hard mode, invocation
+overage/unknown writes an intent whose intent and invocation IDs are the
+violating invocation ID. Issue overage or fail-closed history writes
+`token-cap-issue-<digest12>` with the full accounting `source_digest`.
+Dev delegates terminal movement to its existing cleanup guard. Review invokes
+`terminal_intent_cleanup_transition` explicitly on the normal violation path,
+because normal review completion bypasses crash teardown. Both converge through
+INV-140 to `stalled` without pending-label resurrection. A dev projection that
+is merely unavailable logs and preserves normal cleanup; a review pre-approval
+projection that is unavailable holds without intent or stall, transitions
+`reviewing -> pending-review`, sets `RESULT_PARSED=true`, and performs no
+approve/merge. It emits a durable
+`failed-non-substantive cause=token-budget-unavailable` trailer first; if the
+hold transition fails, dispatcher Step 5 recognizes that trailer and restores
+`pending-review`, never `pending-dev`. If both the trailer and transition fail,
+hard-mode Step 5 recovery still retries review ownership. Dev still
+evaluates cumulative projection after an invocation violation, but once the
+invocation-keyed intent is durable it does not write a second issue-keyed
+intent. If a hard wrapper violation cannot persist its required intent, normal
+dev cleanup or review approval is refused and the active owner label is left
+unchanged rather than failing open. Any wrapper terminal transition failure
+also exits nonzero with its intent still live for Step 5 recovery.
+Review retry trailers are generation-scoped: Step 5 accepts them only when they
+are newer by `(createdAt,id)` than the latest trusted self-authored
+`mode=review` dispatch token. The ID tie-break admits a legitimate trailer
+posted in the same GitHub timestamp second. Historical trailers cannot requeue
+a newer failed generation, and malformed or non-string comment fields are
+ignored.
+
+Invocation-level writes use a two-marker recovery protocol around INV-140.
+Before `terminal_intent_write`, the wrapper idempotently posts a trusted
+`token-budget-intent-pending-v1` marker containing the pinned issue, intent,
+invocation, reason, and wrapper owner; after the intent is durable it posts the
+matching `token-budget-intent-resolved-v1` marker. While hard token enforcement
+is active, dispatcher Step 5 checks dead active owners for an unresolved
+self-authored marker before ordinary crash routing, retries the exact pinned
+intent, reads INV-140 back, and only when that matching generation is currently
+live resolves the marker and immediately routes through
+`terminal_intent_cleanup_transition`. If the generation was already consumed
+or cleared, recovery resolves the stale pending marker and returns to ordinary
+Step 5 routing. Pending and resolved grammars require an exact whole comment
+body from a self author: human text and larger self-authored verdicts quoting a
+marker are ignored. A comment read, malformed intent read, or repeated
+intent-write failure preserves the active owner for the next tick. Resolved
+generations do not replay. Before either provider write, the wrapper atomically
+stages an invocation-keyed recovery pointer beside the strict INV-139 record;
+the pointer contains no token total and is not a second ledger. If both the
+pending-marker post and intent write fail, Step 5 validates that pointer against
+the named immutable record and recovers only the hard decision that actually
+created it. Historical warn-mode or formerly-under-limit records have no pointer
+and are never reclassified after a policy change. A malformed/unreadable pointer
+or record preserves ownership instead of failing open. On `remote-aws-ssm`, read
+and generation-matched clear both run synchronously on the execution host; a
+transport failure is unavailable, never a controller-local fallback. Pointer
+stage and generation-matched compare-delete clear both hold INV-139's mandatory
+per-issue lock, so clear of generation A cannot race a newer stage and delete
+generation B. If pointer stage, pending-marker post, and terminal-intent write
+all fail, no later process can reconstruct the exact decision without
+reclassifying history. While a hard `AGENT_TOKEN_BUDGET` remains set,
+dispatcher Step 5 therefore leaves the dead wrapper's active owner unchanged
+instead of entering ordinary crash routing and launching another invocation;
+changing or unsetting that gate explicitly re-arms legacy recovery. The
+disabled fast path performs no comment or accounting I/O. A later
+`accounting_start` refusal may post its retry marker only when cleanup
+evaluation found no earlier hard terminal decision; it cannot mask an
+undurable violation whose recovery pointer, pending marker, and intent writes
+all failed.
+
+**Dispatcher admission:** `token_admission_gate ISSUE PENDING_STATE MODE` runs
+after a winning dispatch marker and before every label/comment/spawn side
+effect at seven sites: Step 2 dev-new (`"",dev-new`), Step 3 review
+(`pending-review,review`), prompt-too-long recovery
+(`pending-dev,dev-new`), Step 4 dev-resume (`pending-dev,dev-resume`), INV-12
+no-PR fresh dev, INV-35 substantive fresh dev, and crashed/self-heal fresh dev
+(the latter three all `pending-dev,dev-new`). Hard complete-at-cap,
+`usage-unknown`, or `corrupt` writes the digest-derived issue intent and
+transitions to `stalled`; pending owners use `stall_from_pending`, while the
+autonomous-only dev-new site atomically adds `stalled` and retains
+`autonomous`. The ownership marker is released only after transition and the
+structured stop report. A wrong-owner abort clears the just-written intent
+before release; if that clear fails, the marker is retained. Label-read and
+terminal-transition failures are not wrong-owner evidence, so they retain both
+the live intent and marker. After a successful stall and report, the dispatcher
+consumes the intent and only then releases the marker; stop-report or consume
+failure likewise retains the live intent and marker. `unavailable` releases the
+marker and blocks only this tick, without stalling. Every Step 5
+active-to-pending reconciliation passes through INV-140 even if budgets have
+since been unset, so a persisted live intent converges to `stalled` instead of
+being overwritten by crash recovery. With no live intent, INV-140 delegates the
+same requested transition. INV-108's marker infrastructure failure remains
+fail-open:
+the gate is positioned after the acquire call, so it still runs even when no
+real marker was created, and no controller-local marker failure weakens the
+accounting decision. Configuration refusals propagate through the three nested
+fresh-dev routers as errors, not as "handled" or "no PR" results; the top-level
+tick exits nonzero before any label mutation at those sites.
+
+**Warn breadcrumbs:** warn mode never changes routing. It posts at most one
+trusted marker comment per parsed `(issue,scope,limit)` key:
+
+```text
+<!-- token-budget-warn-v1: issue=<N> scope=<invocation|issue> side=<dev|review|dispatch> limit=<L> measured=<M> -->
+```
+
+`side` and `measured` are evidence, not identity: measured growth or a second
+observer cannot duplicate a warning, while changing the configured limit
+re-arms it. Missing usage and unaccountable adapters are included as evidence.
+
+**Producer/consumer:** `lib-token-budget.sh` owns all policy and orchestration;
+`autonomous-dev.sh`, `autonomous-review.sh`, `dispatcher-tick.sh`, and the three
+fresh-dev routers in `lib-dispatch.sh` consume it. It uses the public INV-139
+accounting, INV-140 terminal control, dispatch-marker, and ITP seams only.
+
+**Status**: **ENFORCED** (closes #506).
+
+**Test**: `tests/unit/test-lib-token-budget.sh` (configuration, boundaries,
+strict commit adapters, projection status mapping/orphan sweep, remote
+transport, breadcrumb parsed-key dedup, intent identities, marker ordering,
+and greater-than-80-percent source-derived branch coverage);
+`tests/unit/test-token-budget-wiring.sh` (dev attempt offsets/ordinals, review
+UUID identity/universal commit, seven admission sites, explicit review routing,
+and nested admission-error propagation);
+`tests/unit/test-token-budget-wrapper-routing.sh` (review violation/hold exits
+and extracted dispatcher Step 5 intent/hold/pending-marker recovery with real
+protocol helpers);
+`tests/unit/test-token-budget-e2e.sh` and
+`tests/e2e/run-token-budget-gates-e2e.sh` (warn/hard overshoot, cumulative
+equality, fan-out aggregation, and crash/restart convergence). Test plan:
+[`docs/test-cases/token-budget-gates.md`](../test-cases/token-budget-gates.md).
+
+**Cross-references**:
+- [INV-70](#inv-70-metrics-are-observe-only-emit-failures-never-change-wrapper-behavior) - the unchanged observe-only mirror and sole parser implementation.
+- [INV-139](#inv-139-the-resource-accounting-store-lib-accountingsh-is-a-separate-mandatory-lock-crash-consistent-authority-metrics_emitmetrics_prune-remain-byte-unchanged-and-provably-cannot-reach-it) - strict accounting authority.
+- [INV-140](#inv-140-resource-terminal-intent-comments-are-the-durable-authoritative-terminal-control-record-and-wrapper-cleanup-must-resolve-a-live-intent-before-any-pending-state-write) - durable terminal transition and consume ordering.
+
+---
+
 ## INV-18: Cold-start grace period before stale detection
 
 _Triage (issue #236): [machine-checked: tests/unit/test-dispatcher-reliability-99.sh]_
@@ -8536,7 +8744,7 @@ _Triage (issue #236): [machine-checked: tests/unit/test-pr-author-escalation-men
 
 ---
 
-## INV-139: the resource-accounting store (`lib-accounting.sh`) is a SEPARATE, mandatory-lock, crash-consistent authority — `metrics_emit`/`metrics_prune` remain byte-unchanged and provably cannot reach it, and the store is INERT (zero production call sites) until a future issue wires enforcement
+## INV-139: the resource-accounting store (`lib-accounting.sh`) is a SEPARATE, mandatory-lock, crash-consistent authority; `metrics_emit`/`metrics_prune` remain byte-unchanged and provably cannot reach it
 
 _Triage (issue #236): [machine-checked: tests/unit/test-lib-accounting.sh, tests/e2e/run-resource-accounting-e2e.sh]_
 
@@ -8563,21 +8771,22 @@ Writes use a hardened form of [INV-135](#inv-135-the-agent-progress-lease-is-a-p
 
 **Reconciliation proof-of-death:** `accounting_reconcile <issue>` promotes a `started`, `side=dev` record to terminal `usage-unknown` ONLY when it reads validated existing [INV-135](#inv-135-the-agent-progress-lease-is-a-producer-only-signal-refreshed-on-launch-and-per-complete-output-record-never-by-the-heartbeat) evidence proving that invocation's wrapper dead — the run-id sidecar now names a DIFFERENT run, or the run-id sidecar and progress lease name the same current run and the lease's validated `pid` fails `kill -0`. Malformed, symlinked, missing, or cross-run sidecars are not proof. An issue being closed is explicitly NOT proof — closing performs no accounting mutation (there is no code path from issue-state to this store). `side=review` `started` records have no INV-135 lease to read (the review wrapper never exports `AGENT_PROGRESS_FILE`) and are left untouched — safe-default `incomplete`, never misclassified as dead by absence of evidence; an owner-aware review-side signal is explicitly out of this issue's scope (tracked in the sibling terminal-control issue). `accounting_ack_unknown` is the only sanctioned response to a sticky `usage-unknown`: it APPENDS and synchronously persists an audit record to `acks.jsonl` and never deletes or rewrites the underlying record. Re-running reconcile (re-arm) never rewrites an already-terminal record of either kind — known totals are never dropped by a repeated scan.
 
-**Remote topology (documented, not implemented by this issue):** the canonical store lives on the wrapper EXECUTION host (the same host `metrics.jsonl` and the INV-135 lease already live on). Under `EXECUTION_BACKEND=remote-aws-ssm`, a future dispatcher-side caller runs this same library synchronously on the SSM target (mirroring `session-log-probe-remote-aws-ssm.sh`'s existing pattern) and normalizes the JSON; any SSM/transport failure must surface as `unavailable`, NEVER a silent fallback to dispatcher-local state — a different host's accounting is not a substitute for the authoritative one. Backend/instance migration of the store is unsupported. No SSM-calling code exists yet; this paragraph pins the contract a future caller must honor.
+**Remote topology:** the canonical store lives on the wrapper EXECUTION host (the same host `metrics.jsonl` and the INV-135 lease already live on). Under `EXECUTION_BACKEND=remote-aws-ssm`, the INV-141 dispatcher projection runs this same library synchronously on the SSM target through `token-budget-projection-remote-aws-ssm.sh` (mirroring `session-log-probe-remote-aws-ssm.sh`) and normalizes the JSON. Any SSM/transport failure surfaces as `unavailable`, NEVER a silent fallback to dispatcher-local state — a different host's accounting is not a substitute for the authoritative one. Backend/instance migration of the store is unsupported.
 
-**Zero production call sites (grep-pinned):** as of this issue, no file under `skills/autonomous-dispatcher/scripts/*.sh` other than `lib-accounting.sh` itself calls `accounting_(invocation_id|start|commit_usage|commit_unknown|reconcile|ack_unknown|admission_query)`. The store exists so a future admission gate (#506) and terminal-control helpers (a sibling issue) can read authoritative totals; wiring either is explicitly out of scope here.
+**Production ingress remains one choke point:** INV-141 wires the wrappers and dispatcher through `lib-token-budget.sh`; no wrapper or dispatcher call site implements a second ledger or parser. The budget library is the sole production adapter from `metrics_parse_tokens` output into `accounting_start` / strict terminal commits and the sole projection orchestrator over `accounting_reconcile` / `accounting_admission_query`. `accounting_ack_unknown` remains operator-only.
 
-**Why**: #450 (parent tracking issue) needs a resource-accounting authority a hard gate can be built on. [INV-70](#inv-70-metrics-are-observe-only-emit-failures-never-change-wrapper-behavior)'s `metrics_emit` is deliberately observe-only (every call swallows internal errors) and `metrics_prune` age-drops lines after 90 days — neither property is compatible with a value a future admission decision must trust. Rather than bolting a strict mode onto `metrics_emit` (which would break INV-70's own swallow-all contract for every existing observe-only caller), this issue stands up a wholly separate store with its own mandatory-lock, crash-consistent semantics, and proves by construction (byte-unchanged `lib-metrics.sh`, a directory-isolation guard test, and the zero-call-site grep pin) that today's observe-only metrics lane is untouched.
+**Why**: #450 (parent tracking issue) needs a resource-accounting authority a hard gate can trust. [INV-70](#inv-70-metrics-are-observe-only-emit-failures-never-change-wrapper-behavior)'s `metrics_emit` is deliberately observe-only (every call swallows internal errors) and `metrics_prune` age-drops lines after 90 days — neither property is compatible with an admission decision. Rather than bolting a strict mode onto `metrics_emit` (which would break INV-70's own swallow-all contract for every existing observe-only caller), this store remains wholly separate with mandatory locking and crash-consistent writes. The byte-unchanged `lib-metrics.sh` and directory-isolation guard prove the observe-only metrics lane is untouched even after INV-141 begins consuming the strict store.
 
-**Producer**: `lib-accounting.sh::accounting_invocation_id` / `accounting_start` / `accounting_commit_usage` / `accounting_commit_unknown` / `accounting_reconcile` / `accounting_ack_unknown` / `accounting_admission_query` (plus the private `_accounting_lock` / `_accounting_write_atomic` / `_accounting_issue_dir` / `_accounting_pid_dir` helpers). Not yet wired into any wrapper or the dispatcher.
-**Consumer**: none in production yet — reserved for the future admission gate (#506) and terminal-control helpers (the sibling terminal-control issue), both of which depend on this issue.
-**Status**: **ENFORCED** (the store itself; inertness pinned by the grep-pin test). The consumer half (admission enforcement) is future scope.
-**Test**: `tests/unit/test-lib-accounting.sh` (TC-RESOURCEACCOUNT-001..080 — identity purity/domain/tuple binding including same-named-review-member and attempt-increment discrimination; strict-commit idempotent replay, conflict rejection, required-start validation, canonical token spelling, restart survival, non-regular target/race rejection, and synchronous write-failure propagation; lifecycle non-conflation of `incomplete`/`usage-unknown`/`unavailable`/`corrupt`; full record-envelope validation; locked full-scan query correctness at 0/1/N invocations; projection full-envelope validation and rebuild on missing/stale/corrupt cache with identical total+digest after delete/requery; reconciliation's validated dead-PID/superseded-run-id/live-lease/cross-run/malformed-evidence/issue-closed-is-not-proof branches; ack-appends-never-deletes; re-arm never rewriting a terminal record; the `metrics_prune` directory-isolation checksum guard; the zero-production-call-site grep pin; a source-anchored semantic branch-outcome inventory; and an independent source-derived shell decision-site denominator, both enforcing greater than 80% xtrace coverage). `tests/e2e/run-resource-accounting-e2e.sh` (TC-RESOURCEACCOUNT-090 — dev + two same-name review members with distinct member UUIDs, projection delete + rebuild yielding an identical total; TC-RESOURCEACCOUNT-091 — a dead stub PID plus a superseded run-id reconciling to sticky `usage-unknown`, surfaced by `accounting_admission_query`).
+**Producer**: `lib-accounting.sh::accounting_invocation_id` / `accounting_start` / `accounting_commit_usage` / `accounting_commit_unknown` / `accounting_reconcile` / `accounting_ack_unknown` / `accounting_admission_query` (plus the private `_accounting_lock` / `_accounting_write_atomic` / `_accounting_issue_dir` / `_accounting_pid_dir` helpers).
+**Consumer**: `lib-token-budget.sh` under [INV-141], on behalf of both wrappers and every dispatcher launch path.
+**Status**: **ENFORCED**. The store contract remains unchanged; INV-141 supplies its production consumers without weakening locking, validation, or metrics isolation.
+**Test**: `tests/unit/test-lib-accounting.sh` (TC-RESOURCEACCOUNT-001..080 — identity purity/domain/tuple binding including same-named-review-member and attempt-increment discrimination; strict-commit idempotent replay, conflict rejection, required-start validation, canonical token spelling, restart survival, non-regular target/race rejection, and synchronous write-failure propagation; lifecycle non-conflation of `incomplete`/`usage-unknown`/`unavailable`/`corrupt`; full record-envelope validation; locked full-scan query correctness at 0/1/N invocations; projection full-envelope validation and rebuild on missing/stale/corrupt cache with identical total+digest after delete/requery; reconciliation's validated dead-PID/superseded-run-id/live-lease/cross-run/malformed-evidence/issue-closed-is-not-proof branches; ack-appends-never-deletes; re-arm never rewriting a terminal record; the `metrics_prune` directory-isolation checksum guard; the production-call choke-point pin; a source-anchored semantic branch-outcome inventory; and an independent source-derived shell decision-site denominator, both enforcing greater than 80% xtrace coverage). `tests/e2e/run-resource-accounting-e2e.sh` (TC-RESOURCEACCOUNT-090 — dev + two same-name review members with distinct member UUIDs, projection delete + rebuild yielding an identical total; TC-RESOURCEACCOUNT-091 — a dead stub PID plus a superseded run-id reconciling to sticky `usage-unknown`, surfaced by `accounting_admission_query`).
 
 **Cross-references**:
 - [INV-70](#inv-70-metrics-are-observe-only-emit-failures-never-change-wrapper-behavior) — the observe-only sibling this issue deliberately does NOT modify; this invariant's directory-isolation guard is the proof.
 - [INV-81](#inv-81-every-wrapper-run-mints-a-run-id-and-a-durable-per-run-artifact-dir-the-run-id-threads-through-logs-metrics-and-every-wrapper-posted-comment-footer-statussh-answers-pipeline-state-from-the-dispatchers-real-predicates-observe-only--never-changes-wrapper-rc-or-labels) — the `RUN_ID` this store's identity construction consumes.
 - [INV-135](#inv-135-the-agent-progress-lease-is-a-producer-only-signal-refreshed-on-launch-and-per-complete-output-record-never-by-the-heartbeat) — the lease sidecars reconciliation reads as proof-of-death, and the tmp-then-rename write idiom this store mirrors.
+- [INV-141](#inv-141-token-budgets-use-strict-accounting-for-post-run-wrapper-gates-and-pre-dispatch-admission-with-durable-terminal-routing) — the production ingest, projection, and admission consumer.
 - [`docs/pipeline/metrics.md`](metrics.md) — cross-references this invariant as the authoritative accounting store, distinct from the observe-only mirror `metrics.jsonl` remains.
 
 ---
@@ -8686,17 +8895,17 @@ This guard reuses the existing `stalled` destination and three existing
 movements. Because the dev cleanup path moves directly from `in-progress`,
 `in-progress -> stalled` is one required new movement and is declared in
 `transitions.json`; all four helper movements are literal write sites scanned
-by the executable spec-drift gate. No label is introduced. The guard is
-dormant until #506 writes an intent from production budget enforcement.
+by the executable spec-drift gate. No label is introduced. INV-141 now writes
+these intents from production token-budget enforcement.
 
-**Producer**: `lib-terminal-control.sh::terminal_intent_write` (no production
-call site yet; #506 is the first planned producer).
+**Producer**: `lib-terminal-control.sh::terminal_intent_write`; INV-141's
+`lib-token-budget.sh` is its first production caller.
 **Consumer**: `autonomous-dev.sh::cleanup()` and
 `autonomous-review.sh::cleanup()` through
 `terminal_intent_cleanup_transition`; operators through
 `terminal_intent_clear`.
-**Status**: **ENFORCED** for protocol, transition ownership, and cleanup
-override; production intent creation remains intentionally inert.
+**Status**: **ENFORCED** for protocol, transition ownership, cleanup override,
+and INV-141 production intent routing.
 **Test**: `tests/unit/test-terminal-control.sh`
 (`TC-TERMCTRL-001..074`: grammar, generation-aware idempotency, trusted-author filtering,
 lifecycle/newest selection, owner-aware transitions, unchanged pending routes,
@@ -8709,7 +8918,8 @@ no pending resurrection).
 
 **Cross-references**:
 - [INV-25](#inv-25-terminal-labels-approved-stalled-are-sticky-transitional-residue-is-healed-at-tick-start) - terminal-label stickiness this guard protects before pending residue can be written.
-- [INV-139](#inv-139-the-resource-accounting-store-lib-accountingsh-is-a-separate-mandatory-lock-crash-consistent-authority--metrics_emitmetrics_prune-remain-byte-unchanged-and-provably-cannot-reach-it-and-the-store-is-inert-zero-production-call-sites-until-a-future-issue-wires-enforcement) - the resource-accounting authority #506 will consult before writing an intent.
+- [INV-139](#inv-139-the-resource-accounting-store-lib-accountingsh-is-a-separate-mandatory-lock-crash-consistent-authority-metrics_emitmetrics_prune-remain-byte-unchanged-and-provably-cannot-reach-it) - the resource-accounting authority INV-141 consults before writing an intent.
+- [INV-141](#inv-141-token-budgets-use-strict-accounting-for-post-run-wrapper-gates-and-pre-dispatch-admission-with-durable-terminal-routing) - the first production intent producer.
 - [`dev-agent-flow.md`](dev-agent-flow.md#exit-trap-cleanup) and [`review-agent-flow.md`](review-agent-flow.md#exit-trap-cleanup) - wrapper-specific cleanup ordering.
 
 ---

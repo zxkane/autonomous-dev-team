@@ -254,6 +254,11 @@ fi
 # pending-dev transition unchanged.
 # shellcheck source=lib-terminal-control.sh
 source "${LIB_DIR}/lib-terminal-control.sh"
+# [INV-141] Strict token accounting and post-run budget decisions.
+# shellcheck source=lib-accounting.sh
+source "${LIB_DIR}/lib-accounting.sh"
+# shellcheck source=lib-token-budget.sh
+source "${LIB_DIR}/lib-token-budget.sh"
 # Per-side AGENT_CMD override (INV-37). See autonomous-dev.sh for the
 # matching dev-side override. Together they let one project run dev
 # and review on different agent CLIs (e.g. claude for dev, agy for
@@ -362,6 +367,20 @@ for _req in PROJECT_ID REPO REPO_OWNER REPO_NAME PROJECT_DIR; do
     exit 1
   fi
 done
+
+# [INV-141] Refuse malformed budget configuration and hard-mode adapters that
+# cannot produce metrics_parse_tokens usage before auth setup, E2E, smoke, or
+# review fan-out can launch. This path performs no label mutation; a corrected
+# configuration is retried by the next dispatcher tick.
+token_budget_validate_config || exit 1
+if token_budget_enabled && [[ "$(token_budget_effective_mode)" == "hard" ]]; then
+  for _budget_agent in "${REVIEW_AGENTS_LIST[@]}"; do
+    if ! token_budget_adapter_accountable "$_budget_agent"; then
+      echo "token-budget: adapter '${_budget_agent}' has no accountable usage format; hard mode refuses the review launch" >&2
+      exit 1
+    fi
+  done
+fi
 
 # Resolve + export the effective base branch ONCE, right after conf is loaded
 # (issue #478, [INV-131]). `export` so the agent CLI subprocess (and its
@@ -2340,6 +2359,16 @@ declare -a AGENT_KIRO_LOGS=()
 # post-fan-out metrics loop passes it to metrics_parse_tokens to emit review-side
 # token_usage (review cost was previously dev-side-only, undercounting fleet cost).
 declare -a AGENT_GENERIC_LOGS=()
+# Controller tee logs remain separate from AGENT_GENERIC_LOGS because codex
+# token parsing uses its clean stdout capture. The controller path is persisted
+# into run artifacts for every member.
+declare -a AGENT_CONTROLLER_LOGS=()
+# [INV-141] Strict accounting identity and commit result for every started
+# fan-out member. These arrays remain parallel to AGENT_NAMES; codex internal
+# reruns stay inside the member's single invocation.
+declare -a AGENT_ACCOUNTING_IDS=()
+declare -a AGENT_ACCOUNTING_RESULTS=()
+TOKEN_REVIEW_LAUNCH_REFUSED=false
 # INV-78 (#233): the per-agent verdict-artifact FILE path, keyed by index. The
 # wrapper provisions it (_verdict_artifact_path under the per-run state dir),
 # exports it into the agent's subshell as VERDICT_ARTIFACT_PATH, and reads it back
@@ -2453,8 +2482,17 @@ fi
 
 for _agent in "${REVIEW_AGENTS_LIST[@]}"; do
   _agent_session_id=$(uuidgen)
+  _agent_accounting_id=""
+  if token_budget_enabled; then
+    if ! _agent_accounting_id="$(token_accounting_begin "$ISSUE_NUMBER" "${RUN_ID:-}" review "$_agent_session_id" 1 "$_agent")"; then
+      echo "token-budget: accounting_start failed for review member '${_agent}' (${_agent_session_id}); hard mode refuses this launch" >&2
+      TOKEN_REVIEW_LAUNCH_REFUSED=true
+      break
+    fi
+  fi
   AGENT_NAMES+=("$_agent")
   AGENT_SESSION_IDS+=("$_agent_session_id")
+  AGENT_ACCOUNTING_IDS+=("$_agent_accounting_id")
   # INV-78 (#233): provision THIS agent's verdict-artifact path + run dir. The
   # path is deterministic from PROJECT_ID + the session id (the `Review Session:`
   # UUID, INV-20 — one run-dir per agent run, no collision across a multi-codex
@@ -2481,6 +2519,10 @@ for _agent in "${REVIEW_AGENTS_LIST[@]}"; do
   # parent). The agent NEVER writes here; only the observe loop copies into it.
   AGENT_ARTIFACT_SNAPSHOTS+=("${_agent_artifact_path}.landed")
   _agent_log="/tmp/agent-${PROJECT_ID}-review-${ISSUE_NUMBER}-${_agent}.log"
+  if token_budget_enabled; then
+    _agent_log="/tmp/agent-${PROJECT_ID}-review-${ISSUE_NUMBER}-${_agent}-${_agent_session_id}.log"
+  fi
+  AGENT_CONTROLLER_LOGS+=("$_agent_log")
   # INV-58 (#205): capture agy's OWN --log-file path for an `agy` member so the
   # post-resolution drop-reason scrape can read it. The path is deterministic
   # from the session id (`_agy_log_file` in lib-agent.sh writes there). Guard the
@@ -2736,6 +2778,20 @@ for _agent in "${REVIEW_AGENTS_LIST[@]}"; do
   # _fanout_pids declaration above and INV-40.
   _fanout_pids+=("$!")
 done
+
+# No member was launched, so there is no fan-out state to resolve or commit.
+# Suppress the crash cleanup transition: a hard accounting-start refusal is a
+# retryable launch refusal and must leave the issue in its current state.
+if [[ "$TOKEN_REVIEW_LAUNCH_REFUSED" == "true" && ${#AGENT_NAMES[@]} -eq 0 ]]; then
+  emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-non-substantive" \
+    "token-budget-launch-refused" 2>/dev/null \
+    || log "WARNING: token-budget launch-refusal trailer failed for issue #${ISSUE_NUMBER}"
+  # [INV-129 [P3]] round=0 second reset channel (see the aggregate PASS branch).
+  itp_post_comment "$ISSUE_NUMBER" "$(_review_round_marker "$ISSUE_NUMBER" "${PR_HEAD_SHA:-}" 0)" 2>/dev/null || true
+  rm -rf "$_FANOUT_DIR" 2>/dev/null || true # Temp cleanup failure must not replace launch-refusal routing.
+  RESULT_PARSED=true
+  exit 1
+fi
 
 # Wait for the fanned-out review agents to finish — by their COLLECTED PIDs
 # only. A bare `wait` here would also block on the gh-token-refresh-daemon and
@@ -3727,6 +3783,23 @@ for _i in "${!AGENT_NAMES[@]}"; do
   esac
 done
 
+# [INV-141] Strict usage commit is independent of INV-70 metrics emission and
+# runs for every started member. Pass/fail members parse the same generic log
+# as metrics_parse_tokens; dropped/timed-out members commit member-dropped.
+if token_budget_enabled; then
+  for _mi in "${!AGENT_NAMES[@]}"; do
+    _mstate="${AGENT_VERDICTS[$_mi]}"
+    _munknown=""
+    if [[ "$_mstate" == "unavailable" || "$_mstate" == "timed-out" ]]; then
+      _munknown="member-dropped"
+    fi
+    # shellcheck disable=SC2034 # consumed later through a nameref array name
+    AGENT_ACCOUNTING_RESULTS[$_mi]="$(token_accounting_commit \
+      "$ISSUE_NUMBER" "${AGENT_ACCOUNTING_IDS[$_mi]:-}" \
+      "${AGENT_GENERIC_LOGS[$_mi]:-}" 0 "$_munknown")"
+  done
+fi
+
 # [INV-70] Metrics: per-fan-out-member events. Best-effort, observe-only — a
 # separate loop so it cannot perturb the load-bearing set -e append logic above.
 # For EVERY member emit a `review_agent_run` (state = pass|fail|unavailable|
@@ -3754,10 +3827,10 @@ if declare -F metrics_emit >/dev/null 2>&1; then
     # AGENT_GENERIC_LOGS aliases the CLEAN stdout capture (token-parse convenience),
     # NOT the controller log — so persisting the generic log would store stdout
     # twice and LOSE the controller evidence for a codex that fails before emitting
-    # stdout (#235 review [P1] r16). So derive `_agent_log` here instead, and
-    # persist the codex CLEAN stdout capture separately as `<agent>-stdout.log`.
+    # stdout (#235 review [P1] r16). Read the captured controller-log path
+    # here, and persist codex CLEAN stdout separately as `<agent>-stdout.log`.
     if declare -F run_artifacts_persist_log >/dev/null 2>&1; then
-      _m_controller_log="/tmp/agent-${PROJECT_ID}-review-${ISSUE_NUMBER}-${AGENT_NAMES[$_mi]}.log"
+      _m_controller_log="${AGENT_CONTROLLER_LOGS[$_mi]:-}"
       run_artifacts_persist_log "${RUN_DIR:-}" "${AGENT_NAMES[$_mi]}" "$_m_controller_log" || true
       [[ "${AGENT_NAMES[$_mi]}" == "codex" ]] \
         && run_artifacts_persist_log "${RUN_DIR:-}" "${AGENT_NAMES[$_mi]}-stdout" "${AGENT_CODEX_LOGS[$_mi]:-}" || true
@@ -3920,6 +3993,45 @@ if [[ ( "$_any_deciding_artifact" == "true" || "$_any_severity_demotion" == "tru
   else
     log "WARNING: INV-78 mktemp failed for the aggregate verdict comment; skipping the wrapper post (the aggregate verdict still counts)."
   fi
+fi
+
+# [INV-141] Verdict publication precedes budget routing: a token violation
+# bounds future spend but never rewrites a member verdict. The first hard
+# member violation writes its invocation-keyed terminal intent; this explicit
+# cleanup call is required because normal review exits bypass crash teardown.
+_token_review_member_gate_rc=0
+token_budget_evaluate_review_members "$ISSUE_NUMBER" \
+  AGENT_ACCOUNTING_IDS AGENT_ACCOUNTING_RESULTS || _token_review_member_gate_rc=$?
+if [[ "$_token_review_member_gate_rc" -eq 10 ]]; then
+  if ! terminal_intent_cleanup_transition "$ISSUE_NUMBER" "reviewing" "reviewing" "pending-dev"; then
+    log "ERROR: token-budget member terminal transition failed for issue #${ISSUE_NUMBER}; leaving the live intent for dispatcher recovery."
+    RESULT_PARSED=true
+    exit 1
+  fi
+  RESULT_PARSED=true
+  exit 0
+elif [[ "$_token_review_member_gate_rc" -eq 21 ]]; then
+  log "ERROR: token-budget member violation could not persist its terminal intent; refusing approval and leaving reviewing unchanged."
+  RESULT_PARSED=true
+  exit 1
+elif [[ "$_token_review_member_gate_rc" -ne 0 ]]; then
+  log "ERROR: token-budget member evaluation failed (rc=${_token_review_member_gate_rc}); refusing approval and leaving reviewing unchanged."
+  RESULT_PARSED=true
+  exit 1
+fi
+
+# A later member's hard accounting-start failure may occur after earlier
+# members were already launched. Evaluate those members above before recording
+# this retryable refusal; a real member violation must win and route terminal.
+if [[ "$TOKEN_REVIEW_LAUNCH_REFUSED" == "true" ]]; then
+  log "Token-budget accounting start failed in hard mode; leaving review ownership unchanged for a review retry."
+  emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-non-substantive" \
+    "token-budget-launch-refused" 2>/dev/null \
+    || log "WARNING: token-budget launch-refusal trailer failed for issue #${ISSUE_NUMBER}"
+  # [INV-129 [P3]] round=0 second reset channel (see the aggregate PASS branch).
+  itp_post_comment "$ISSUE_NUMBER" "$(_review_round_marker "$ISSUE_NUMBER" "${PR_HEAD_SHA:-}" 0)" 2>/dev/null || true
+  RESULT_PARSED=true
+  exit 1
 fi
 
 # [P1] #2 follow-up (#233 review round-5): clean up each agent's per-run artifact
@@ -4481,6 +4593,61 @@ Findings->Decision Gate: 1 blocking finding(s) -- FAIL.
     exit 0
   fi
   # gate == proceed (green/none) → fall through to the existing PASS branch unchanged.
+fi
+
+# ---------------------------------------------------------------------------
+# Token-budget cumulative hard gate (INV-141, issue #506)
+# ---------------------------------------------------------------------------
+# Runs only on the approval path, after the existing mergeable/CI gates and
+# immediately before the PASS branch can call chp_approve. Completed usage
+# uses strict `>` semantics. A transient projection failure mirrors INV-134's
+# bounded-wait hold shape but does not create a terminal intent.
+if [[ "$PASSED_VERDICT" == "true" ]]; then
+  _token_review_issue_gate_rc=0
+  token_budget_evaluate_issue "$ISSUE_NUMBER" review "${RUN_ID:-}" \
+    || _token_review_issue_gate_rc=$?
+  if [[ "$_token_review_issue_gate_rc" -eq 10 ]]; then
+    if ! terminal_intent_cleanup_transition "$ISSUE_NUMBER" "reviewing" "reviewing" "pending-dev"; then
+      log "ERROR: token-budget issue terminal transition failed for issue #${ISSUE_NUMBER}; leaving the live intent for dispatcher recovery."
+      RESULT_PARSED=true
+      exit 1
+    fi
+    RESULT_PARSED=true
+    exit 0
+  elif [[ "$_token_review_issue_gate_rc" -eq 21 ]]; then
+    log "ERROR: token-budget issue violation could not persist its terminal intent; refusing approval and leaving reviewing unchanged."
+    RESULT_PARSED=true
+    exit 1
+  elif [[ "$_token_review_issue_gate_rc" -eq 20 ]]; then
+    log "Token-budget issue projection unavailable — re-queuing for re-review (no approve/merge this tick)."
+    # Footer enrichment is optional; its failure must not replace the bounded hold.
+    itp_post_comment "$ISSUE_NUMBER" \
+      "Review held — the agent verdict is PASS, but cumulative token usage is unavailable. The next review tick will retry the strict projection. No approve/merge this tick (INV-141).$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null \
+      || log "WARNING: token-budget unavailable hold note failed for issue #${ISSUE_NUMBER}"
+    _token_hold_trailer_ok=true
+    if ! emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-non-substantive" \
+        "token-budget-unavailable" 2>/dev/null; then
+      _token_hold_trailer_ok=false
+      log "WARNING: token-budget unavailable hold trailer failed for issue #${ISSUE_NUMBER}"
+    fi
+    # [INV-129 [P3]] round=0 second reset channel (see the aggregate PASS branch).
+    itp_post_comment "$ISSUE_NUMBER" "$(_review_round_marker "$ISSUE_NUMBER" "$PR_HEAD_SHA" 0)" 2>/dev/null || true
+    if ! itp_transition_state "$ISSUE_NUMBER" "reviewing" "pending-review" 2>/dev/null; then
+      if [[ "$_token_hold_trailer_ok" == "true" ]]; then
+        log "ERROR: itp_transition_state reviewing→pending-review failed for issue #${ISSUE_NUMBER} (token-budget unavailable hold); dispatcher recovery will honor the durable hold trailer."
+      else
+        log "ERROR: token-budget unavailable hold could persist neither its trailer nor reviewing→pending-review transition for issue #${ISSUE_NUMBER}; budget-aware Step 5 recovery must retry review ownership."
+      fi
+      RESULT_PARSED=true
+      exit 1
+    fi
+    RESULT_PARSED=true
+    exit 0
+  elif [[ "$_token_review_issue_gate_rc" -ne 0 ]]; then
+    log "ERROR: token-budget issue evaluation failed (rc=${_token_review_issue_gate_rc}); refusing approval and leaving reviewing unchanged."
+    RESULT_PARSED=true
+    exit 1
+  fi
 fi
 
 # PASSED_VERDICT was set by the unanimous-PASS aggregation above (INV-40).

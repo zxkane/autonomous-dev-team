@@ -364,7 +364,7 @@ assert_grep "TC-RTO-VAL-12c startup log line shows resolved review cap" \
 # the regex tolerates an optional `_teardown_call ` prefix so the call-SITE
 # count stays semantically 17 even though one site's literal text changed.
 EMIT_COUNT=$(grep -cE '^\s*(_teardown_call )?emit_verdict_trailer ' "$WRAPPER")
-assert_eq "TC-RTO-SRC-06 emit_verdict_trailer count is 17 (veto adds none; INV-64 smoke abort + INV-79 bot-review gate x2 + INV-134 CI-rollup gate x4 are the new sites)" "17" "$EMIT_COUNT"
+assert_eq "TC-RTO-SRC-06 emit_verdict_trailer count is 19 (veto adds none; INV-141 adds launch-refusal and unavailable-hold trailers)" "19" "$EMIT_COUNT"
 # Post-window sweep classifies a no-verdict agent via _classify_noverdict_agent.
 assert_grep "TC-RTO-VETO-11 post-window sweep uses _classify_noverdict_agent on launch rc" \
   '_classify_noverdict_agent' "$WRAPPER"

@@ -226,11 +226,12 @@ fi
 # gate's two trailer sites (awaiting-bot-review wait + the max-waits substantive
 # FAIL) → 13; the INV-134 CI-rollup gate (issue #489) added four (head-changed
 # non-substantive + failed-check substantive + awaiting-ci/unavailable wait
-# non-substantive + the wait-max substantive give-up) → 17. The open-guard
-# itself must not change it.
-_trailer_count=$(grep -cE 'emit_verdict_trailer ' "$WRAPPER")
-assert_eq "TC-EOG-REG-04 emit_verdict_trailer call count is 17 (10 + INV-64 smoke abort + INV-79 bot-review gate x2 + INV-134 CI-rollup gate x4; open-guard adds none)" \
-  "17" "$_trailer_count"
+# non-substantive + the wait-max substantive give-up) → 17; INV-141 added
+# three token-budget retry trailers (two launch-refused sites + unavailable
+# hold) → 20. The open-guard itself must not change it.
+_trailer_count=$(grep -cE '^\s*(if ! )?(_teardown_call )?emit_verdict_trailer ' "$WRAPPER")
+assert_eq "TC-EOG-REG-04 emit_verdict_trailer call count is 20 (17 existing + INV-141 token-budget retry trailers x3; open-guard adds none)" \
+  "20" "$_trailer_count"
 
 # ---------------------------------------------------------------------------
 echo ""

@@ -574,6 +574,25 @@ else
 fi
 rm -rf "$TMPDIR/dispatch-marker-802-dev-new"
 
+# TC-TOKENBUDGET-060: terminal admission may need to retain a marker even
+# though no wrapper launched. Retention drops EXIT-trap ownership without
+# deleting the on-disk marker.
+rm -rf "$TMPDIR/dispatch-marker-806-dev-new"
+_DISPATCH_MARKER_PENDING=()
+acquire_dispatch_marker 806 dev-new
+retain_dispatch_marker 806 dev-new
+_dispatch_marker_release_pending
+assert_eq "TC-TOKENBUDGET-060 retained marker drops EXIT-trap pending ownership" \
+  "" "${_DISPATCH_MARKER_PENDING[*]:-}"
+if [[ -d "$TMPDIR/dispatch-marker-806-dev-new" ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-TOKENBUDGET-060 retained marker survives the real EXIT-trap sweep"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-TOKENBUDGET-060 retained marker was deleted by the EXIT-trap sweep"
+  FAIL=$((FAIL + 1))
+fi
+rm -rf "$TMPDIR/dispatch-marker-806-dev-new"
+
 # TC-DEDUP-361-027: the EXIT-trap handler releases an unconfirmed marker...
 rm -rf "$TMPDIR/dispatch-marker-803-review"
 _DISPATCH_MARKER_PENDING=()
@@ -634,7 +653,8 @@ extract_ptl_failure_block() {
   awk '
     /if ! acquire_dispatch_marker "\$issue_num" "dev-new"; then/ { n++; if (n == 2) start = 1 }
     start { print }
-    start && /^        continue$/ { c++; if (c == 2) { getline; print; exit } }
+    start && /release_dispatch_marker "\$issue_num" "dev-new"/ { released = 1 }
+    start && released && /^        continue$/ { getline; print; exit }
   ' "$TICK"
 }
 PTL_BLOCK=$(extract_ptl_failure_block)
@@ -650,6 +670,7 @@ else
     log() { :; }
     itp_list_comments() { echo '[]'; }
     itp_post_comment() { :; }
+    token_admission_gate() { return 0; }
     _reset_session_log() { return 1; }   # force the truncate-failure branch
     for _once in 1; do
       eval "$PTL_BLOCK"
@@ -698,7 +719,8 @@ extract_branch_c_failure_block() {
   awk '
     /if ! acquire_dispatch_marker "\$issue_num" "dev-new"; then/ { start = 1 }
     start { print }
-    start && /^        return 0$/ { c++; if (c == 2) { getline; print; exit } }
+    start && /release_dispatch_marker "\$issue_num" "dev-new"/ { released = 1 }
+    start && released && /^        return 0$/ { getline; print; exit }
   ' "$LIB"
 }
 BRANCH_C_BLOCK=$(extract_branch_c_failure_block)
@@ -708,17 +730,18 @@ if [[ -z "$BRANCH_C_BLOCK" ]]; then
 else
   rm -rf "$TMPDIR/dispatch-marker-808-dev-new"
   _DISPATCH_MARKER_PENDING=()
-  (
-    issue_num=808
-    session_id="sid-808"
+  _tc033_runner() {
+    local issue_num=808 session_id="sid-808"
     log() { :; }
     itp_list_comments() { echo '[]'; }
     itp_post_comment() { :; }
+    token_admission_gate() { return 0; }
     _reset_session_log() { return 1; }   # force the truncate-failure branch
     for _once in 1; do
       eval "$BRANCH_C_BLOCK"
     done
-  ) 2>/dev/null
+  }
+  _tc033_runner 2>/dev/null
   if [[ -d "$TMPDIR/dispatch-marker-808-dev-new" ]]; then
     echo -e "  ${RED}FAIL${NC}: TC-DEDUP-361-033 marker survived a real (extracted) Branch C log-truncate failure"
     FAIL=$((FAIL + 1))

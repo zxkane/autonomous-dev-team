@@ -830,6 +830,13 @@ HARNESS110="$TMPROOT/harness-110.sh"
   echo 'review_near_success() { return 1; }'
   echo 'recent_error_envelope() { echo ""; }'
   echo 'last_reviewed_head() { echo ""; }'
+  echo '_local_defer_marker_verdict() { echo NONE; }'
+  echo 'token_budget_recover_pending_intent() { return 0; }'
+  echo 'token_budget_recent_launch_refusal() { return 1; }'
+  echo 'token_budget_enabled() { return 1; }'
+  echo 'token_budget_effective_mode() { echo disabled; }'
+  echo 'token_budget_latest_dispatch_cutoff() { return 1; }'
+  echo 'terminal_intent_cleanup_transition() { LABEL_SWAPS=$((LABEL_SWAPS + 1)); }'
   echo 'declare -F metrics_emit >/dev/null 2>&1 || metrics_emit() { :; }'
   echo 'candidates='"'"'[{"number":9999,"labels":["autonomous","in-progress"]}]'"'"''
   echo 'cand_count=1'
@@ -875,7 +882,7 @@ _extract_tick_site() {
   awk -v start="$start_line" '
     NR == start { f = 1 }
     f { print }
-    f && /dispatch_marker_confirm_launched/ { exit }
+    f && /^[[:space:]]+dispatch_marker_confirm_launched / { exit }
   ' "$TICK"
 }
 
@@ -906,11 +913,17 @@ _run_tick_site_harness() {
   return "$hrc"
 }
 
+mapfile -t _tick_site_lines < <(
+  awk '/^[[:space:]]+_dispatch_rc=0$/ { print NR }' "$TICK"
+)
+if [[ "${#_tick_site_lines[@]}" -ne 4 ]]; then
+  assert_fail "TC-LGC6-130 extraction setup: expected four _dispatch_rc=0 sites, found ${#_tick_site_lines[@]}"
+fi
 declare -A TICK_SITES=(
-  ["step2-dev-new"]="469"
-  ["step3-review"]="515"
-  ["step4-ptl-dev-new"]="672"
-  ["step4-dev-resume"]="712"
+  ["step2-dev-new"]="${_tick_site_lines[0]:-0}"
+  ["step3-review"]="${_tick_site_lines[1]:-0}"
+  ["step4-ptl-dev-new"]="${_tick_site_lines[2]:-0}"
+  ["step4-dev-resume"]="${_tick_site_lines[3]:-0}"
 )
 for site_label in step2-dev-new step3-review step4-ptl-dev-new step4-dev-resume; do
   start_line="${TICK_SITES[$site_label]}"
@@ -1254,6 +1267,8 @@ _run_step5_loop_harness() {
     echo 'review_near_success() { return 1; }'
     echo 'recent_error_envelope() { echo ""; }'
     echo 'last_reviewed_head() { echo ""; }'
+    echo 'token_budget_recover_pending_intent() { return 0; }'
+    echo 'terminal_intent_cleanup_transition() { LABEL_SWAPS=$((LABEL_SWAPS + 1)); }'
     echo 'declare -F metrics_emit >/dev/null 2>&1 || metrics_emit() { :; }'
     echo 'candidates='"'"'[{"number":9999,"labels":["autonomous","in-progress"]}]'"'"''
     echo 'cand_count=1'

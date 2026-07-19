@@ -97,13 +97,19 @@ flowchart TD
 
     step2 -. for each match .-> marker2{acquire_dispatch_marker<br/>issue,dev-new}
     marker2 -- held by concurrent tick --> skip2([skip issue])
-    marker2 -- acquired --> dispatch_dev[dispatch dev-new<br/>add in-progress label<br/>append JUST_DISPATCHED]
+    marker2 -- acquired --> gate2{token_admission_gate<br/>issue,empty,dev-new}
+    gate2 -- proceed --> dispatch_dev[dispatch dev-new<br/>add in-progress label<br/>append JUST_DISPATCHED]
+    gate2 -- blocked --> skip2
     step3 -. for each match .-> marker3{acquire_dispatch_marker<br/>issue,review}
     marker3 -- held by concurrent tick --> skip3([skip issue])
-    marker3 -- acquired --> dispatch_review[dispatch review<br/>remove pending-review add reviewing<br/>append JUST_DISPATCHED]
+    marker3 -- acquired --> gate3{token_admission_gate<br/>issue,pending-review,review}
+    gate3 -- proceed --> dispatch_review[dispatch review<br/>remove pending-review add reviewing<br/>append JUST_DISPATCHED]
+    gate3 -- blocked --> skip3
     step4 -. retries OK .-> marker4{acquire_dispatch_marker<br/>issue,dev-resume}
     marker4 -- held by concurrent tick --> skip4([skip issue])
-    marker4 -- acquired --> dispatch_resume[dispatch dev-resume<br/>remove pending-dev add in-progress<br/>append JUST_DISPATCHED]
+    marker4 -- acquired --> gate4{token_admission_gate<br/>issue,pending-dev,dev-resume}
+    gate4 -- proceed --> dispatch_resume[dispatch dev-resume<br/>remove pending-dev add in-progress<br/>append JUST_DISPATCHED]
+    gate4 -- blocked --> skip4
     step4 -. retries exhausted .-> stall[remove pending-dev add stalled<br/>comment @owner]
 ```
 
@@ -410,12 +416,13 @@ For each match, in order:
 
 1. **Dependency check.** Read the issue body for a `## Dependencies` section. Extract refs from list-item lines only — `#N` and `owner/repo#N` are recognized; prose and blockquotes are ignored ([INV-39](invariants.md#inv-39-dependency-parsing-is-list-item-scoped-and-supports-cross-repo-refs)). For each ref, look up state and require `CLOSED` or `MERGED` ([INV-11](invariants.md#inv-11-dependency-state-includes-merged) — PRs report `MERGED`, not `CLOSED`; the same rule applies to cross-repo refs). Same-repo `#N` refs use the ambient dispatcher token; **cross-repo `owner/repo#N` refs use a token scoped to the *target* repo, minted per dep repo via the `itp_resolve_dep` verb** (GitHub leaf `itp_github_resolve_dep`; `resolve_dep_state` is now a thin caller-side wrapper, #284) ([INV-83](invariants.md#inv-83-cross-repo-dependency-lookups-use-a-per-dep-repo-scoped-read-token-the-app-must-be-installed-on-the-dep-repo)) — the ambient token is scoped to the dispatching repo only and 404s on any other repo (the #269 bug). The cross-repo `owner/repo#N` shorthand is gated on the provider's `cross_ref_shorthand` capability (`=1` for GitHub). The scoped token is **cached by `owner/repo` for the whole tick** (AC #2), so multiple new issues depending on the same external repo mint only once; the mint + cache are provider-internal and the tick clears that cache exactly once, before this step, via the **`itp_begin_tick`** lifecycle hook (which the GitHub provider maps to its own `_DEP_TOKEN_CACHE` reset). The App must be installed on the dep repo. If any dependency is still open, **skip silently**. A cross-repo ref that cannot be resolved (App not installed / private / deleted) blocks via the fail-safe, with a sharpened WARNING and a once-per-issue-per-ref comment so the persistent block is visible. The issue picks up next tick once dependencies clear.
 2. **Acquire the controller-side dispatch marker** ([INV-108](invariants.md#inv-108-every-dispatcher-tick-dispatch-site-acquires-a-controller-side-per-issuemode-marker-atomically-before-any-side-effect--a-losing-acquire-skips-cleanly-never-dispatches-the-marker-expires-via-ttl-never-wedging-the-issue-the-dispatch-token-gains-a-run-field-for-post-hoc-attribution), 302b, #361): `acquire_dispatch_marker <issue> dev-new`. A losing acquire (a concurrent tick already holds it) skips this issue silently — no label edit, no token, no dispatch — and moves to the next match. This runs BEFORE the label edit below; see [§ Controller-side dispatch dedup](#controller-side-dispatch-dedup-inv-108-302b-361) for the full contract.
-3. **Add `in-progress` label.**
-4. **Post dispatch token** ([INV-18](invariants.md#inv-18-cold-start-grace-period-before-stale-detection), [INV-108](invariants.md#inv-108-every-dispatcher-tick-dispatch-site-acquires-a-controller-side-per-issuemode-marker-atomically-before-any-side-effect--a-losing-acquire-skips-cleanly-never-dispatches-the-marker-expires-via-ttl-never-wedging-the-issue-the-dispatch-token-gains-a-run-field-for-post-hoc-attribution)): write `<!-- dispatcher-token: <id> at <iso> mode=dev-new run=<run-id> -->` followed by the human-readable "Dispatching autonomous development..." line. The HTML comment encodes the dispatch timestamp for Step 5's grace-period check; `run=<run-id>` (#361 R2) is this tick process's identity, for post-hoc attribution of a duplicate-dispatch incident.
-5. **Dispatch**: `bash $PROJECT_DIR/scripts/dispatch-local.sh dev-new <issue>`
-6. **Confirm the dispatch marker launched**: `dispatch_marker_confirm_launched <issue> dev-new` — a wrapper is now running, so the marker from step 2 is left in place to live out its TTL rather than being swept by the tick's EXIT-trap release.
-7. **Append issue to `JUST_DISPATCHED`.**
-8. **Re-check concurrency** before processing the next match.
+3. **Run cumulative token admission** ([INV-141](invariants.md#inv-141-token-budgets-use-strict-accounting-for-post-run-wrapper-gates-and-pre-dispatch-admission-with-durable-terminal-routing)): `token_admission_gate <issue> "" dev-new`. It runs while the marker is held and before any label/comment/spawn side effect.
+4. **Add `in-progress` label.**
+5. **Post dispatch token** ([INV-18](invariants.md#inv-18-cold-start-grace-period-before-stale-detection), [INV-108](invariants.md#inv-108-every-dispatcher-tick-dispatch-site-acquires-a-controller-side-per-issuemode-marker-atomically-before-any-side-effect--a-losing-acquire-skips-cleanly-never-dispatches-the-marker-expires-via-ttl-never-wedging-the-issue-the-dispatch-token-gains-a-run-field-for-post-hoc-attribution)): write `<!-- dispatcher-token: <id> at <iso> mode=dev-new run=<run-id> -->` followed by the human-readable "Dispatching autonomous development..." line. The HTML comment encodes the dispatch timestamp for Step 5's grace-period check; `run=<run-id>` (#361 R2) is this tick process's identity, for post-hoc attribution of a duplicate-dispatch incident.
+6. **Dispatch**: `bash $PROJECT_DIR/scripts/dispatch-local.sh dev-new <issue>`
+7. **Confirm the dispatch marker launched**: `dispatch_marker_confirm_launched <issue> dev-new` — a wrapper is now running, so the marker from step 2 is left in place to live out its TTL rather than being swept by the tick's EXIT-trap release.
+8. **Append issue to `JUST_DISPATCHED`.**
+9. **Re-check concurrency** before processing the next match.
 
 The issue is now in `in-progress`; the dev wrapper is launching via `nohup`. Step 5 must skip this issue this tick ([INV-09](invariants.md#inv-09-just_dispatched-skip-rule)) and for the duration of the dispatch-token grace period ([INV-18](invariants.md#inv-18-cold-start-grace-period-before-stale-detection)).
 
@@ -432,11 +439,12 @@ Find issues labeled `autonomous` AND `pending-review` AND NOT (`reviewing` OR `a
 For each match, in order:
 
 1. **Acquire the controller-side dispatch marker** ([INV-108](invariants.md#inv-108-every-dispatcher-tick-dispatch-site-acquires-a-controller-side-per-issuemode-marker-atomically-before-any-side-effect--a-losing-acquire-skips-cleanly-never-dispatches-the-marker-expires-via-ttl-never-wedging-the-issue-the-dispatch-token-gains-a-run-field-for-post-hoc-attribution), 302b, #361): `acquire_dispatch_marker <issue> review`. A losing acquire skips this issue silently (no label swap, no token, no dispatch).
-2. **Atomic label swap**: `gh issue edit --remove-label pending-review --add-label reviewing` in a single call. (Two separate `gh issue edit` calls would create a `pending-review` + `reviewing` window — see [Forbidden transitions](state-machine.md#forbidden-transitions).)
-3. **Post dispatch token** ([INV-18](invariants.md#inv-18-cold-start-grace-period-before-stale-detection), [INV-108](invariants.md#inv-108-every-dispatcher-tick-dispatch-site-acquires-a-controller-side-per-issuemode-marker-atomically-before-any-side-effect--a-losing-acquire-skips-cleanly-never-dispatches-the-marker-expires-via-ttl-never-wedging-the-issue-the-dispatch-token-gains-a-run-field-for-post-hoc-attribution)): `<!-- dispatcher-token: <id> at <iso> mode=review run=<run-id> -->` + "Dispatching autonomous review...".
-4. **Dispatch**: `bash $PROJECT_DIR/scripts/dispatch-local.sh review <issue>`
-5. **Confirm the dispatch marker launched**: `dispatch_marker_confirm_launched <issue> review`.
-6. **Append to `JUST_DISPATCHED`.**
+2. **Run cumulative token admission** ([INV-141](invariants.md#inv-141-token-budgets-use-strict-accounting-for-post-run-wrapper-gates-and-pre-dispatch-admission-with-durable-terminal-routing)): `token_admission_gate <issue> pending-review review`, while the marker is held and before mutation.
+3. **Atomic label swap**: `gh issue edit --remove-label pending-review --add-label reviewing` in a single call. (Two separate `gh issue edit` calls would create a `pending-review` + `reviewing` window — see [Forbidden transitions](state-machine.md#forbidden-transitions).)
+4. **Post dispatch token** ([INV-18](invariants.md#inv-18-cold-start-grace-period-before-stale-detection), [INV-108](invariants.md#inv-108-every-dispatcher-tick-dispatch-site-acquires-a-controller-side-per-issuemode-marker-atomically-before-any-side-effect--a-losing-acquire-skips-cleanly-never-dispatches-the-marker-expires-via-ttl-never-wedging-the-issue-the-dispatch-token-gains-a-run-field-for-post-hoc-attribution)): `<!-- dispatcher-token: <id> at <iso> mode=review run=<run-id> -->` + "Dispatching autonomous review...".
+5. **Dispatch**: `bash $PROJECT_DIR/scripts/dispatch-local.sh review <issue>`
+6. **Confirm the dispatch marker launched**: `dispatch_marker_confirm_launched <issue> review`.
+7. **Append to `JUST_DISPATCHED`.**
 
 **`ISSUE_FILTER` conjunction (issue #436, [INV-121]).** `list_pending_review` applies `issue_filter_apply` AFTER the terminal-state subtraction above — same standard evaluation-point pattern as every other selector.
 
@@ -588,23 +596,25 @@ This is a conservative gate: it only fires when the helper is certain the prior 
 ### Step 4c: dispatch resume
 
 1. **Acquire the controller-side dispatch marker** ([INV-108](invariants.md#inv-108-every-dispatcher-tick-dispatch-site-acquires-a-controller-side-per-issuemode-marker-atomically-before-any-side-effect--a-losing-acquire-skips-cleanly-never-dispatches-the-marker-expires-via-ttl-never-wedging-the-issue-the-dispatch-token-gains-a-run-field-for-post-hoc-attribution), 302b, #361): `acquire_dispatch_marker <issue> dev-resume`. A losing acquire skips this issue silently (no label swap, no token, no dispatch).
-2. **Atomic label swap**: `gh issue edit --remove-label pending-dev --add-label in-progress`.
-3. **Post dispatch token** ([INV-18](invariants.md#inv-18-cold-start-grace-period-before-stale-detection), [INV-108](invariants.md#inv-108-every-dispatcher-tick-dispatch-site-acquires-a-controller-side-per-issuemode-marker-atomically-before-any-side-effect--a-losing-acquire-skips-cleanly-never-dispatches-the-marker-expires-via-ttl-never-wedging-the-issue-the-dispatch-token-gains-a-run-field-for-post-hoc-attribution)): `<!-- dispatcher-token: <id> at <iso> mode=dev-resume run=<run-id> -->` + "Resuming autonomous development...".
-4. **Dispatch**: `bash $PROJECT_DIR/scripts/dispatch-local.sh dev-resume <issue> <session-id>`
-5. **Confirm the dispatch marker launched**: `dispatch_marker_confirm_launched <issue> dev-resume`.
-6. **Append to `JUST_DISPATCHED`.**
+2. **Run cumulative token admission** ([INV-141](invariants.md#inv-141-token-budgets-use-strict-accounting-for-post-run-wrapper-gates-and-pre-dispatch-admission-with-durable-terminal-routing)): `token_admission_gate <issue> pending-dev dev-resume`, while the marker is held and before mutation.
+3. **Atomic label swap**: `gh issue edit --remove-label pending-dev --add-label in-progress`.
+4. **Post dispatch token** ([INV-18](invariants.md#inv-18-cold-start-grace-period-before-stale-detection), [INV-108](invariants.md#inv-108-every-dispatcher-tick-dispatch-site-acquires-a-controller-side-per-issuemode-marker-atomically-before-any-side-effect--a-losing-acquire-skips-cleanly-never-dispatches-the-marker-expires-via-ttl-never-wedging-the-issue-the-dispatch-token-gains-a-run-field-for-post-hoc-attribution)): `<!-- dispatcher-token: <id> at <iso> mode=dev-resume run=<run-id> -->` + "Resuming autonomous development...".
+5. **Dispatch**: `bash $PROJECT_DIR/scripts/dispatch-local.sh dev-resume <issue> <session-id>`
+6. **Confirm the dispatch marker launched**: `dispatch_marker_confirm_launched <issue> dev-resume`.
+7. **Append to `JUST_DISPATCHED`.**
 
 ## Controller-side dispatch dedup ([INV-108], 302b, #361)
 
-Every dispatch site above (Step 2, Step 3, Step 4's PTL recovery row, Step 4b.5.1's `failed-substantive` fresh-dev row, and Step 4c) begins with `acquire_dispatch_marker <issue> <mode>` — a check that must succeed BEFORE any other side effect (label edit, notice comment, log truncate, dispatch-token post, or `dispatch()` call) for that dispatch.
+Every dispatch site above (Step 2, Step 3, Step 4's PTL recovery row, Step 4b.5.1's `failed-substantive` fresh-dev row, and Step 4c) begins with `acquire_dispatch_marker <issue> <mode>` — a check that must succeed BEFORE any other side effect (label edit, notice comment, log truncate, dispatch-token post, or `dispatch()` call) for that dispatch. [INV-141](invariants.md#inv-141-token-budgets-use-strict-accounting-for-post-run-wrapper-gates-and-pre-dispatch-admission-with-durable-terminal-routing)'s `token_admission_gate` is the first post-acquire operation at all seven launch sites. The marker helper's established infrastructure-failure path remains fail-open; even when acquire returns success without creating a real marker, the admission gate still runs and never falls back from strict accounting.
 
 **Why this exists.** `JUST_DISPATCHED` ([INV-09](invariants.md#inv-09-just_dispatched-skip-rule)) is a tick-LOCAL in-memory bash array — it protects a single tick's OWN Step 5 pass from re-classifying an issue that same tick just dispatched. It has no visibility into a SECOND, overlapping tick concurrently running Steps 2-4 against the same issue (e.g. a slow tick still mid-flight when the next cron-triggered tick starts). On #298, every dispatched mode emitted TWO `<!-- dispatcher-token: -->` comments roughly 1 second apart — two overlapping controller ticks each independently read "not just dispatched" and both proceeded to dispatch, producing duplicate wrapper runs.
 
 **The marker.** `acquire_dispatch_marker` creates `dispatch-marker-<issue>-<mode>` under `pid_dir_for_project()`'s per-user runtime dir via a single `mkdir` syscall — atomic (`EEXIST` on collision), the literal primitive the issue specifies. Return 0 means "acquired, proceed"; return 1 means "a concurrent tick already holds this (issue, mode) — skip cleanly, no error, no side effect." **A held-marker skip in `dispatcher-tick.sh` additionally appends the issue to `JUST_DISPATCHED`** (#361 round-14 [P1]): the concurrent winner may have label-swapped but not yet posted its token/PID, and without the append the losing tick's own Step 5 could classify the winner as crashed and flip the issue back — letting a later tick dispatch a second wrapper in a DIFFERENT mode, which the per-`(issue, mode)` marker key cannot catch. Held ⇒ the whole losing tick treats the issue as protected. A marker is never a permanent lock: its mtime age is checked against `DISPATCH_MARKER_TTL_SECONDS` (default `DISPATCH_GRACE_PERIOD_SECONDS`, [INV-18](invariants.md#inv-18-cold-start-grace-period-before-stale-detection), 600s); once expired, the next acquire attempt reclaims it (via an atomic `mv` to a per-caller temp path, then a fresh `mkdir` — not `rmdir`, to avoid the double-reclaim race [INV-103](invariants.md#inv-103-acquire_pid_guard-acquires-the-per-issue-mode-start-slot-atomically--no-check-then-write-toctou-window)'s design note documents for that primitive) — a crashed tick's marker never wedges the issue.
 
-**Release on pre-spawn failure.** A marker acquired but never followed by an actually-launched wrapper must not sit until its TTL — that would turn one transient failure into a ~10 minute false stall on the very next tick. Every dispatch site therefore pairs its `acquire_dispatch_marker` with exactly one of two release paths, whichever applies:
+**Release on pre-spawn failure.** A marker acquired but never followed by an actually-launched wrapper must not sit until its TTL — that would turn one transient failure into a ~10 minute false stall on the very next tick. Every dispatch site therefore pairs its `acquire_dispatch_marker` with one of these terminal paths:
 
 - **`dispatch_marker_confirm_launched <issue> <mode>`**, called immediately after `dispatch()` itself returns — confirms a wrapper is running, so the marker is left alone to live out its TTL (this is what protects Step 5's cold-start grace window).
+- **Token-admission block**, before any prior side effect: hard over-budget/fail-closed routing retains the marker through its terminal transition and report, then releases it; transient `unavailable` releases immediately and retries next tick. A wrong-owner stall abort clears its just-written intent before release. Configuration errors exit nonzero and the EXIT trap releases the still-pending marker.
 - **`release_dispatch_marker <issue> <mode>`**, called directly at the two explicit soft-failure branches that `continue`/`return` before ever reaching `dispatch()` — the PTL log-truncate failure and the [INV-35](invariants.md#inv-35-review-aware-resume-routing-for-completed-sessions) fresh-dev log-truncate failure. Releasing immediately here (rather than waiting for the tick to end) lets the very next tick retry right away.
 
 Between `acquire` and either release path, every other step (label edit, notice comment, `post_dispatch_token`) is a bare command under this script's own `set -euo pipefail` — a transient failure in any of them aborts the whole tick before a hand-written `continue` could run. `dispatcher-tick.sh` installs `trap _dispatch_marker_release_pending EXIT` right after sourcing `lib-dispatch.sh` as the backstop for exactly this case: at process exit, it sweeps every `(issue, mode)` that was acquired but never confirmed launched. The trap is idempotent and never itself fails, so it cannot clobber the tick's real exit code.
@@ -620,6 +630,61 @@ Between `acquire` and either release path, every other step (label edit, notice 
 ```
 
 `<run-id>` is the dispatching tick process's identity (an externally-injected `DISPATCHER_RUN_ID`, or a `pid+start-ts` fallback minted once per tick process). This is purely additive — every existing reader of the `dispatcher-token` comment (the grace-period age check, the [INV-85](invariants.md#inv-85-the-completed-session-failed-substantive-route-is-bounded-to-one-dev-new-per-unchanged-head-a-no-progress-or-bot-unfixable-finding-escalates-to-stalled-never-loops) bot-unfixable scan's lower bound) keys on the `dispatcher-token:` prefix and `mode=` token, and continues to match both a legacy comment without `run=` and a new one with it. A future duplicate-dispatch incident is now attributable to the specific tick processes that raced, without journald.
+
+## Token-budget admission at every dispatch site ([INV-141])
+
+Every wrapper-spawn path calls the same
+`token_admission_gate ISSUE PENDING_STATE MODE` immediately after winning its
+controller-side marker and before label, notice, log-truncate, or spawn side
+effects:
+
+| Path | Pending owner | Marker mode |
+|---|---|---|
+| Step 2 scan-new | empty (`autonomous` only) | `dev-new` |
+| Step 3 review | `pending-review` | `review` |
+| Step 4 prompt-too-long recovery | `pending-dev` | `dev-new` |
+| Step 4c resume | `pending-dev` | `dev-resume` |
+| INV-12 completed/no-PR fresh dev | `pending-dev` | `dev-new` |
+| INV-35 substantive fresh dev | `pending-dev` | `dev-new` |
+| crashed/self-heal fresh dev | `pending-dev` | `dev-new` |
+
+With `ISSUE_TOKEN_BUDGET` unset the gate returns immediately with zero
+accounting or provider I/O. When configured it reconciles and orphan-sweeps the
+strict INV-139 store, then uses pre-dispatch `>=` semantics. Warn mode posts one
+deduplicated issue breadcrumb and proceeds. Hard complete-at-cap,
+`usage-unknown`, or `corrupt` writes a digest-derived INV-140 intent and
+transitions to `stalled`; pending-owner paths use `stall_from_pending`, while
+the Step 2 empty-owner path atomically adds `stalled` and preserves
+`autonomous`. The marker remains held through transition and structured report.
+A successful terminal route consumes the intent before marker release. A
+confirmed wrong-owner abort clears the just-written intent before marker
+release; clear failure retains the marker. Label-read or transition failure is
+not treated as wrong ownership and retains the intent plus marker. Stop-report
+or consume failure after a successful stall likewise retains both the durable
+intent and marker, preventing an immediate competing tick until the marker TTL
+expires.
+Projection `unavailable` releases the marker and blocks only this tick without
+stalling. Under `remote-aws-ssm`, projection runs synchronously on the execution
+host and transport failure never falls back to controller-local state.
+
+Step 5 also fails closed across a complete invocation-intent persistence
+outage. After a dead dev/review wrapper has no recoverable pending marker or
+execution-host pointer, a still-configured hard `AGENT_TOKEN_BUDGET` leaves the
+active owner (`in-progress`/`reviewing`) unchanged instead of entering ordinary
+crash routing and making another launch eligible. There is intentionally no
+historical-record scan: without the decision pointer it cannot distinguish an
+actual hard decision from usage recorded under an earlier policy. Changing or
+unsetting the invocation gate is the explicit operator re-arm. Recovery-pointer
+stage and generation-matched clear are serialized by INV-139's per-issue lock,
+including execution-host clear under remote SSM.
+
+The shared helper returns `0` to dispatch, `10` when it handled or transiently
+blocked the candidate, and another nonzero value for configuration refusal.
+The three admission sites inside `lib-dispatch.sh` preserve that distinction:
+nested completed-session and same-HEAD routers map refusal to their error
+result, and their callers propagate it to the top-level tick. A typo therefore
+cannot be mistaken for "no PR" or a handled recovery and cannot fall through to
+another launch path.
 
 ## Step 5: stale detection
 
@@ -642,6 +707,34 @@ For each match:
    - **ALIVE + `in-progress`** → Step 5a (below). Reviewers in `reviewing` are not subject to the 5a SIGTERM logic — review wrappers are bounded by their own internal polling.
    - **DEAD + `in-progress`** → Step 5b in-progress branch.
    - **DEAD + `reviewing`** → Step 5b reviewing branch.
+
+Every Step 5 active-to-pending write routes through
+`terminal_intent_cleanup_transition`. A live hard-budget intent therefore
+redirects stale recovery to `stalled` and is consumed only after the terminal
+transition, even if an operator has since unset the budgets; Step 5 can never
+resurrect `pending-dev` or `pending-review` past it. With no live intent the
+helper delegates the original transition arguments unchanged.
+
+Before ordinary DEAD branching, active hard token enforcement also checks for
+an unresolved trusted `token-budget-intent-pending-v1` marker owned by the
+corresponding wrapper. This marker means the wrapper committed a hard
+invocation violation but could not persist the INV-140 intent. Step 5 retries
+that exact invocation-keyed intent and reads INV-140 back. A matching live
+generation gets a resolved marker followed immediately by
+`terminal_intent_cleanup_transition`, so no new invocation can start in
+between. An already-consumed/cleared generation only resolves the stale marker
+and falls through to ordinary DEAD routing. If marker history, intent write, or
+intent read is unavailable, the active owner label is preserved and the next
+tick retries. Marker comments are trusted only when the self-authored whole
+body exactly matches the grammar; quoted markers, human markers, and resolved
+generations are ignored. If both provider writes failed, Step 5 reads the
+invocation-keyed recovery pointer staged beside the strict INV-139 record,
+validates the named record and owner, and retries only that actual hard
+decision; unrelated historical records are never reclassified. On
+`remote-aws-ssm`, pointer read and generation-matched clear run synchronously on
+the execution host, with transport failure preserving ownership and no
+controller-local fallback. With budgets disabled the check returns before
+comment or accounting I/O.
 
 ### Step 5a: ALIVE in-progress + PR ready for review (#54, #56; progress-gated since [INV-137], #485)
 
@@ -712,6 +805,16 @@ The wording in the "PR found" branches deliberately avoids the keywords `crashed
 #### DEAD + `reviewing`
 
 Before posting "crashed" or swapping labels, the dispatcher consults `review_near_success` ([INV-24](invariants.md#inv-24-review-wrapper-dead-detection-requires-both-pid_alive-miss-and-no-near-success-pr-signal)). If ANY of the four PR-state signals (recent merge, recent APPROVED review, recent verdict comment, defensive `kill -0` re-check) is positive within `REVIEW_NEAR_SUCCESS_WINDOW_SECONDS` (default 300s), the branch logs and short-circuits — the wrapper has either already finished successfully or is in its post-verdict / merge tail.
+
+After that near-success check, a newest `failed-non-substantive` trailer with
+cause `token-budget-unavailable` or `token-budget-launch-refused` identifies a
+review wrapper that deliberately left ownership unchanged. Step 5 posts a
+recovery note and retries `reviewing -> pending-review` through terminal
+control; it does not emit a crash metric/comment or route to development. If
+the unavailable path could persist neither its trailer nor transition, a still
+active hard-mode budget is the fallback retry classification. These paths remain
+terminal-intent-aware, so an independently persisted hard violation still
+wins and stalls.
 
 Only when ALL four signals are negative does the crash path fire:
 

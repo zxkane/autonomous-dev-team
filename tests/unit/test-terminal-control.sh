@@ -714,7 +714,7 @@ assert_eq "TC-TERMCTRL-070 dev cleanup has no unguarded pending transition" 0 \
   "$(grep -Ec 'itp_transition_state .*pending-(dev|review)' <<<"$dev_cleanup" || true)"
 assert_eq "TC-TERMCTRL-070 review cleanup has no unguarded pending transition" 0 \
   "$(grep -Ec 'itp_transition_state .*pending-(dev|review)' <<<"$review_cleanup" || true)"
-assert_eq "TC-TERMCTRL-070 dev cleanup has four guarded routes" 4 \
+assert_eq "TC-TERMCTRL-070 dev cleanup has five guarded routes" 5 \
   "$(grep -c 'terminal_intent_cleanup_transition' <<<"$dev_cleanup" || true)"
 assert_eq "TC-TERMCTRL-070 review cleanup has one guarded route" 1 \
   "$(grep -c 'terminal_intent_cleanup_transition' <<<"$review_cleanup" || true)"

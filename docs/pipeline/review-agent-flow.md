@@ -518,6 +518,61 @@ Note that `_codex_review_classify_stdout` (the codex stdout→verdict fallback c
 
 The aggregate maps onto the existing `PASSED_VERDICT` / `LATEST_COMMENT` / `AGENT_EXIT` variables, so the downstream PASS / FAIL / crash branches run UNCHANGED — exactly one aggregated INV-35 verdict trailer and one INV-04 Reviewed-HEAD trailer per run. `all-unavailable` sets `LATEST_COMMENT=""` and falls back to the single-agent FAIL path, preserving the legacy `AGENT_EXIT` distinction so N=1 is byte-for-byte: `AGENT_EXIT=1` when any agent's CLI actually crashed (rc ≠ 0) → crash-fallback comment + `failed-non-substantive other`; `AGENT_EXIT=0` when every agent exited cleanly but posted no verdict → no crash comment + `failed-substantive`. On *partial* unavailability the wrapper posts one human-visible summary comment (dropped vs. deciding agents) and logs a WARN, then decides on the deciding agents.
 
+## Token accounting and budget routing ([INV-141])
+
+When either token budget is configured, each fan-out member gets one strict
+accounting invocation before launch, adjacent to its session UUID allocation:
+`accounting_invocation_id(RUN_ID,review,<member-session-UUID>,1)`. The UUID,
+not agent name, keeps same-named members distinct under the shared review
+`RUN_ID`. While budgets are configured, the UUID is also added to the
+controller-log path, so same-named members cannot overwrite or parse one
+another's usage; with both budgets unset, the legacy path remains byte-for-byte
+unchanged. `AGENT_CONTROLLER_LOGS` records each actual controller tee path for
+run-artifact persistence, while `AGENT_GENERIC_LOGS` continues to select the
+usage source (codex clean stdout, controller log for other adapters).
+`_run_codex_review`'s internal bounded fresh reruns remain inside that one
+invocation and retain `metrics_parse_tokens` last-record semantics.
+
+After verdict resolution, every started member commits outside the INV-70
+`metrics_emit` block. Pass/fail members parse the same generic log INV-70 reads;
+`unavailable`/`timed-out` members commit `usage-unknown` with
+`member-dropped`. Thus a normally exiting wrapper leaves no started member open.
+A strict commit failure is loud and represented as unknown. Configuration and
+hard-mode adapter accountability are validated before auth, E2E, smoke, or
+fan-out; a hard `accounting_start` failure refuses the affected launch without
+label mutation, while warn mode runs degraded. If the refusal happens after
+earlier members launched, those members are committed and evaluated first. A
+member violation routes terminal; otherwise the wrapper posts
+`failed-non-substantive cause=token-budget-launch-refused`, leaves `reviewing`
+unchanged, and lets Step 5 restore `pending-review`.
+
+The wrapper posts each member verdict before evaluating
+`AGENT_TOKEN_BUDGET`. A hard member overage or unknown writes an
+invocation-keyed terminal intent and explicitly calls
+`terminal_intent_cleanup_transition reviewing reviewing pending-dev`; normal
+review completion returns before crash teardown, so this explicit call is
+load-bearing. The INV-140 helper redirects it to `stalled` and consumes the
+intent. The verdict is never rewritten by budget enforcement.
+If the required hard intent cannot be persisted, the wrapper refuses approval
+and leaves `reviewing` unchanged; it never substitutes a crash verdict. The
+invocation-intent helper stages a trusted
+`token-budget-intent-pending-v1` marker before the INV-140 write and posts its
+resolved marker afterward. If the wrapper exits while that marker is
+unresolved, dispatcher Step 5 retries the pinned review-wrapper intent before
+its normal review-crash route, confirms that exact generation is live, then
+explicitly resolves terminal cleanup. Exact whole-body self-authored markers
+are required; a read/write failure leaves `reviewing` intact for the next tick,
+while a generation already consumed by an earlier stall is resolved without a
+second terminal route. Before provider writes, the helper stages an
+invocation-keyed recovery pointer beside the strict record. If both provider
+writes fail, Step 5 validates that pointer against the immutable review record
+and retries only that actual hard decision before ordinary crash routing;
+unrelated historical records are inert.
+
+Warn mode posts a parsed-key breadcrumb and preserves routing. Completed
+invocation checks use strict `>` semantics, so equality remains within budget.
+With both budgets unset the accounting loops return before store I/O.
+
 ## Prompt construction
 
 The prompt encodes the entire review procedure as numbered steps. The wrapper does NOT execute any of those steps itself — they're all instructions to the underlying agent. The wrapper's job is to construct the prompt (per agent via `build_review_prompt <name> <session-id>`), kick off the agent(s), and parse the verdict(s).
@@ -804,6 +859,30 @@ if PASSED_VERDICT == true:                 # mergeable gate already proceeded (g
 - **Additive only.** INV-46 (E2E hard gate) and INV-64 (agent-smoke) are unmodified by this gate — this gate double-covering the E2E job's own check is intentional defense-in-depth (an incident where the E2E job was green while a different check was red).
 - **Provider-neutral.** The wrapper calls only `chp_ci_rollup` / `chp_pr_view` — no raw `gh` call was added. Both `chp_github_ci_rollup` and `chp_gitlab_ci_rollup` implement the contract.
 
+## Cumulative token gate before approval ([INV-141])
+
+On the PASS path only, after the mergeable and CI-rollup gates have proceeded
+and immediately before `chp_approve`, the wrapper runs one
+`token_issue_projection ISSUE RUN_ID`. Completed cumulative usage violates only
+at `total_tokens > ISSUE_TOKEN_BUDGET`. Hard overage, `usage-unknown`, or
+`corrupt` writes the digest-derived issue intent and explicitly routes through
+`terminal_intent_cleanup_transition` to `stalled`; no approve/merge call occurs.
+Failure to persist that intent refuses approval and leaves `reviewing`
+unchanged.
+
+A mechanism failure or residual `incomplete` projection is `unavailable`, not a
+terminal accounting fact. In hard mode the wrapper mirrors the INV-134
+non-substantive hold: it posts a hold note, transitions
+`reviewing -> pending-review`, sets `RESULT_PARSED=true`, and exits 0 with no
+intent, approval, merge, or crash verdict. The hold also emits a durable
+`failed-non-substantive cause=token-budget-unavailable` trailer before the
+transition. If that transition fails, the wrapper exits nonzero with
+`reviewing` unchanged; dispatcher Step 5 recognizes the trailer and restores
+`pending-review` instead of misrouting the event as a review crash to
+`pending-dev`. If both trailer and transition writes fail, hard-mode
+Step 5 recovery still retries review ownership. Warn mode logs projection
+unavailability and leaves approval routing unchanged.
+
 ## Verdict = PASS path
 
 ```
@@ -925,7 +1004,7 @@ flowchart TD
 
 This means if the script exits 0 (normal completion) but `RESULT_PARSED` was never set (logic bug), the trap silently leaves labels alone — defense-in-depth against a future refactor that forgets to set the flag would manifest as "issue stuck in `reviewing`" rather than "issue corrupted to `pending-dev` for no reason".
 
-**Resource terminal-intent override** ([INV-140](invariants.md#inv-140-resource-terminal-intent-comments-are-the-durable-authoritative-terminal-control-record-and-wrapper-cleanup-must-resolve-a-live-intent-before-any-pending-state-write)): the crash trap resolves the authoritative issue-comment marker immediately before its cleanup route to `pending-dev`. With no live intent, it delegates the original `reviewing -> pending-dev` arguments unchanged. With a live trusted intent, it atomically transitions `reviewing -> stalled` through `stall_from_active`, then posts the consume marker. Transition-before-consume makes an interrupted cleanup replay-safe. If an operator clear lands between those writes, it remains authoritative even when the racing stale consume posts afterward; re-entry recognizes the cleared generation plus `stalled` and makes no pending transition. Clear re-arms marker state only and does not move labels. Wrong-owner and comment-read failures make no pending mutation and leave the intent live. No production path writes an intent until #506.
+**Resource terminal-intent override** ([INV-140](invariants.md#inv-140-resource-terminal-intent-comments-are-the-durable-authoritative-terminal-control-record-and-wrapper-cleanup-must-resolve-a-live-intent-before-any-pending-state-write)): the crash trap resolves the authoritative issue-comment marker immediately before its cleanup route to `pending-dev`. With no live intent, it delegates the original `reviewing -> pending-dev` arguments unchanged. With a live trusted intent, it atomically transitions `reviewing -> stalled` through `stall_from_active`, then posts the consume marker. Transition-before-consume makes an interrupted cleanup replay-safe. If an operator clear lands between those writes, it remains authoritative even when the racing stale consume posts afterward; re-entry recognizes the cleared generation plus `stalled` and makes no pending transition. Clear re-arms marker state only and does not move labels. Wrong-owner and comment-read failures make no pending mutation and leave the intent live. INV-141 token-budget evaluation is the first production intent writer and also uses the same helper explicitly on normal review violation paths.
 
 **Guardian clean-exit handshake** ([Lane-GC PR-5, INV-118](invariants.md#inv-118-each-lane-runs-a-setsid-detached-guardian-holding-the-read-end-of-guardfifo-the-wrappers-write-end-is-opened-before-the-guardian-ever-spawns-so-kernel-eof-on-any-death--including-sigkilloom--triggers-an-idempotent-lane-scoped-reap)): identical placement and contract to the dev side — right after the PID-file cleanup, before any network work, `{ printf 'done\n' >&"$ADT_GUARD_FD"; } 2>/dev/null || true; exec {ADT_GUARD_FD}>&- 2>/dev/null || true`, a no-op when no guardian was installed. The guardian wakes on the resulting EOF, sees the reap-first block's `STATE` already at a terminal/in-progress value, and exits with zero kills — this is the review side's crash-path AND graceful-path signal in one call, since this trap runs on every exit whether or not `RESULT_PARSED` was set.
 

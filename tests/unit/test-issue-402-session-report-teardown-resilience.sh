@@ -130,6 +130,7 @@ run_cleanup_with_vanished_shim() {
   # PATH: shim dir FIRST (as setup_github_auth would prepend it), system dir
   # second — so once the shim dir's `gh` disappears, a fresh PATH search
   # (post `hash -d`) finds the system stub next in line.
+  env -u ADT_GUARD_FD -u ADT_LANE_DIR -u ADT_LANE_ID -u ADT_STATE_ROOT \
   PATH="$SHIM_DIR:$SYSTEM_DIR:$PATH" \
   GH_WRAPPER_DIR="$SHIM_DIR" \
   GH_RECORD="$record" \
@@ -157,6 +158,7 @@ run_cleanup_with_vanished_shim() {
       gh issue edit \"\$1\" --repo \"\$REPO\" \"\${args[@]}\"
     }
     terminal_intent_cleanup_transition() { itp_transition_state \"\$1\" \"\$3\" \"\$4\"; }
+    _token_dev_evaluate_cleanup() { return 0; }
     chp_pr_list() { gh pr list \"\$@\"; printf %s '[{\"body\":\"Closes #402\"}]'; }
     drain_agent_pr_create() { gh drain-pr-create-probe; return 0; }
     drain_agent_bot_triggers() { gh drain-bot-triggers-probe; return 0; }
@@ -238,6 +240,7 @@ run_cleanup_intact_shim() {
   mkdir -p "$SHIM_DIR"
   ln -sf "$SYSTEM_DIR/gh" "$SHIM_DIR/gh"
 
+  env -u ADT_GUARD_FD -u ADT_LANE_DIR -u ADT_LANE_ID -u ADT_STATE_ROOT \
   PATH="$SHIM_DIR:$SYSTEM_DIR:$PATH" \
   GH_WRAPPER_DIR="$SHIM_DIR" \
   GH_RECORD="$record" \
@@ -265,6 +268,7 @@ run_cleanup_intact_shim() {
       gh issue edit \"\$1\" --repo \"\$REPO\" \"\${args[@]}\"
     }
     terminal_intent_cleanup_transition() { itp_transition_state \"\$1\" \"\$3\" \"\$4\"; }
+    _token_dev_evaluate_cleanup() { return 0; }
     chp_pr_list() { gh pr list \"\$@\"; printf %s '[]'; }
     drain_agent_pr_create() { gh drain-pr-create-probe; return 0; }
     drain_agent_bot_triggers() { gh drain-bot-triggers-probe; return 0; }
@@ -307,6 +311,7 @@ exit 0
 EOF
   chmod +x "$SHIM_DIR/gh"
 
+  env -u ADT_GUARD_FD -u ADT_LANE_DIR -u ADT_LANE_ID -u ADT_STATE_ROOT \
   PATH="$SHIM_DIR:$SYSTEM_DIR:$PATH" \
   GH_WRAPPER_DIR="$SHIM_DIR" \
   GH_RECORD="$record" \
@@ -334,6 +339,7 @@ EOF
       gh issue edit \"\$1\" --repo \"\$REPO\" \"\${args[@]}\"
     }
     terminal_intent_cleanup_transition() { itp_transition_state \"\$1\" \"\$3\" \"\$4\"; }
+    _token_dev_evaluate_cleanup() { return 0; }
     chp_pr_list() { gh pr list \"\$@\"; printf %s '[]'; }   # empty array = the no-PR branch
     drain_agent_pr_create() { gh drain-pr-create-probe; return 0; }
     drain_agent_bot_triggers() { gh drain-bot-triggers-probe; return 0; }

@@ -253,9 +253,16 @@ jobs:
             skills/autonomous-dispatcher/scripts/lib-agent-smoke.sh \
             skills/autonomous-dispatcher/scripts/lib-metrics.sh \
             skills/autonomous-dispatcher/scripts/lib-accounting.sh \
+            skills/autonomous-dispatcher/scripts/lib-token-budget.sh \
+            skills/autonomous-dispatcher/scripts/token-budget-projection-remote-aws-ssm.sh \
             tests/unit/test-lib-accounting.sh \
             tests/e2e/run-resource-accounting-e2e.sh \
             tests/unit/test-resource-accounting-e2e.sh \
+            tests/unit/test-lib-token-budget.sh \
+            tests/unit/test-token-budget-wiring.sh \
+            tests/unit/test-token-budget-wrapper-routing.sh \
+            tests/unit/test-token-budget-e2e.sh \
+            tests/e2e/run-token-budget-gates-e2e.sh \
             skills/autonomous-dispatcher/scripts/metrics-report.sh \
             skills/autonomous-dispatcher/scripts/lib-run-artifacts.sh \
             skills/autonomous-dispatcher/scripts/status.sh \

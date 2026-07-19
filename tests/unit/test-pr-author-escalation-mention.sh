@@ -384,7 +384,7 @@ assert_contains "TC-PAEM-034d _same_head_verdict_aware_recovery signature carrie
   "$DISPATCH_SRC" 'local issue_num="$1" pr_ref="$2" current_head="$3" cause="$4" pr_num="${5:-}"'
 
 assert_contains "TC-PAEM-034e caller passes pr_num to _same_head_verdict_aware_recovery" \
-  "$DISPATCH_SRC" '_same_head_verdict_aware_recovery "$issue_num" "$pr_ref" "$current_head" "$_recovery_cause" "$pr_num" && return 0'
+  "$DISPATCH_SRC" $'_same_head_verdict_aware_recovery \\\n        "$issue_num" "$pr_ref" "$current_head" "$_recovery_cause" "$pr_num" \\\n        || _same_head_recovery_rc=$?'
 
 # --- Converted site (autonomous-review.sh) ---
 assert_contains "TC-PAEM-035 INV-127 round-cap report calls resolve_escalation_mention(ISSUE_NUMBER, PR_NUMBER)" \
