@@ -92,6 +92,7 @@ directories; provider, marker, label, dispatch, and SSM operations are stubbed.
 | TC-TOKENBUDGET-082 | A newer recovery-pointer generation is staged while an older generation is being cleared | Stage and compare-delete clear share the mandatory accounting issue lock, so clearing generation A cannot delete generation B locally or through remote execution-host clear |
 | TC-TOKENBUDGET-083 | A historical review retry trailer predates the latest trusted self-authored review dispatch token, while a current trailer may share its timestamp second | Step 5 compares `(createdAt,id)`: it ignores the stale trailer, accepts a same-second higher-ID trailer, and preserves the correct review ownership; null/non-string comment fields cannot become a cutoff or crash marker parsing |
 | TC-TOKENBUDGET-084 | A token-budget review path exits `failed-non-substantive` because every launch was refused, a later launch was refused, or cumulative usage is unavailable | Immediately after its verdict trailer attempt, each path posts the INV-129 `round=0` reset marker as an independent reset channel, including when the trailer post fails |
+| TC-TOKENBUDGET-085 | Run-artifact initialization degrades while budgets remain enabled, leaving `RUN_ID` unset under `set -u` | Dev cleanup and the review pre-approval gate pass an empty current-run ID without aborting; all six token-budget wrapper call sites use nounset-safe fallback expansion |
 
 ## Wiring And E2E
 

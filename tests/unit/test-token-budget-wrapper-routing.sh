@@ -7,6 +7,7 @@ PASS=0
 FAIL=0
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+DEV="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/autonomous-dev.sh"
 REVIEW="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/autonomous-review.sh"
 TICK="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/dispatcher-tick.sh"
 DISPATCH_LIB="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-dispatch.sh"
@@ -55,8 +56,15 @@ awk '
   copy
 ' "$REVIEW" > "$ISSUE_SNIPPET"
 
+DEV_CLEANUP_SNIPPET="$WORK/dev-cleanup.sh"
+awk '
+  /^_token_dev_evaluate_cleanup\(\) \{/ { copy=1 }
+  copy { print }
+  copy && /^}$/ { exit }
+' "$DEV" > "$DEV_CLEANUP_SNIPPET"
+
 if [[ ! -s "$MEMBER_SNIPPET" || ! -s "$EARLY_REFUSAL_SNIPPET" \
-      || ! -s "$ISSUE_SNIPPET" ]]; then
+      || ! -s "$ISSUE_SNIPPET" || ! -s "$DEV_CLEANUP_SNIPPET" ]]; then
   echo "FAIL: could not extract token-budget review routing snippets" >&2
   exit 1
 fi
@@ -127,19 +135,29 @@ run_member_route() {
 
 run_issue_route() {
   local evaluate_rc="$1" transition_rc="$2" trailer_rc="${3:-0}"
+  local run_id_state="${4:-set}"
   local record="$WORK/issue-record"
   : > "$record"
   EVALUATE_RC="$evaluate_rc" TRANSITION_RC="$transition_rc" \
-    TRAILER_RC="$trailer_rc" RECORD="$record" \
+    TRAILER_RC="$trailer_rc" RECORD="$record" RUN_ID_STATE="$run_id_state" \
     bash -uo pipefail -c '
       PASSED_VERDICT=true
       ISSUE_NUMBER=506
-      RUN_ID=review-run
+      AGENT_TOKEN_BUDGET=100
+      TOKEN_BUDGET_MODE=hard
+      if [[ "$RUN_ID_STATE" == "set" ]]; then
+        RUN_ID=review-run
+      else
+        unset RUN_ID
+      fi
       REPO=zxkane/autonomous-dev-team
       PR_HEAD_SHA=head-506
       RESULT_PARSED=false
       log() { printf "log|%s\n" "$*" >> "$RECORD"; }
-      token_budget_evaluate_issue() { return "$EVALUATE_RC"; }
+      token_budget_evaluate_issue() {
+        printf "evaluate|%s\n" "$*" >> "$RECORD"
+        return "$EVALUATE_RC"
+      }
       terminal_intent_cleanup_transition() {
         printf "terminal|%s\n" "$*" >> "$RECORD"
         return "$TRANSITION_RC"
@@ -160,6 +178,40 @@ run_issue_route() {
     ' >/dev/null 2>&1
   return $?
 }
+
+run_dev_cleanup_without_run_id() {
+  local record="$WORK/dev-cleanup-record"
+  : > "$record"
+  RECORD="$record" bash -uo pipefail -c '
+    ISSUE_NUMBER=506
+    AGENT_TOKEN_BUDGET=100
+    TOKEN_BUDGET_MODE=hard
+    unset RUN_ID
+    TOKEN_DEV_BUDGET_EVALUATED=false
+    TOKEN_DEV_BUDGET_EVAL_RC=0
+    TOKEN_DEV_INVOCATION_IDS=()
+    TOKEN_DEV_RESULTS=()
+    log() { printf "log|%s\n" "$*" >> "$RECORD"; }
+    token_budget_evaluate_dev_run() {
+      printf "evaluate|%s\n" "$*" >> "$RECORD"
+      return 0
+    }
+    source "'"$DEV_CLEANUP_SNIPPET"'"
+    _token_dev_evaluate_cleanup
+  ' >/dev/null 2>&1
+}
+
+echo "== Wrapper degradation without run artifacts =="
+run_dev_cleanup_without_run_id
+assert_eq "TC-TOKENBUDGET-085 dev cleanup tolerates unset RUN_ID" 0 "$?"
+assert_contains "TC-TOKENBUDGET-085 dev cleanup projects with an empty current run" \
+  "evaluate|506  TOKEN_DEV_INVOCATION_IDS TOKEN_DEV_RESULTS" \
+  "$(cat "$WORK/dev-cleanup-record")"
+
+run_issue_route 0 0 0 unset
+assert_eq "TC-TOKENBUDGET-085 review issue gate tolerates unset RUN_ID" 0 "$?"
+assert_contains "TC-TOKENBUDGET-085 review gate projects with an empty current run" \
+  "evaluate|506 review " "$(cat "$WORK/issue-record")"
 
 echo "== Review early launch-refusal routing =="
 run_early_refusal_route 1

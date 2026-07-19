@@ -409,7 +409,7 @@ _token_dev_launch_begin() {
   token_budget_enabled || return 0
 
   if ! TOKEN_DEV_ACTIVE_ID="$(token_accounting_begin \
-      "$ISSUE_NUMBER" "$RUN_ID" dev dev "$TOKEN_DEV_ATTEMPT" "$AGENT_CMD")"; then
+      "$ISSUE_NUMBER" "${RUN_ID:-}" dev dev "$TOKEN_DEV_ATTEMPT" "$AGENT_CMD")"; then
     TOKEN_BUDGET_LAUNCH_REFUSED=true
     return 1
   fi
@@ -431,7 +431,7 @@ _token_dev_evaluate_cleanup() {
   fi
   TOKEN_DEV_BUDGET_EVALUATED=true
   TOKEN_DEV_BUDGET_EVAL_RC=0
-  token_budget_evaluate_dev_run "$ISSUE_NUMBER" "$RUN_ID" \
+  token_budget_evaluate_dev_run "$ISSUE_NUMBER" "${RUN_ID:-}" \
     TOKEN_DEV_INVOCATION_IDS TOKEN_DEV_RESULTS || TOKEN_DEV_BUDGET_EVAL_RC=$?
   case "$TOKEN_DEV_BUDGET_EVAL_RC" in
     0|10) ;;
@@ -1024,7 +1024,7 @@ cleanup() {
     if [[ "$TOKEN_BUDGET_LAUNCH_REFUSED" == "true" ]]; then
       log "Token-budget accounting start failed in hard mode (agent never ran); leaving label ownership unchanged."
       _teardown_call token_budget_post_launch_refusal \
-        "$ISSUE_NUMBER" dev "$RUN_ID" 2>/dev/null \
+        "$ISSUE_NUMBER" dev "${RUN_ID:-}" 2>/dev/null \
         || log "WARNING: Failed to post token-budget launch-refusal marker"
     else
       if [[ -n "${ISSUE_NUMBER:-}" ]] && command -v gh &>/dev/null; then
@@ -1280,7 +1280,7 @@ EOF
       && token_budget_launch_refusal_can_retry "$_token_budget_eval_rc"; then
     log "Token-budget accounting start failed in hard mode; no cleanup label transition will be attempted."
     _teardown_call token_budget_post_launch_refusal \
-      "$ISSUE_NUMBER" dev "$RUN_ID" 2>/dev/null \
+      "$ISSUE_NUMBER" dev "${RUN_ID:-}" 2>/dev/null \
       || log "WARNING: Failed to post token-budget launch-refusal marker"
   elif [[ "$_token_budget_eval_rc" -ne 0 && "$_token_budget_eval_rc" -ne 10 ]]; then
     log "Token-budget cleanup routing refused because the hard terminal decision is not durable."

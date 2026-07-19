@@ -2484,7 +2484,7 @@ for _agent in "${REVIEW_AGENTS_LIST[@]}"; do
   _agent_session_id=$(uuidgen)
   _agent_accounting_id=""
   if token_budget_enabled; then
-    if ! _agent_accounting_id="$(token_accounting_begin "$ISSUE_NUMBER" "$RUN_ID" review "$_agent_session_id" 1 "$_agent")"; then
+    if ! _agent_accounting_id="$(token_accounting_begin "$ISSUE_NUMBER" "${RUN_ID:-}" review "$_agent_session_id" 1 "$_agent")"; then
       echo "token-budget: accounting_start failed for review member '${_agent}' (${_agent_session_id}); hard mode refuses this launch" >&2
       TOKEN_REVIEW_LAUNCH_REFUSED=true
       break
@@ -4604,7 +4604,7 @@ fi
 # bounded-wait hold shape but does not create a terminal intent.
 if [[ "$PASSED_VERDICT" == "true" ]]; then
   _token_review_issue_gate_rc=0
-  token_budget_evaluate_issue "$ISSUE_NUMBER" review "$RUN_ID" \
+  token_budget_evaluate_issue "$ISSUE_NUMBER" review "${RUN_ID:-}" \
     || _token_review_issue_gate_rc=$?
   if [[ "$_token_review_issue_gate_rc" -eq 10 ]]; then
     if ! terminal_intent_cleanup_transition "$ISSUE_NUMBER" "reviewing" "reviewing" "pending-dev"; then
