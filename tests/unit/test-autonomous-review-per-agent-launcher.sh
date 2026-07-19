@@ -87,37 +87,12 @@ assert_eq "TC-PAL-RES-06 multi-token quoted value preserved verbatim" \
 # ---------------------------------------------------------------------------
 echo "=== TC-PAL-BR: fan-out branch behavior (applied / keep-claude / cleared / naked) ==="
 # ---------------------------------------------------------------------------
-# Faithful replica of the wrapper's per-agent launcher branch. Kept in lockstep
-# with autonomous-review.sh by the TC-PAL-SRC greps below (which assert the
-# exact tokens this replica relies on are present in the wrapper). The replica
-# uses the REAL _resolve_review_agent_launcher (sourced above), so a resolver
-# regression is caught here too.
-#
-# `log` is a wrapper-only function; stub it so the malformed-token branch's log
-# call does not abort the harness.
-log() { echo "LOG: $*" >&2; }
-
 # fanout_launcher_branch <agent> — emits the resulting AGENT_LAUNCHER_ARGV
 # joined by spaces. AGENT_LAUNCHER_ARGV is pre-seeded by the caller to mimic the
 # wrapper's rebind of the shared review launcher onto it.
 fanout_launcher_branch() {
   local _agent="$1"
-  local _per_agent_launcher
-  _per_agent_launcher=$(_resolve_review_agent_launcher "$_agent")
-  if [[ -n "$_per_agent_launcher" ]]; then
-    # `bash -n -c` parses without executing — a syntax error in the value is
-    # caught here WITHOUT aborting the subshell (a parse error inside `eval`
-    # would otherwise kill the surrounding shell context, bypassing the log +
-    # naked fallback). Mirrors the wrapper exactly.
-    if bash -n -c "AGENT_LAUNCHER_ARGV=($_per_agent_launcher)" 2>/dev/null; then
-      eval "AGENT_LAUNCHER_ARGV=($_per_agent_launcher)"
-    else
-      log "ERROR: AGENT_REVIEW_LAUNCHER_<$_agent> failed to tokenize; running naked. Value: $_per_agent_launcher"
-      AGENT_LAUNCHER_ARGV=()
-    fi
-  elif [[ "$_agent" != "claude" ]]; then
-    AGENT_LAUNCHER_ARGV=()
-  fi
+  _bind_review_agent_launcher_argv "$_agent" "test fan-out"
   printf '%s' "${AGENT_LAUNCHER_ARGV[*]:-}"
 }
 
@@ -219,19 +194,19 @@ assert_eq "TC-PAL-REG-01c kiro member (no key) still zeroed" \
 echo "=== TC-PAL-SRC: source-of-truth greps ==="
 # ---------------------------------------------------------------------------
 assert_grep "TC-PAL-SRC-01 fan-out resolves per-agent launcher" \
-  '_resolve_review_agent_launcher' "$WRAPPER"
+  '_bind_review_agent_launcher_argv "\$_agent"' "$WRAPPER"
 assert_grep "TC-PAL-SRC-02 fan-out tokenizes resolved launcher into AGENT_LAUNCHER_ARGV via eval" \
-  'eval "AGENT_LAUNCHER_ARGV=\(\$_per_agent_launcher\)"' "$WRAPPER"
+  'eval "AGENT_LAUNCHER_ARGV=\(\$per_agent_launcher\)"' "$RESOLVE_LIB"
 # The eval MUST be guarded by a `bash -n -c` parse pre-check: a syntax error
 # inside `eval` is NOT caught by `if ! eval` (it aborts the subshell), so the
 # wrapper validates parseability first. Without this, a malformed per-agent
 # launcher would silently kill the fan-out subshell (no log, no run_agent).
 assert_grep "TC-PAL-SRC-02b eval is guarded by a bash -n parse pre-check" \
-  'bash -n -c "AGENT_LAUNCHER_ARGV=\(\$_per_agent_launcher\)"' "$WRAPPER"
+  'bash -n -c "AGENT_LAUNCHER_ARGV=\(\$per_agent_launcher\)"' "$RESOLVE_LIB"
 assert_grep "TC-PAL-SRC-03 INV-38 non-claude zeroing survives as the elif fallback" \
-  'elif \[\[ "\$_agent" != "claude" \]\]; then' "$WRAPPER"
+  'elif \[\[ "\$name" != "claude" \]\]; then' "$RESOLVE_LIB"
 assert_grep "TC-PAL-SRC-04 tokenize-failure path falls back to AGENT_LAUNCHER_ARGV=()" \
-  'failed to tokenize' "$WRAPPER"
+  'failed to tokenize' "$RESOLVE_LIB"
 assert_grep "TC-PAL-SRC-05 _resolve_review_agent_launcher defined in lib-review-resolve.sh" \
   '_resolve_review_agent_launcher\(\)' "$RESOLVE_LIB"
 

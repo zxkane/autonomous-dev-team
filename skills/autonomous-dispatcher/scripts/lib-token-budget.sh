@@ -193,12 +193,13 @@ _token_budget_commit_result() {
 }
 
 token_accounting_commit() {
-  if (( $# < 4 || $# > 5 )); then
-    _token_budget_error "token_accounting_commit expects ISSUE INVOCATION_ID LOG OFFSET [UNKNOWN_REASON]"
+  if (( $# < 4 || $# > 6 )); then
+    _token_budget_error "token_accounting_commit expects ISSUE INVOCATION_ID LOG OFFSET [UNKNOWN_REASON] [FALLBACK_UNKNOWN_REASON]"
     return 1
   fi
   local issue="$1" invocation_id="$2" log="$3" offset="$4"
   local unknown_reason="${5:-}" parsed="" field total="" input="" output=""
+  local fallback_unknown_reason="${6:-}"
   local commit_failed=false
 
   if [[ -z "$invocation_id" ]]; then
@@ -220,7 +221,7 @@ token_accounting_commit() {
     [[ "$input" =~ ^[0-9]+$ ]] || input=""
     [[ "$output" =~ ^[0-9]+$ ]] || output=""
     if [[ -z "$total" ]]; then
-      unknown_reason="no-usage-in-log"
+      unknown_reason="${fallback_unknown_reason:-no-usage-in-log}"
     fi
   fi
 
@@ -453,20 +454,67 @@ _token_budget_recovery_pointer_path() {
 }
 
 token_budget_recovery_pointer_stage() {
-  if (( $# != 5 )); then
-    _token_budget_error "token_budget_recovery_pointer_stage expects ISSUE INTENT INVOCATION REASON OWNER"
+  if (( $# < 5 || $# > 7 )); then
+    _token_budget_error "token_budget_recovery_pointer_stage expects ISSUE INTENT INVOCATION REASON OWNER [RECORD_PATH] [ACCOUNTING_RECOVERY_JSON]"
     return 1
   fi
   local issue="$1" intent="$2" invocation="$3" reason="$4" owner="$5"
-  local dir file record _lock_fd="" rc=0
+  local record_path="${6:-}" accounting_recovery="${7:-}"
+  local dir file record recovery_invocation recovery_reason recovery_path
+  local _lock_fd="" rc=0
   [[ "$issue" =~ ^[1-9][0-9]*$ ]] \
     || { _token_budget_error "invalid issue '${issue}' for recovery pointer"; return 1; }
   [[ "$intent" == "$invocation" && "$invocation" =~ ^inv-v1-[0-9a-f]{24}$ ]] \
     || { _token_budget_error "invalid invocation identity for recovery pointer"; return 1; }
-  [[ "$reason" == "token-cap" || "$reason" == "usage-unknown" ]] \
+  [[ "$reason" == "token-cap" || "$reason" == "usage-unknown" \
+      || "$reason" == "turn-cap" ]] \
     || { _token_budget_error "invalid recovery pointer reason '${reason}'"; return 1; }
   [[ "$owner" == "dev-wrapper" || "$owner" == "review-wrapper" ]] \
     || { _token_budget_error "invalid recovery pointer owner '${owner}'"; return 1; }
+  if [[ "$reason" == "turn-cap" ]]; then
+    [[ "$record_path" == /* && -f "$record_path" && ! -L "$record_path" \
+        && "${record_path##*/}" == "${invocation}.json" ]] \
+      || { _token_budget_error "invalid turn-control recovery record path"; return 1; }
+    if [[ -z "$accounting_recovery" ]]; then
+      accounting_recovery="$(jq -nc \
+        --arg invocation "$invocation" --arg record_path "$record_path" \
+        '[{invocation:$invocation,reason:"turn-cap",record_path:$record_path}]')" \
+        || return 1
+    fi
+    accounting_recovery="$(jq -ce --arg trigger "$invocation" '
+      select(
+        type == "array"
+        and length > 0
+        and ([.[].invocation] | unique | length) == length
+        and all(.[];
+          type == "object"
+          and (.invocation | type) == "string"
+          and (.invocation | test("^inv-v1-[0-9a-f]{24}$"))
+          and (.reason | type) == "string"
+          and (.reason | test("^[A-Za-z0-9][A-Za-z0-9._:-]*$"))
+          and (.record_path | type) == "string"
+          and (.record_path | startswith("/")))
+        and any(.[]; .invocation == $trigger and .reason == "turn-cap")
+      )
+    ' <<<"$accounting_recovery" 2>/dev/null)" || {
+      _token_budget_error "invalid turn-control accounting recovery set"
+      return 1
+    }
+    while IFS=$'\t' read -r recovery_invocation recovery_reason recovery_path; do
+      [[ -f "$recovery_path" && ! -L "$recovery_path" \
+          && "${recovery_path##*/}" == "${recovery_invocation}.json" ]] || {
+        _token_budget_error "invalid recovery record path for ${recovery_invocation}"
+        return 1
+      }
+    done < <(jq -r '.[] | [.invocation,.reason,.record_path] | @tsv' \
+      <<<"$accounting_recovery")
+  else
+    if [[ -n "$record_path" || -n "$accounting_recovery" ]]; then
+      _token_budget_error "turn-control recovery fields are valid only for turn-cap recovery"
+      return 1
+    fi
+    accounting_recovery="null"
+  fi
   dir="$(_accounting_issue_dir "$issue")" \
     || { _token_budget_error "cannot resolve accounting issue directory for recovery pointer"; return 1; }
   file="${dir}/.token-budget-recovery-${owner}.json"
@@ -475,14 +523,18 @@ token_budget_recovery_pointer_stage() {
     --arg intent "$intent" \
     --arg invocation "$invocation" \
     --arg reason "$reason" \
-    --arg owner "$owner" '
+    --arg owner "$owner" \
+    --arg record_path "$record_path" \
+    --argjson accounting_recovery "$accounting_recovery" '
       {
         schema_version: 1,
         issue: $issue,
         intent: $intent,
         invocation: $invocation,
         reason: $reason,
-        owner: $owner
+        owner: $owner,
+        record_path: (if $record_path == "" then null else $record_path end),
+        accounting_recovery: $accounting_recovery
       }
     ')" || return 1
   if ! _accounting_lock "$issue" _lock_fd; then
@@ -502,25 +554,29 @@ _token_budget_recovery_pointer_read_local() {
     _token_budget_error "_token_budget_recovery_pointer_read_local expects ISSUE OWNER"
     return 1
   fi
-  local issue="$1" owner="$2" side file raw pointer invocation reason record state
+  local issue="$1" owner="$2" side file pointer_file raw pointer invocation
+  local reason record state recovery_json recovery_invocation recovery_reason
   case "$owner" in
     dev-wrapper) side=dev ;;
     review-wrapper) side=review ;;
     *) _token_budget_error "invalid recovery pointer owner '${owner}'"; return 1 ;;
   esac
-  file="$(_token_budget_recovery_pointer_path "$issue" "$owner")" \
+  pointer_file="$(_token_budget_recovery_pointer_path "$issue" "$owner")" \
     || { _token_budget_error "cannot resolve accounting recovery pointer"; return 1; }
-  if [[ ! -e "$file" && ! -L "$file" ]]; then
+  if [[ ! -e "$pointer_file" && ! -L "$pointer_file" ]]; then
     printf '[]\n'
     return 0
   fi
-  if [[ ! -f "$file" || -L "$file" ]] || ! raw="$(cat "$file" 2>/dev/null)"; then
+  if [[ ! -f "$pointer_file" || -L "$pointer_file" ]] \
+      || ! raw="$(cat "$pointer_file" 2>/dev/null)"; then
     _token_budget_error "accounting recovery pointer is unavailable for issue ${issue}"
     return 1
   fi
   pointer="$(jq -ce \
     --argjson issue "$issue" \
     --arg owner "$owner" '
+      .invocation as $primary
+      |
       select(
         type == "object"
         and .schema_version == 1
@@ -529,7 +585,28 @@ _token_budget_recovery_pointer_read_local() {
         and (.intent | type) == "string"
         and .intent == .invocation
         and (.invocation | test("^inv-v1-[0-9a-f]{24}$"))
-        and (.reason == "token-cap" or .reason == "usage-unknown")
+        and (.reason == "token-cap"
+          or .reason == "usage-unknown"
+          or .reason == "turn-cap")
+        and (if .reason == "turn-cap"
+          then ((.record_path | type) == "string"
+            and (.record_path | startswith("/"))
+            and (.accounting_recovery | type) == "array"
+            and (.accounting_recovery | length) > 0
+            and ([.accounting_recovery[].invocation] | unique | length)
+              == (.accounting_recovery | length)
+            and any(.accounting_recovery[];
+              .invocation == $primary and .reason == "turn-cap")
+            and all(.accounting_recovery[];
+              type == "object"
+              and (.invocation | type) == "string"
+              and (.invocation | test("^inv-v1-[0-9a-f]{24}$"))
+              and (.reason | type) == "string"
+              and (.reason | test("^[A-Za-z0-9][A-Za-z0-9._:-]*$"))
+              and (.record_path | type) == "string"
+              and (.record_path | startswith("/"))))
+          else .record_path == null and .accounting_recovery == null
+          end)
       )
     ' <<<"$raw" 2>/dev/null)" || {
     _token_budget_error "accounting recovery pointer is malformed for issue ${issue}"
@@ -537,37 +614,78 @@ _token_budget_recovery_pointer_read_local() {
   }
   IFS=$'\t' read -r invocation reason <<<"$(jq -r \
     '[.invocation, .reason] | @tsv' <<<"$pointer")"
-  file="${file%/*}/${invocation}.json"
-  record="$(_accounting_read_valid_record "$file" "$issue")" || {
-    _token_budget_error "accounting recovery record ${invocation} is unavailable"
-    return 1
-  }
-  state="$(jq -r --arg side "$side" '
-    if .side == $side then .state else "wrong-side" end
-  ' <<<"$record")"
-  case "${reason}:${state}" in
-    token-cap:usage-committed|usage-unknown:usage-unknown|usage-unknown:started) ;;
-    *)
-      _token_budget_error "accounting recovery pointer conflicts with ${invocation}"
+  if [[ "$reason" == "turn-cap" ]]; then
+    recovery_json="$(jq -c '.accounting_recovery' <<<"$pointer")" || return 1
+  else
+    recovery_json="$(jq -nc \
+      --arg invocation "$invocation" --arg reason "$reason" \
+      '[{invocation:$invocation,reason:$reason}]')" || return 1
+  fi
+  while IFS=$'\t' read -r recovery_invocation recovery_reason; do
+    file="${pointer_file%/*}/${recovery_invocation}.json"
+    record="$(_accounting_read_valid_record "$file" "$issue")" || {
+      _token_budget_error "accounting recovery record ${recovery_invocation} is unavailable"
       return 1
-      ;;
-  esac
+    }
+    state="$(jq -r --arg side "$side" '
+      if .side == $side then .state else "wrong-side" end
+    ' <<<"$record")"
+    if [[ "$reason" == "turn-cap" && "$state" == "started" ]]; then
+      accounting_commit_unknown \
+        "$issue" "$recovery_invocation" "$recovery_reason" || {
+        _token_budget_error "turn-cap recovery could not close accounting for ${recovery_invocation}"
+        return 1
+      }
+      record="$(_accounting_read_valid_record "$file" "$issue")" || {
+        _token_budget_error "turn-cap recovery record ${recovery_invocation} is unavailable after commit"
+        return 1
+      }
+      state="$(jq -r --arg side "$side" '
+        if .side == $side then .state else "wrong-side" end
+      ' <<<"$record")"
+    fi
+    if [[ "$reason" == "turn-cap" ]]; then
+      [[ "$state" == "usage-committed" || "$state" == "usage-unknown" ]] || {
+        _token_budget_error "accounting recovery pointer conflicts with ${recovery_invocation}"
+        return 1
+      }
+    else
+      case "${reason}:${state}" in
+        token-cap:usage-committed|usage-unknown:usage-unknown|usage-unknown:started) ;;
+        *)
+          _token_budget_error "accounting recovery pointer conflicts with ${recovery_invocation}"
+          return 1
+          ;;
+      esac
+    fi
+  done < <(jq -r '.[] | [.invocation,.reason] | @tsv' <<<"$recovery_json")
   jq -nc \
     --arg intent "$invocation" \
     --arg invocation "$invocation" \
     --arg reason "$reason" \
-    '[{intent:$intent, invocation:$invocation, reason:$reason}]'
+    --arg record_path "$(jq -r '.record_path // empty' <<<"$pointer")" \
+    '[{
+      intent:$intent,
+      invocation:$invocation,
+      reason:$reason,
+      record_path:(if $record_path == "" then null else $record_path end)
+    }]'
 }
 
 token_budget_remote_recovery_pointer() {
   if (( $# < 3 || $# > 4 )); then
     return 2
   fi
-  local action="$1" issue="$2" owner="$3" invocation="${4:-}" self dir
+  local action="$1" issue="$2" owner="$3" invocation="${4:-}" self dir flag
   self="${BASH_SOURCE[0]:-$0}"
   dir="$(cd "$(dirname "$(readlink -f "$self")")" && pwd 2>/dev/null)" || return 2
+  if [[ "$action" == "turn-recovery-complete" ]]; then
+    flag="--turn-recovery-complete"
+  else
+    flag="--recovery-${action}"
+  fi
   bash "${dir}/token-budget-projection-remote-aws-ssm.sh" \
-    "--recovery-${action}" "$issue" "$owner" "$invocation"
+    "$flag" "$issue" "$owner" "$invocation"
 }
 
 token_budget_recovery_pointer_read() {

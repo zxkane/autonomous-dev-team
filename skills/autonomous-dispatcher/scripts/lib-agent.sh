@@ -406,7 +406,22 @@ _timeout_value_to_seconds() {
 _AGENT_RUN_PID=""
 _run_with_timeout() {
   local cmd=()
-  if [[ -n "$_AGENT_TIMEOUT_CMD" ]]; then
+  local _turn_hard_controlled="${TURN_CONTROL_HARD_ACTIVE:-0}"
+  local _turn_trip_file="${TURN_CONTROL_FANOUT_TRIP_FILE:-}"
+  local _turn_launch_lock_fd=""
+  local _turn_ready_file=""
+  if [[ "$_turn_hard_controlled" == "1" ]] \
+      && ! command -v setsid >/dev/null 2>&1; then
+    echo "[lib-agent] ERROR: hard turn control requires 'setsid' to establish the owned process group; refusing launch." >&2
+    return "$TURN_CONTROL_ERROR_RC" # turn-control-branch: B032
+  fi
+  if [[ "$_turn_hard_controlled" == "1" ]] \
+      && ! _is_positive_timeout_value "$AGENT_TIMEOUT"; then
+    echo "[lib-agent] ERROR: hard turn control cannot enforce AGENT_TIMEOUT='${AGENT_TIMEOUT}' exactly; expected a positive integer with optional s/m/h/d suffix. Refusing launch." >&2
+    return "$TURN_CONTROL_ERROR_RC"
+  fi
+  if [[ "$_turn_hard_controlled" != "1" && -n "$_AGENT_TIMEOUT_CMD" ]]; then
+    : "turn-control-branch: B033"
     cmd+=("$_AGENT_TIMEOUT_CMD" --kill-after=30s --signal=TERM "$AGENT_TIMEOUT")
   fi
 
@@ -456,6 +471,61 @@ _run_with_timeout() {
   # branch, breaking the off-argv channel.
   local launcher=()
   command -v setsid >/dev/null 2>&1 && launcher=(setsid)
+
+  # Serialize final hard-review process creation against publication of the
+  # shared trip. The observer takes the same lock when writing fanout-trip.json,
+  # so either this spawn is admitted first or the durable trip suppresses it.
+  if [[ "$_turn_hard_controlled" == "1" && -n "$_turn_trip_file" ]]; then
+    if ! declare -F _turn_control_lock >/dev/null 2>&1 \
+        || ! _turn_control_lock "$_turn_trip_file" _turn_launch_lock_fd; then
+      echo "[lib-agent] ERROR: cannot lock the hard-review fan-out launch boundary; refusing launch." >&2
+      return "$TURN_CONTROL_ERROR_RC" # turn-control-branch: B034
+    fi
+    if turn_fanout_trip_active "$_turn_trip_file"; then
+      if ! turn_control_sync_fanout_trip >/dev/null 2>&1; then
+        _turn_control_unlock _turn_launch_lock_fd
+        echo "[lib-agent] ERROR: cannot persist fan-out cancellation; refusing launch." >&2
+        return "$TURN_CONTROL_ERROR_RC" # turn-control-branch: B035
+      fi
+      local _turn_prelaunch_winner=""
+      # Read failure falls through to the fail-closed unknown-winner branch.
+      _turn_prelaunch_winner="$(turn_control_winner 2>/dev/null || true)"
+      _turn_control_unlock _turn_launch_lock_fd
+      case "$_turn_prelaunch_winner" in
+        timeout) return 124 ;; # turn-control-branch: B036
+        turn-cap) return "$TURN_CONTROL_STOP_RC" ;; # turn-control-branch: B037
+        fanout-cancel)
+          : "turn-control-branch: B038"
+          if ! turn_control_mark_terminating >/dev/null 2>&1 \
+              || ! turn_control_mark_terminal_transitioned >/dev/null 2>&1; then
+            echo "[lib-agent] ERROR: cannot finalize no-spawn fan-out cancellation; refusing launch." >&2
+            return "$TURN_CONTROL_ERROR_RC"
+          fi
+          return "$TURN_CONTROL_STOP_RC"
+          ;;
+        *)
+          echo "[lib-agent] ERROR: fan-out trip is active without a durable local winner; refusing launch." >&2
+          return "$TURN_CONTROL_ERROR_RC"
+          ;;
+      esac
+    elif [[ -e "$_turn_trip_file" ]]; then
+      _turn_control_unlock _turn_launch_lock_fd
+      echo "[lib-agent] ERROR: fan-out trip record is malformed; refusing launch." >&2
+      return "$TURN_CONTROL_ERROR_RC" # turn-control-branch: B039
+    fi
+  fi
+  [[ "$_turn_hard_controlled" != "1" || -e "$_turn_trip_file" ]] \
+    || : "turn-control-branch: B040"
+
+  if [[ "$_turn_hard_controlled" == "1" ]]; then
+    _turn_ready_file="$(mktemp 2>/dev/null)" || {
+      [[ -n "$_turn_launch_lock_fd" ]] \
+        && _turn_control_unlock _turn_launch_lock_fd
+      echo "[lib-agent] ERROR: cannot create hard turn-control PGID readiness marker; refusing launch." >&2
+      return "$TURN_CONTROL_ERROR_RC"
+    }
+  fi
+
   # [Lane-GC PR-5 / INV-118] FD hygiene: close the inherited guardian write-
   # fd in THIS spawn's fd table before exec'ing into setsid/the agent CLI —
   # `{ADT_GUARD_FD}` fds are NOT close-on-exec by default (verified
@@ -475,9 +545,40 @@ _run_with_timeout() {
   # calling function's stdin exactly like the un-subshelled form did).
   (
     [[ -n "${ADT_GUARD_FD:-}" ]] && exec {ADT_GUARD_FD}>&-
+    [[ -n "$_turn_launch_lock_fd" ]] && exec {_turn_launch_lock_fd}>&-
+    if [[ "$_turn_hard_controlled" == "1" ]]; then
+      exec setsid bash -c '
+        ready_file="$1"
+        shift
+        sleep "${_TURN_CONTROL_SETSID_READY_DELAY_SECONDS:-0}"
+        printf "ready\n" >"$ready_file" || exit 93
+        exec "$@"
+      ' _ "$_turn_ready_file" "${cmd[@]}"
+    fi
     exec "${launcher[@]}" "${cmd[@]}"
   ) &
   _AGENT_RUN_PID=$!
+  [[ -n "$_turn_launch_lock_fd" ]] \
+    && _turn_control_unlock _turn_launch_lock_fd
+
+  if [[ "$_turn_hard_controlled" == "1" ]]; then
+    local _turn_ready=0 _turn_ready_i
+    for ((_turn_ready_i = 0; _turn_ready_i < 500; _turn_ready_i++)); do
+      if [[ "$(cat "$_turn_ready_file" 2>/dev/null)" == "ready" ]]; then
+        _turn_ready=1
+        break
+      fi
+      kill -0 "$_AGENT_RUN_PID" 2>/dev/null || break
+      sleep 0.01
+    done
+    rm -f "$_turn_ready_file" 2>/dev/null || true # Best-effort scratch cleanup; readiness already owns the result.
+    if [[ "$_turn_ready" != "1" ]]; then
+      kill -TERM "$_AGENT_RUN_PID" 2>/dev/null || true # Best-effort abort before PGID ownership was established.
+      wait "$_AGENT_RUN_PID" 2>/dev/null || true # Best-effort reap; the launch refusal below remains authoritative.
+      echo "[lib-agent] ERROR: hard turn-control process did not establish its owned PGID; refusing launch." >&2
+      return "$TURN_CONTROL_ERROR_RC"
+    fi
+  fi
 
   # Watchdog fallback (#451, opt-in via AGENT_TIMEOUT_WATCHDOG_FALLBACK):
   # neither 'timeout' nor 'gtimeout' is on PATH (the fail-closed default at
@@ -531,8 +632,133 @@ _run_with_timeout() {
   # count_agent_failures 124/137 contract. The watchdog's `wait`-reported
   # exit code becomes the fallback result channel in exactly that case (see
   # the reconciliation block below).
-  local _watchdog_pid="" _wd_result_file=""
-  if [[ -z "$_AGENT_TIMEOUT_CMD" && "${AGENT_TIMEOUT_WATCHDOG_FALLBACK:-false}" == "true" ]]; then
+  local _watchdog_pid="" _wd_result_file="" _watchdog_owns_group=0
+  if [[ "$_turn_hard_controlled" == "1" ]]; then
+    local _wd_secs; _wd_secs="$(_timeout_value_to_seconds "$AGENT_TIMEOUT")"
+    _wd_result_file="$(mktemp 2>/dev/null)" || _wd_result_file=""
+    local _wd_grace="${_AGENT_WATCHDOG_GRACE_SECS:-30}"
+    (
+      [[ -n "${ADT_GUARD_FD:-}" ]] && exec {ADT_GUARD_FD}>&-
+      local _turn_sleep_pid=""
+      _turn_watchdog_sleep() {
+        local delay="$1" sleep_rc=0
+        sleep "$delay" &
+        _turn_sleep_pid=$!
+        wait "$_turn_sleep_pid" 2>/dev/null || sleep_rc=$?
+        _turn_sleep_pid=""
+        return "$sleep_rc"
+      }
+      _turn_watchdog_cancel() {
+        if [[ -n "$_turn_sleep_pid" ]]; then
+          kill -TERM "$_turn_sleep_pid" 2>/dev/null || true # Best-effort wake-up during watchdog cancellation.
+          wait "$_turn_sleep_pid" 2>/dev/null || true # Best-effort reap; cancellation remains authoritative.
+        fi
+        exit 0
+      }
+      trap _turn_watchdog_cancel TERM INT HUP
+      local _turn_started="${EPOCHSECONDS:-$(date +%s)}"
+      local _turn_now _turn_winner="" _turn_result _turn_i
+      local _turn_terminating_persisted=0
+      while kill -0 -- "-$_AGENT_RUN_PID" 2>/dev/null; do
+        # Each review sibling consumes a shared trip by requesting
+        # fanout-cancel on its own invocation record.
+        if declare -F turn_control_sync_fanout_trip >/dev/null 2>&1; then
+          turn_control_sync_fanout_trip >/dev/null 2>&1 || true
+        fi
+        if declare -F turn_control_winner >/dev/null 2>&1; then
+          # A transient read failure retries on the next watchdog poll.
+          _turn_winner="$(turn_control_winner 2>/dev/null || true)"
+        fi
+        if [[ -n "$_turn_winner" ]]; then
+          # A prior atomic rename may be visible even though its directory sync
+          # failed. The duplicate request is the durability confirmation; never
+          # authorize signalling from a merely visible winner.
+          if ! turn_control_request_stop "$_turn_winner" >/dev/null 2>&1 \
+              || ! _turn_winner="$(turn_control_winner 2>/dev/null)"; then
+            _turn_watchdog_sleep "${TURN_CONTROL_POLL_SECONDS:-0.1}"
+            continue
+          fi
+          if [[ "$_turn_winner" == "turn-cap" ]] \
+              && declare -F turn_control_ensure_fanout_trip >/dev/null 2>&1 \
+              && ! turn_control_ensure_fanout_trip >/dev/null 2>&1; then
+            # Keep the trigger alive until its shared cancellation record is
+            # durable; no signal is legal while publication is unconfirmed.
+            _turn_watchdog_sleep "${TURN_CONTROL_POLL_SECONDS:-0.1}"
+            continue
+          fi
+          if turn_control_mark_terminating >/dev/null 2>&1; then
+            : "turn-control-branch: B041"
+            _turn_terminating_persisted=1
+            break
+          fi
+          : "turn-control-branch: B042"
+          # No signal is legal until the lifecycle transition is durable.
+          _turn_watchdog_sleep "${TURN_CONTROL_POLL_SECONDS:-0.1}"
+          continue
+        fi
+        _turn_now="${EPOCHSECONDS:-$(date +%s)}"
+        if (( _turn_now - _turn_started >= _wd_secs )); then
+          if turn_control_request_stop timeout >/dev/null 2>&1; then
+            : "turn-control-branch: B043"
+            # A transient read failure retries on the next watchdog poll.
+            _turn_winner="$(turn_control_winner 2>/dev/null || true)"
+          fi
+          [[ -n "$_turn_winner" ]] || : "turn-control-branch: B044"
+        fi
+        _turn_watchdog_sleep "${TURN_CONTROL_POLL_SECONDS:-0.1}"
+      done
+
+      # The whole process group completed before any stop request won. The
+      # parent records natural completion after watchdog reconciliation.
+      [[ -n "$_turn_winner" ]] \
+        || { : "turn-control-branch: B045"; exit 0; }
+
+      # Persist the winner, measured evidence, and terminating lifecycle
+      # before the first signal. This ordering is the reason hard-controlled
+      # runs cannot use GNU timeout. If storage remains unavailable until the
+      # group exits naturally, the durable winner owns the rc but no signal is
+      # sent.
+      if [[ "$_turn_winner" == "timeout" ]]; then
+        : "turn-control-branch: B046"
+        _turn_result=124
+      else
+        : "turn-control-branch: B047"
+        _turn_result="$TURN_CONTROL_STOP_RC"
+      fi
+      [[ "$_turn_terminating_persisted" == "1" ]] \
+        || { : "turn-control-branch: B048"; exit "$_turn_result"; }
+      if [[ -n "$_wd_result_file" ]]; then
+        printf '%s' "$_turn_result" >"${_wd_result_file}.tmp" \
+          && mv -f "${_wd_result_file}.tmp" "$_wd_result_file"
+      fi
+
+      # A process may exit after the winner became durable but before TERM.
+      # The persisted winner still owns the outcome because natural completion
+      # had not yet been recorded. Keep the result marker and return its rc.
+      # This test-only delay makes that boundary deterministic in the hermetic
+      # race test; it is unset in production.
+      _turn_watchdog_sleep "${_TURN_CONTROL_WATCHDOG_TERM_DELAY_SECONDS:-0}"
+      kill -TERM -- "-$_AGENT_RUN_PID" 2>/dev/null \
+        && : "turn-control-branch: B049" \
+        || exit "$_turn_result"
+      for ((_turn_i = 0; _turn_i < _wd_grace; _turn_i++)); do
+        kill -0 -- "-$_AGENT_RUN_PID" 2>/dev/null || exit "$_turn_result"
+        _turn_watchdog_sleep 1
+      done
+      # TERM grace expired; ESRCH means the controlled group already exited.
+      : "turn-control-branch: B050"
+      kill -KILL -- "-$_AGENT_RUN_PID" 2>/dev/null || true
+      if [[ "$_turn_winner" == "timeout" ]]; then
+        _turn_result=137
+        if [[ -n "$_wd_result_file" ]]; then
+          printf '%s' "$_turn_result" >"${_wd_result_file}.tmp" \
+            && mv -f "${_wd_result_file}.tmp" "$_wd_result_file"
+        fi
+      fi
+      exit "$_turn_result"
+    ) &
+    _watchdog_pid=$!
+  elif [[ -z "$_AGENT_TIMEOUT_CMD" && "${AGENT_TIMEOUT_WATCHDOG_FALLBACK:-false}" == "true" ]]; then
     local _wd_secs; _wd_secs="$(_timeout_value_to_seconds "$AGENT_TIMEOUT")"
     # AGENT_TIMEOUT accepts values coreutils `timeout` supports but this
     # helper does not model exactly (e.g. `1.5h`, `infinity` — both
@@ -619,6 +845,7 @@ _run_with_timeout() {
     '
     "${_wd_setsid[@]}" bash -c "$_wd_body" _ "$_wd_secs" "$_AGENT_RUN_PID" "$_wd_result_file" "$_wd_grace" "$_wd_term_delay" "$_wd_wake_delay" &
     _watchdog_pid=$!
+    [[ ${#_wd_setsid[@]} -gt 0 ]] && _watchdog_owns_group=1
   fi
 
   # [Lane-GC PR-2 / INV-110] Append this spawn's PGID to the lane registry
@@ -754,10 +981,24 @@ _run_with_timeout() {
     # harmless no-op and `wait` still returns its real exit code, which is the
     # only result channel when `mktemp` failed (step 6).
     if [[ -z "$_wd_marker" ]] && ! kill -0 -- "-$_AGENT_RUN_PID" 2>/dev/null; then
-      kill "$_watchdog_pid" 2>/dev/null || true
+      if [[ "$_watchdog_owns_group" == "1" ]]; then
+        # Close the pre-setsid race first: a fast command can finish before
+        # the background setsid has established PGID=$_watchdog_pid.
+        kill "$_watchdog_pid" 2>/dev/null || true
+        # Once setsid has run, also reap the watchdog's long sleep descendant.
+        kill -TERM -- "-$_watchdog_pid" 2>/dev/null || true
+      else
+        # Hard-control watchdogs share the wrapper group, so target only the job.
+        kill "$_watchdog_pid" 2>/dev/null || true
+      fi
     fi
     wait "$_watchdog_pid" 2>/dev/null || _wd_wait_rc=$?
-    if [[ -n "$_wd_result_file" ]]; then
+    if [[ "$_wd_wait_rc" == "137" ]]; then
+      # The watchdog's own exit status is authoritative for KILL escalation.
+      # A failed 124 -> 137 marker replacement must not downgrade the outcome
+      # to the stale pre-KILL marker.
+      _rc=137
+    elif [[ -n "$_wd_result_file" ]]; then
       # Re-read: the watchdog may have escalated 124 -> 137 while we were
       # waiting on it just now, OR rescinded (removed the file) if its
       # kill turned out to be a no-op — only trust a marker that still
@@ -765,7 +1006,8 @@ _run_with_timeout() {
       if [[ -s "$_wd_result_file" ]]; then
         _rc="$(cat "$_wd_result_file" 2>/dev/null)"
       fi
-    elif [[ "$_wd_wait_rc" == "124" || "$_wd_wait_rc" == "137" ]]; then
+    elif [[ "$_wd_wait_rc" == "124" || "$_wd_wait_rc" == "137" \
+            || "$_wd_wait_rc" == "${TURN_CONTROL_STOP_RC:-92}" ]]; then
       # No marker file was ever possible (mktemp failed) — trust the
       # watchdog's own exit status instead (step 6 above). Any other value
       # (0 rescinded, or a plain signal-death like 143 from the cancel
@@ -773,6 +1015,67 @@ _run_with_timeout() {
       _rc="$_wd_wait_rc"
     fi
     rm -f "$_wd_result_file" "${_wd_result_file}.tmp" 2>/dev/null || true
+  fi
+
+  if [[ "$_turn_hard_controlled" == "1" ]]; then
+    local _turn_final_winner="" _turn_final_read_ok=1
+    local _turn_final_lifecycle_ok=1
+    if ! declare -F turn_control_winner >/dev/null 2>&1 \
+        || ! _turn_final_winner="$(turn_control_winner 2>/dev/null)"; then
+      _turn_final_read_ok=0
+      _rc="$TURN_CONTROL_ERROR_RC"
+    fi
+    if [[ "$_turn_final_read_ok" == "1" && -n "$_turn_final_winner" ]]; then
+      # The group may have exited before the watchdog observed the winner.
+      # Closing stop-requested -> terminating here sends no signal and leaves
+      # the wrapper's terminal transition as the final lifecycle owner.
+      if ! turn_control_mark_terminating >/dev/null 2>&1; then
+        _turn_final_lifecycle_ok=0
+        _rc="$TURN_CONTROL_ERROR_RC"
+      fi
+    fi
+    case "${_turn_final_read_ok}:${_turn_final_winner}" in
+      1:timeout)
+        : "turn-control-branch: B051"
+        if [[ "$_turn_final_lifecycle_ok" == "1" ]]; then
+          [[ "$_rc" == "137" ]] || _rc=124
+          # Timeout has no issue transition; process termination closes its record.
+          turn_control_mark_terminal_transitioned >/dev/null 2>&1 \
+            || _rc="$TURN_CONTROL_ERROR_RC"
+        fi
+        ;;
+      1:turn-cap)
+        : "turn-control-branch: B052"
+        if [[ "$_turn_final_lifecycle_ok" != "1" ]]; then
+          _rc="$TURN_CONTROL_ERROR_RC"
+        elif declare -F turn_control_ensure_fanout_trip >/dev/null 2>&1 \
+            && ! turn_control_ensure_fanout_trip >/dev/null 2>&1; then
+          _rc="$TURN_CONTROL_ERROR_RC"
+        else
+          _rc="$TURN_CONTROL_STOP_RC"
+        fi
+        ;;
+      1:fanout-cancel)
+        : "turn-control-branch: B053"
+        if [[ "$_turn_final_lifecycle_ok" == "1" ]]; then
+          _rc="$TURN_CONTROL_STOP_RC"
+          # A cancelled sibling has no issue transition of its own.
+          turn_control_mark_terminal_transitioned >/dev/null 2>&1 \
+            || _rc="$TURN_CONTROL_ERROR_RC"
+        fi
+        ;;
+      1:)
+        if ! kill -0 -- "-$_AGENT_RUN_PID" 2>/dev/null \
+            && declare -F turn_control_mark_completed >/dev/null 2>&1; then
+          : "turn-control-branch: B054"
+          # Reconciliation has converged and no durable stop won. A watchdog
+          # cancelled after observing the empty group may itself report 143,
+          # so group liveness, not that helper rc, defines natural completion.
+          turn_control_mark_completed >/dev/null 2>&1 \
+            || _rc="$TURN_CONTROL_ERROR_RC"
+        fi
+        ;;
+    esac
   fi
 
   return "$_rc"
@@ -1692,6 +1995,25 @@ _agent_progress_recorder_fastpath_write() {
 # below (instead of the common `read -r line || [[ -n "$line" ]]` idiom)
 # exists so the final no-trailing-newline line is re-emitted WITHOUT a
 # synthesized newline — true byte-identical passthrough.
+_agent_turn_observe_record() {
+  local framing="${1:-line}" record="${2:-}"
+  [[ "${TURN_CONTROL_OBSERVE_ACTIVE:-0}" == "1" && "$framing" == "json" ]] || return 0
+  [[ "$record" == \{* ]] || return 0
+  declare -F observe_completed_turn >/dev/null 2>&1 || return 0
+  if observe_completed_turn "$record" >/dev/null 2>&1; then
+    return 0
+  fi
+  if [[ "${TURN_CONTROL_HARD_ACTIVE:-0}" == "1" ]]; then
+    echo "[lib-agent] ERROR: hard turn observation could not persist; failing closed." >&2
+    return 1
+  fi
+  if [[ "${TURN_CONTROL_OBSERVE_WARNED_FAILURE:-0}" != "1" ]]; then
+    echo "[lib-agent] WARN: turn observation evidence could not persist; warn-mode execution continues." >&2
+    TURN_CONTROL_OBSERVE_WARNED_FAILURE=1
+  fi
+  return 0
+}
+
 _agent_progress_recorder() {
   local framing="${1:-line}"
   if [[ -z "${AGENT_PROGRESS_FILE:-}" ]]; then
@@ -1713,6 +2035,7 @@ _agent_progress_recorder() {
       # already fired) — never let that abort the whole read loop under a
       # caller's `set -e`, same rationale as the `read` guard above.
       _agent_progress_recorder_fastpath_write "$fp_out" || true
+      _agent_turn_observe_record "$framing" "$fp_line" || return 1
       [[ $fp_rc -ne 0 ]] && break
     done
     return 0
@@ -1755,15 +2078,30 @@ _agent_progress_recorder() {
         _agent_progress_refresh
       elif [[ "$line" == \{* ]]; then
         if command -v jq >/dev/null 2>&1; then
-          jq -e . >/dev/null 2>&1 <<<"$line" && _agent_progress_refresh
+          if jq -e . >/dev/null 2>&1 <<<"$line"; then
+            _agent_progress_refresh
+            _agent_turn_observe_record "$framing" "$line" || return 1
+          fi
         else
           _agent_progress_refresh
+          _agent_turn_observe_record "$framing" "$line" || return 1
         fi
       fi
     fi
     [[ $rc -ne 0 ]] && break
   done
   return 0
+}
+
+_agent_pipeline_result() {
+  local -n _pipeline_statuses_ref="$1"
+  local cli_index="$2"
+  local recorder_index
+  recorder_index=$((${#_pipeline_statuses_ref[@]} - 1))
+  if [[ "${_pipeline_statuses_ref[$recorder_index]:-1}" -ne 0 ]]; then
+    return "${TURN_CONTROL_ERROR_RC:-93}"
+  fi
+  return "${_pipeline_statuses_ref[$cli_index]:-1}"
 }
 
 # ---------------------------------------------------------------------------
@@ -1962,7 +2300,9 @@ run_agent() {
       # JSON event stream. Recorder appended AFTER _run_with_timeout;
       # PIPESTATUS[1] (printf is [0]) holds the CLI's own rc.
       printf '%s' "$prompt" | _run_with_timeout "$AGENT_CMD" "${extra_args[@]}" -p | _agent_progress_recorder line
-      return "${PIPESTATUS[1]}"
+      local -a _pipeline_statuses=("${PIPESTATUS[@]}")
+      _agent_pipeline_result _pipeline_statuses 1
+      return $?
       ;;
   esac
 }

@@ -23,6 +23,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 WRAPPER="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/autonomous-review.sh"
 SMOKE_LIB="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-review-smoke.sh"
+RESOLVE_LIB="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-review-resolve.sh"
 CONF_EXAMPLE="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/autonomous.conf.example"
 INVARIANTS="$PROJECT_ROOT/docs/pipeline/invariants.md"
 FLOW="$PROJECT_ROOT/docs/pipeline/review-agent-flow.md"
@@ -102,10 +103,10 @@ assert_grep "TC-REVIEW-SMOKE-043b smoke waits the COLLECTED PIDs (not bare wait)
 # INV-38/INV-42 launcher treatment as the fan-out (the SAME launch path).
 assert_grep "TC-REVIEW-SMOKE-044a smoke resolves the per-agent model (_resolve_review_agent_model)" \
   '_smoke_model=\$\(_resolve_review_agent_model "\$_smoke_agent"\)' "$WRAPPER"
-assert_grep "TC-REVIEW-SMOKE-044b smoke applies the per-agent launcher resolver (INV-42)" \
-  '_resolve_review_agent_launcher "\$_smoke_agent"' "$WRAPPER"
-assert_grep "TC-REVIEW-SMOKE-044c smoke neutralizes the launcher for a non-claude member (INV-38)" \
-  'elif \[\[ "\$_smoke_agent" != "claude" \]\]; then' "$WRAPPER"
+assert_grep "TC-REVIEW-SMOKE-044b smoke binds the per-agent launcher through the shared helper (INV-42)" \
+  '_bind_review_agent_launcher_argv "\$_smoke_agent" "INV-64 smoke"' "$WRAPPER"
+assert_grep "TC-REVIEW-SMOKE-044c shared launcher binding neutralizes a non-claude member (INV-38)" \
+  'elif \[\[ "\$name" != "claude" \]\]; then' "$RESOLVE_LIB"
 # TC-REVIEW-SMOKE-044d (#224 review [P1]): the smoke MUST resolve THIS member's
 # per-agent review EXTRA-ARGS and apply them before the smoke — exactly as the
 # fan-out does — else smoke_agent's run_agent tokenizes the STALE dev args (or the

@@ -80,12 +80,17 @@ adapter_invoke_claude() {
   # [#493 R3] The shared progress recorder is appended as a pass-through
   # pipeline stage AFTER _run_with_timeout (never before — the CLI stage's
   # PIPESTATUS index must not shift). It streams stdout unchanged and
-  # refreshes the lease once per complete JSON record. Exit status is read
-  # from PIPESTATUS[1] (the CLI stage), never the recorder's own (always 0).
+  # refreshes the lease once per complete JSON record. The shared result
+  # helper preserves the CLI rc unless the recorder reports a hard-control
+  # persistence failure, which is the fail-closed control-plane result.
+  local -a pipeline_statuses=()
   if [[ ${#AGENT_LAUNCHER_ARGV[@]} -gt 0 ]]; then
     printf '%s' "$prompt" | _run_with_timeout "${claude_args[@]}" | _agent_progress_recorder json
+    pipeline_statuses=("${PIPESTATUS[@]}")
   else
     printf '%s' "$prompt" | _run_with_timeout env -u CLAUDECODE "$AGENT_CMD" "${claude_args[@]}" | _agent_progress_recorder json
+    pipeline_statuses=("${PIPESTATUS[@]}")
   fi
-  return "${PIPESTATUS[1]}"
+  _agent_pipeline_result pipeline_statuses 1
+  return $?
 }

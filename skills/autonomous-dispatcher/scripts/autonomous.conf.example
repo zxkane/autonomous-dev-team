@@ -259,6 +259,23 @@ AGENT_TIMEOUT="4h"
 # ISSUE_TOKEN_BUDGET=1000000
 # TOKEN_BUDGET_MODE="warn"
 
+# Turn limits (INV-142, #507). Unset by default. A side-specific setting wins
+# whenever it is set; an explicitly empty side-specific value is an error and
+# never falls through to AGENT_TURN_LIMIT. Values are strict positive
+# integers. TURN_LIMIT_MODE is `warn` or `hard` and defaults to `warn` when a
+# limit is effective.
+#
+# The current production capability matrix supports only Claude in warn mode,
+# after an execution-host `claude --version` probe confirms version 2.1.215 or
+# newer. No production adapter supports hard mode, so every production hard
+# configuration is refused before an agent starts. Browser E2E and smoke probes
+# are outside turn control. See docs/pipeline/adapter-spec.md.
+#
+# AGENT_TURN_LIMIT=
+# AGENT_DEV_TURN_LIMIT=
+# AGENT_REVIEW_TURN_LIMIT=
+# TURN_LIMIT_MODE=
+
 # Step 5a's agent-progress freshness threshold (DEV_PROGRESS_STALE_SECONDS,
 # INV-137, #485) is a FIXED constant (1800s) in lib-dispatch.sh — it is
 # deliberately NOT a conf knob here. Step 5a SIGTERMs a live dev wrapper only

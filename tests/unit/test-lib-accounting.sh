@@ -847,8 +847,10 @@ PROD_HITS="$(
       ! -name 'lib-accounting.sh' -print | sort
   )
 )"
-assert_eq "TC-RESOURCEACCOUNT-070 lib-token-budget is the sole production accounting consumer" \
-  "$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-token-budget.sh" "$PROD_HITS"
+EXPECTED_PROD_HITS="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-token-budget.sh
+$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-turn-limit.sh"
+assert_eq "TC-RESOURCEACCOUNT-070 resource-control libraries are the only production accounting consumers" \
+  "$EXPECTED_PROD_HITS" "$PROD_HITS"
 
 # ---------------------------------------------------------------------------
 # Deterministic branch inventory — TC-RESOURCEACCOUNT-080

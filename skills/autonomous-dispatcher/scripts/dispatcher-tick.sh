@@ -86,6 +86,10 @@ source "${LIB_DIR}/lib-accounting.sh"
 source "${LIB_DIR}/lib-terminal-control.sh"
 # shellcheck source=lib-token-budget.sh
 source "${LIB_DIR}/lib-token-budget.sh"
+# [INV-142] Turn limits are per invocation, so the dispatcher validates only
+# syntax and precedence. Capability checks remain execution-host wrapper owned.
+# shellcheck source=lib-turn-limit.sh
+source "${LIB_DIR}/lib-turn-limit.sh"
 # shellcheck source=lib-dispatch.sh
 source "${LIB_DIR}/lib-dispatch.sh"
 
@@ -138,6 +142,10 @@ log() { echo "[dispatcher-tick] $(date -u +%H:%M:%S) $*"; }
 # never receive a diagnostic on stdout.
 if ! token_budget_validate_config; then
   echo "[dispatcher-tick] FATAL: token-budget configuration is invalid. Fix autonomous.conf before the next tick." >&2
+  exit 1
+fi
+if ! turn_limit_validate_config all; then
+  echo "[dispatcher-tick] FATAL: turn-limit configuration is invalid. Fix autonomous.conf before the next tick." >&2
   exit 1
 fi
 
@@ -1048,6 +1056,31 @@ for i in $(seq 0 $((cand_count - 1))); do
           continue
           ;;
       esac
+    fi
+
+    _turn_pending_rc=0
+    if [ "$kind" = "issue" ]; then
+      _turn_pending_owner="dev-wrapper"
+      _turn_pending_state="in-progress"
+    else
+      _turn_pending_owner="review-wrapper"
+      _turn_pending_state="reviewing"
+    fi
+    turn_control_recover_pending_intent \
+      "$issue_num" "$_turn_pending_owner" || _turn_pending_rc=$?
+    if [ "$_turn_pending_rc" -eq 10 ]; then
+      if terminal_intent_cleanup_transition "$issue_num" \
+          "$_turn_pending_state" "$_turn_pending_state" "pending-dev"; then
+        turn_control_recovery_complete \
+          "$issue_num" "$_turn_pending_owner" \
+          || log "  turn-cap recovery transitioned issue #${issue_num}, but local finalization remains pending"
+      else
+        log "  turn-cap pending-intent recovery deferred for issue #${issue_num}"
+      fi
+      continue
+    elif [ "$_turn_pending_rc" -ne 0 ]; then
+      log "  turn-cap pending-intent read/write unavailable for issue #${issue_num}; preserving ${_turn_pending_state}"
+      continue
     fi
 
     _token_pending_rc=0

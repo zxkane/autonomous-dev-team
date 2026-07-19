@@ -351,6 +351,11 @@ chmod +x "$E2E_BIN/codex"
   source "$CODEX_ADAPTER" 2>/dev/null
   # shellcheck disable=SC1090
   source "$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-agent.sh" 2>/dev/null
+  # Exercise the pure-shell watchdog path deterministically. An external
+  # post-resolution reap must preserve codex's raw TERM rc while cancelling
+  # the watchdog's entire setsid group, including its long sleep child.
+  _AGENT_TIMEOUT_CMD=""
+  AGENT_TIMEOUT_WATCHDOG_FALLBACK=true
   _run_codex_review "review this" "sonnet" "$E2E_TMPROOT/stdout.txt" "" "$E2E_FANOUT_DIR" >/dev/null 2>"$E2E_TMPROOT/controller-stderr.log"
   echo "RC=$?" > "$E2E_TMPROOT/controller-rc.log"
 ) &

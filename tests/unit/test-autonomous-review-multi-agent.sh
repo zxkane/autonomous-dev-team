@@ -21,6 +21,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 WRAPPER="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/autonomous-review.sh"
 AGG_LIB="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-review-aggregate.sh"
+RESOLVE_LIB="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-review-resolve.sh"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -293,8 +294,10 @@ assert_grep "TC-MAR-SRC-05b the per-agent subshell is backgrounded (\) &)" \
   '\) &' "$WRAPPER"
 assert_grep "TC-MAR-SRC-06 per-subshell AGENT_CMD override" \
   'AGENT_CMD="\$' "$WRAPPER"
-assert_grep "TC-MAR-SRC-07 launcher neutralized for non-claude member (INV-38)" \
-  'AGENT_LAUNCHER_ARGV=\(\)' "$WRAPPER"
+assert_grep "TC-MAR-SRC-07a fan-out binds the member launcher through the shared helper (INV-38)" \
+  '_bind_review_agent_launcher_argv "\$_agent" "review fan-out"' "$WRAPPER"
+assert_grep "TC-MAR-SRC-07b shared launcher binding neutralizes non-claude members (INV-38)" \
+  'elif \[\[ "\$name" != "claude" \]\]; then' "$RESOLVE_LIB"
 # TC-MAR-SRC-08: the per-agent subshell must NOT let run_agent rewrite the
 # SHARED review-N.pid. Originally this was an `unset AGENT_PID_FILE`; INV-43
 # (#172) changed it to point AGENT_PID_FILE at a PRIVATE per-agent PGID sidecar

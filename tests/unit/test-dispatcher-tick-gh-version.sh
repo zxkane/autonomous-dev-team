@@ -96,13 +96,16 @@ EOF
 
 run_tick() {
   : > "$TMPROOT/gh-calls"
+  # The autonomous wrapper exports REAL_GH for its own credential shim. Keep
+  # this fixture's PATH-local gh authoritative unless the case config sets one.
+  REAL_GH="" \
   PATH="$BIN:$PATH" \
   AUTONOMOUS_CONF="$TMPROOT/autonomous.conf" \
   bash "$TICK" 2>&1
 }
 
 run_tick_rc() {
-  PATH="$BIN:$PATH" AUTONOMOUS_CONF="$TMPROOT/autonomous.conf" \
+  REAL_GH="" PATH="$BIN:$PATH" AUTONOMOUS_CONF="$TMPROOT/autonomous.conf" \
     bash "$TICK" >/dev/null 2>&1
   echo $?
 }

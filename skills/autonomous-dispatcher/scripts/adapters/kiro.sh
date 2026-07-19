@@ -50,7 +50,9 @@ adapter_invoke_kiro() {
   # [#493 R3] line framing (no JSON event stream). Recorder appended AFTER
   # _run_with_timeout; PIPESTATUS[1] (printf is [0]) holds kiro's own rc.
   printf '%s' "$prompt" | _run_with_timeout kiro-cli "${kiro_args[@]}" | _agent_progress_recorder line
-  return "${PIPESTATUS[1]}"
+  local -a pipeline_statuses=("${PIPESTATUS[@]}")
+  _agent_pipeline_result pipeline_statuses 1
+  return $?
 }
 
 # ---------------------------------------------------------------------------

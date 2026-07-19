@@ -41,22 +41,22 @@ assert_grep "TC-TOKENBUDGET-009 review sources token library" \
 assert_grep "TC-TOKENBUDGET-010 dev starts attempt accounting" \
   'token_accounting_begin' "$DEV"
 assert_grep "TC-TOKENBUDGET-010 dev identity pins side/member to dev" \
-  '"\$ISSUE_NUMBER" "\${RUN_ID:-}" dev dev "\$TOKEN_DEV_ATTEMPT"' "$DEV"
-assert_count "TC-TOKENBUDGET-085 dev token-budget calls tolerate missing run artifacts" \
-  4 '"\$\{RUN_ID:-\}"' "$DEV"
+  '"\$ISSUE_NUMBER" "\${RUN_ID:-}" dev dev "\$RESOURCE_DEV_ATTEMPT"' "$DEV"
+assert_count "TC-TOKENBUDGET-085 dev resource-control calls tolerate missing run artifacts" \
+  7 '"\$\{RUN_ID:-\}"' "$DEV"
 assert_grep "TC-TOKENBUDGET-010 dev captures a launch-local log offset" \
   'token_budget_log_offset.*LOG_FILE' "$DEV"
 assert_count "TC-TOKENBUDGET-010/011 all three dev launch sites start accounting" \
-  3 'if ! _token_dev_launch_begin; then' "$DEV"
+  3 'if ! _resource_dev_launch_begin; then' "$DEV"
 assert_count "TC-TOKENBUDGET-010/011 all three dev launch sites finish accounting" \
-  3 '_token_dev_launch_finish \|\| true' "$DEV"
+  3 '_resource_dev_launch_finish "\$AGENT_EXIT" \|\| true' "$DEV"
 assert_grep "TC-TOKENBUDGET-050 dev evaluates before cleanup transitions" \
   'token_budget_evaluate_dev_run' "$DEV"
 
 assert_grep "TC-TOKENBUDGET-012 review accounting keys member UUID" \
   'token_accounting_begin.*review.*_agent_session_id' "$REVIEW"
-assert_count "TC-TOKENBUDGET-085 review token-budget calls tolerate missing run artifacts" \
-  2 '"\$\{RUN_ID:-\}"' "$REVIEW"
+assert_count "TC-TOKENBUDGET-085 review resource-control calls tolerate missing run artifacts" \
+  5 '"\$\{RUN_ID:-\}"' "$REVIEW"
 assert_count "TC-TOKENBUDGET-013 codex reruns share the member accounting invocation" \
   1 'token_accounting_begin.*review.*_agent_session_id' "$REVIEW"
 assert_grep "TC-TOKENBUDGET-017 review dropped member commits member-dropped" \

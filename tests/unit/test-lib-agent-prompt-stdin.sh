@@ -93,7 +93,7 @@ all_tokens_below_size() {
 # from the dispatcher's per-project conf — which would smuggle a real
 # `claude` invocation past our PATH-shadowed stubs. Unset before sourcing
 # the lib in any sandboxed sub-bash.
-unset AUTONOMOUS_CONF AUTONOMOUS_CONF_LOADED_FROM
+unset AUTONOMOUS_CONF AUTONOMOUS_CONF_DIR AUTONOMOUS_CONF_LOADED_FROM
 unset AGENT_LAUNCHER AGENT_LAUNCHER_ARGV
 unset AGENT_DEV_EXTRA_ARGS AGENT_REVIEW_EXTRA_ARGS
 unset AGENT_PID_FILE
@@ -159,10 +159,10 @@ else
 fi
 
 # Defense in depth: pre-fix the codex / opencode pipelines used
-# PIPESTATUS[0] for the CLI rc. After adding the leading printf stage
-# the CLI rc is at PIPESTATUS[1]. A regression that drops the leading
-# printf would leave PIPESTATUS[1] referring to the awk capture filter
-# (always rc=0), masking real CLI failures. Pin both indices.
+# PIPESTATUS[0] for the CLI rc. After adding the leading printf stage the CLI
+# rc is at PIPESTATUS[1]. Adapters now pass the captured status vector through
+# _agent_pipeline_result so a hard recorder failure can override the CLI rc;
+# pin both the old forbidden index and the new shared-helper call shape.
 if grep -nE 'return "\$\{PIPESTATUS\[0\]\}"' <<<"$executable" >/dev/null; then
   echo -e "  ${RED}FAIL${NC}: TC-EXEC-009 lib-agent.sh still uses PIPESTATUS[0] — pipeline shape regressed"
   FAIL=$((FAIL + 1))
@@ -170,11 +170,39 @@ else
   echo -e "  ${GREEN}PASS${NC}: TC-EXEC-009 no PIPESTATUS[0] reads (codex/opencode now use PIPESTATUS[1])"
   PASS=$((PASS + 1))
 fi
-if grep -cE 'return "\$\{PIPESTATUS\[1\]\}"' <<<"$executable" | grep -qE '^[2-9]|^[1-9][0-9]'; then
-  echo -e "  ${GREEN}PASS${NC}: TC-EXEC-009 PIPESTATUS[1] used in at least 2 places (codex+opencode, run_agent+resume_agent)"
+pipeline_helper_expectations=(
+  "claude.sh:1"
+  "codex.sh:2"
+  "gemini.sh:1"
+  "kiro.sh:1"
+  "opencode.sh:2"
+  "agy.sh:1"
+)
+for pipeline_expectation in "${pipeline_helper_expectations[@]}"; do
+  pipeline_file="${pipeline_expectation%%:*}"
+  pipeline_expected="${pipeline_expectation##*:}"
+  pipeline_actual="$(
+    grep -Ec '_agent_pipeline_result[[:space:]]+pipeline_statuses[[:space:]]+1' \
+      "$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/adapters/$pipeline_file" \
+      || true
+  )"
+  if [[ "$pipeline_actual" == "$pipeline_expected" ]]; then
+    echo -e "  ${GREEN}PASS${NC}: TC-EXEC-009 $pipeline_file preserves every CLI stage through the shared result helper"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${NC}: TC-EXEC-009 $pipeline_file helper count expected=$pipeline_expected actual=$pipeline_actual"
+    FAIL=$((FAIL + 1))
+  fi
+done
+generic_pipeline_count="$(
+  grep -Ec '_agent_pipeline_result[[:space:]]+_pipeline_statuses[[:space:]]+1' \
+    "$LIB" || true
+)"
+if [[ "$generic_pipeline_count" == "1" ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-EXEC-009 generic fallback preserves its CLI stage through the shared result helper"
   PASS=$((PASS + 1))
 else
-  echo -e "  ${RED}FAIL${NC}: TC-EXEC-009 PIPESTATUS[1] not present in expected count — codex/opencode pipeline regressed"
+  echo -e "  ${RED}FAIL${NC}: TC-EXEC-009 generic fallback helper count expected=1 actual=$generic_pipeline_count"
   FAIL=$((FAIL + 1))
 fi
 

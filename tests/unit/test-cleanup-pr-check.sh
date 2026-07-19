@@ -117,6 +117,7 @@ echo "=== TC-CPC-006: exit-0 + successful zero-match read (no SIGTERM) → uncha
 echo ""
 
 CLEANUP_FN=$(awk '/^cleanup\(\) \{/,/^\}/' "$DEV_SCRIPT")
+TURN_CLEANUP_FN=$(awk '/^_resource_dev_handle_turn_cleanup\(\) \{/,/^\}/' "$DEV_SCRIPT")
 if [[ -z "$CLEANUP_FN" ]]; then
   echo -e "${RED}FATAL${NC}: could not extract cleanup() from $DEV_SCRIPT"
   exit 1
@@ -165,7 +166,15 @@ bash -c "
     echo \"GH issue edit \$1 --repo \$REPO \${args[*]}\" >> \"\$GH_RECORD\"
   }
   terminal_intent_cleanup_transition() { itp_transition_state \"\$1\" \"\$3\" \"\$4\"; }
+  TURN_DEV_ACCOUNTING_FAILED=false
+  TURN_DEV_ROUTE_FAILED=false
+  TURN_DEV_WINNER=\"\"
+  TURN_DEV_RECOVERY_STAGED=false
+  TURN_DEV_LAUNCH_REFUSED=false
   _token_dev_evaluate_cleanup() { return 0; }
+  _resource_dev_evaluate_budget_if_applicable() {
+    _token_dev_evaluate_cleanup
+  }
   drain_agent_pr_create() { return 0; }
   drain_agent_bot_triggers() { echo \"BOT-TRIGGER-DRAIN \$1\" >> \"\$GH_RECORD\"; return 0; }
   rearm_gh_resolution() { :; }
@@ -175,6 +184,7 @@ bash -c "
     echo '[{\"body\":\"unrelated text\"}]'
     return 0
   }
+  $TURN_CLEANUP_FN
   $CLEANUP_FN
   (exit 0); cleanup
 " 2>"$TMPROOT_CPC/stderr.log"

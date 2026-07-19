@@ -263,6 +263,21 @@ so an operator who suspects the matcher is over-reaching can disable it.
   no file and skips the kill path. The agent has already exited so no
   orphans.
 
+### Turn-control signalling boundary (INV-142, #507)
+
+For a hard-controlled invocation, `_run_with_timeout` remains the only
+component allowed to signal its live PGID. The observer and admission hook
+persist typed stop requests; review siblings consume the shared trip through
+their own watchdogs. The watchdog durably records the winning reason and the
+`terminating` lifecycle state before TERM, then escalates to KILL after the
+grace period when the group remains live.
+
+This is separate from the INV-43 review reapers. Those reapers retain their
+post-resolution, last-resort role for abandoned groups and descendants; they
+do not implement turn-cap or fan-out cancellation. Timeout winners alone map
+to 124/137. A turn-cap or fanout-cancel winner maps to rc 92, and downstream
+routing reads the durable winner rather than inferring reason from a signal.
+
 ### What we deliberately do not do
 
 - We don't refactor `run_agent` to background-and-wait at the call sites.

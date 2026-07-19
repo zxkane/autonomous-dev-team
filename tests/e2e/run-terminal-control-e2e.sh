@@ -65,6 +65,9 @@ env -u ADT_GUARD_FD -u ADT_LANE_DIR -u ADT_LANE_ID -u ADT_STATE_ROOT \
 PATH="$WORK/bin:/usr/bin:/bin" \
 AGENT_RAN=false \
 TOKEN_BUDGET_LAUNCH_REFUSED=false \
+TURN_DEV_LAUNCH_REFUSED=false \
+TURN_DEV_ROUTE_FAILED=false \
+TURN_DEV_WINNER= \
 ISSUE_NUMBER=515 \
 REPO=zxkane/autonomous-dev-team \
 PID_FILE="$WORK/agent.pid" \

@@ -36,6 +36,7 @@ LIB_CODE_HOST_SRC="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-code-h
 LIB_ACCOUNTING_SRC="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-accounting.sh"
 LIB_TERMINAL_CONTROL_SRC="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-terminal-control.sh"
 LIB_TOKEN_BUDGET_SRC="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-token-budget.sh"
+LIB_TURN_LIMIT_SRC="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-turn-limit.sh"
 # [INV-128] dispatcher-tick.sh now sources lib-liveness.sh (real, pure
 # helpers only — no I/O) right after lib-dispatch.sh. Auth tests don't
 # exercise Step 6, but the stub lib-dispatch.sh below must still define
@@ -102,6 +103,7 @@ cp "$LIB_CODE_HOST_SRC" "$SANDBOX/lib-code-host.sh"
 cp "$LIB_ACCOUNTING_SRC" "$SANDBOX/lib-accounting.sh"
 cp "$LIB_TERMINAL_CONTROL_SRC" "$SANDBOX/lib-terminal-control.sh"
 cp "$LIB_TOKEN_BUDGET_SRC" "$SANDBOX/lib-token-budget.sh"
+cp "$LIB_TURN_LIMIT_SRC" "$SANDBOX/lib-turn-limit.sh"
 cp "$LIB_LIVENESS_SRC" "$SANDBOX/lib-liveness.sh"
 
 # Stub lib-dispatch.sh: provide every helper dispatcher-tick.sh expects, but

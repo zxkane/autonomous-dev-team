@@ -14,6 +14,11 @@ case "$ISSUE_NUM" in
     OWNER="${3:-}"
     INVOCATION="${4:-}"
     ;;
+  --turn-recovery-complete)
+    MODE=turn-recovery-complete
+    ISSUE_NUM="${2:-}"
+    OWNER="${3:-}"
+    ;;
 esac
 if ! [[ "$ISSUE_NUM" =~ ^[1-9][0-9]*$ ]]; then
   echo "ERROR: issue number must be a positive integer" >&2
@@ -74,6 +79,9 @@ case "$MODE" in
   clear)
     REMOTE_ACTION="_token_budget_recovery_pointer_clear_local \"${ISSUE_NUM}\" \"${OWNER}\" \"${INVOCATION}\""
     ;;
+  turn-recovery-complete)
+    REMOTE_ACTION="_turn_control_recovery_complete_local \"${ISSUE_NUM}\" \"${OWNER}\""
+    ;;
   *)
     exit 1
     ;;
@@ -85,6 +93,7 @@ export PROJECT_ID="${SSM_REMOTE_PROJECT_ID}"
 export TOKEN_BUDGET_FORCE_LOCAL=1
 source "${SSM_REMOTE_PROJECT_DIR}/scripts/lib-accounting.sh"
 source "${SSM_REMOTE_PROJECT_DIR}/scripts/lib-token-budget.sh"
+source "${SSM_REMOTE_PROJECT_DIR}/scripts/lib-turn-limit.sh"
 ${REMOTE_ACTION}
 EOF
 )

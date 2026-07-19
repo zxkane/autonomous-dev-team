@@ -131,6 +131,7 @@ echo "=== TC-LGC5-E2E-01: real autonomous-dev.sh installs lane+guardian, SIGKILL
 # the design's forensic audit means by a non-graceful death.
 setsid env \
   PATH="$BIN:$PATH" \
+  REAL_GH="" \
   GH_TOKEN="e2e-fixture-token-not-real" \
   AUTONOMOUS_PID_DIR="$PIDDIR" \
   ADT_STATE_ROOT="$STATE_ROOT" \

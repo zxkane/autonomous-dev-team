@@ -119,6 +119,7 @@ build_sandbox() {
   # symlink-vendor topology that real deployments use.
   for f in lib-error.sh lib-agent.sh lib-auth.sh lib-config.sh lib-review-bots.sh \
            lib-review-verdict.sh lib-accounting.sh lib-token-budget.sh \
+           lib-turn-limit.sh \
            gh-app-token.sh gh-with-token-refresh.sh; do
     ln -sf "$SCRIPTS_DIR/$f" "$sandbox/$f"
   done

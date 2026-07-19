@@ -155,6 +155,50 @@ lane, **not per review agent** ([INV-46](invariants.md#inv-46-e2e-runs-once-in-a
 | `opencode` | CLI mints `ses_<base62>`; captured + resumed. | the captured id |
 | `agy` | CLI mints an internal UUID; captured via `--log-file`. | the captured id |
 
+### 3.6 Turn-limit capability (INV-142)
+
+`lib-turn-limit.sh::turn_capability ADAPTER LANE MODE` is the authoritative
+static capability lookup. The rows below apply identically to the controlled
+lanes `dev-new`, `dev-resume`, and `review-member`; browser E2E and smoke
+probes are excluded.
+Claude warn support also requires the execution host to parse
+`claude --version` and confirm version `2.1.215` or newer. A post-response
+stream fixture proves observation only and never grants hard capability.
+
+<!-- TURN-CAPABILITY-MATRIX-BEGIN -->
+| Adapter | Warn | Hard |
+|---|---|---|
+| claude | version-probed | no |
+| codex | no | no |
+| kiro | no | no |
+| agy | no | no |
+| gemini | no | no |
+| opencode | no | no |
+| generic | no | no |
+<!-- TURN-CAPABILITY-MATRIX-END -->
+
+Anything not listed is unsupported. Consequently every production hard-turn
+configuration is refused before agent launch.
+
+The authoritative lookup also exposes one hermetic-only fixture. This row is
+published for parity testing, but `synthetic` is not a selectable adapter and
+is absent from production dispatch and example configuration:
+
+<!-- TURN-CAPABILITY-TEST-MATRIX-BEGIN -->
+| Adapter | Warn | Hard |
+|---|---|---|
+| synthetic (test-only, non-selectable) | yes | yes |
+<!-- TURN-CAPABILITY-TEST-MATRIX-END -->
+
+The two observer contracts are distinct:
+
+- `observe_completed_turn` is post-response. For Claude warn mode it counts
+  each complete top-level `type=assistant` stream-json record once and ignores
+  every other record, including result `num_turns`.
+- `admit_next_request` is synchronous and runs immediately before each model
+  request. Hard support requires this boundary so request N+1 can be denied
+  after N completed turns. No production adapter currently implements it.
+
 ---
 
 ## 4. The four-axis AdapterResult

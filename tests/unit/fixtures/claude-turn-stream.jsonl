@@ -1,0 +1,6 @@
+{"type":"system","subtype":"init","session_id":"turn-fixture"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"First response"}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tool-1","name":"Read","input":{"file_path":"README.md"}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":"ok"}]}}
+{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"}}
+{"type":"result","subtype":"success","num_turns":99,"result":"done","stop_reason":"end_turn","terminal_reason":"completed"}

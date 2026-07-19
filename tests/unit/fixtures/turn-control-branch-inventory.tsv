@@ -1,0 +1,85 @@
+# branch_id|status|test_id|scope|semantic outcome
+# TC-TURNLIMIT-071 traces the focused unit/E2E suites and verifies that every
+# source marker has exactly one row, every covered marker executes, and every
+# uncovered marker remains explicit.
+B001|covered|TC-TURNLIMIT-008|lib-turn-limit|invalid mode is rejected
+B002|covered|TC-TURNLIMIT-004|lib-turn-limit|invalid effective limit is rejected
+B003|covered|TC-TURNLIMIT-009|lib-turn-limit|disabled mode is selected
+B004|covered|TC-TURNLIMIT-007|lib-turn-limit|enabled mode is selected
+B005|covered|TC-TURNLIMIT-011|lib-turn-limit|supported static capability is accepted
+B006|covered|TC-TURNLIMIT-011|lib-turn-limit|unsupported static capability is rejected
+B007|covered|TC-TURNLIMIT-015|lib-turn-limit|Claude version normalizes
+B008|covered|TC-TURNLIMIT-018|lib-turn-limit|unparseable Claude version is rejected
+B009|covered|TC-TURNLIMIT-017|lib-turn-limit|Claude version command exits nonzero
+B010|covered|TC-TURNLIMIT-017|lib-turn-limit|Claude probed version is below minimum
+B011|covered|TC-TURNLIMIT-067|lib-turn-limit|Claude probed version is supported
+B012|covered|TC-TURNLIMIT-009|lib-turn-limit|disabled launch skips capability probing
+B013|covered|TC-TURNLIMIT-020|lib-turn-limit|synthetic production launch is rejected
+B014|covered|TC-TURNLIMIT-019|lib-turn-limit|unsupported production capability is rejected
+B015|covered|TC-TURNLIMIT-031|lib-turn-limit|new invocation record is persisted
+B016|covered|TC-TURNLIMIT-031|lib-turn-limit|matching invocation record reopens
+B017|covered|TC-TURNLIMIT-021|lib-turn-limit|non-assistant stream record is ignored
+B018|covered|TC-TURNLIMIT-021|lib-turn-limit|assistant observation persists
+B019|covered|TC-TURNLIMIT-032|lib-turn-limit|first stop request wins
+B020|covered|TC-TURNLIMIT-035|lib-turn-limit|duplicate winning request is idempotent
+B021|covered|TC-TURNLIMIT-032|lib-turn-limit|later stop request is recorded late
+B022|covered|TC-TURNLIMIT-034|lib-turn-limit|running invocation completes naturally
+B023|covered|TC-TURNLIMIT-034|lib-turn-limit|completion cannot replace a stop
+B024|covered|TC-TURNLIMIT-036|lib-turn-limit|stop request enters terminating
+B025|covered|TC-TURNLIMIT-034|lib-turn-limit|non-stop state cannot enter terminating
+B026|covered|TC-TURNLIMIT-037|lib-turn-limit|terminating reaches terminal-transitioned
+B027|covered|TC-TURNLIMIT-037|lib-turn-limit|terminal transition cannot skip terminating
+B028|covered|TC-TURNLIMIT-075|lib-turn-limit|unreadable admission state fails closed
+B029|covered|TC-TURNLIMIT-028|lib-turn-limit|request below hard cap is admitted
+B030|covered|TC-TURNLIMIT-029|lib-turn-limit|request at hard cap is denied
+B031|covered|TC-TURNLIMIT-052|lib-turn-limit|non-turn-cap winner writes no terminal intent
+B032|covered|TC-TURNLIMIT-019|lib-agent|hard control without setsid is rejected
+B033|covered|TC-TURNLIMIT-040|lib-agent|inactive control keeps GNU timeout
+B034|covered|TC-TURNLIMIT-079|lib-agent|hard review launch lock cannot be acquired
+B035|uncovered|-|lib-agent|pre-launch sibling cancellation cannot persist
+B036|uncovered|-|lib-agent|pre-launch timeout winner preserves timeout rc
+B037|uncovered|-|lib-agent|pre-launch trigger winner preserves controlled rc
+B038|covered|TC-TURNLIMIT-074|lib-agent|pre-launch sibling cancellation finalizes without spawn
+B039|covered|TC-TURNLIMIT-079|lib-agent|malformed trip record rejects launch
+B040|covered|TC-TURNLIMIT-042|lib-agent|hard launch proceeds before any trip
+B041|covered|TC-TURNLIMIT-036|lib-agent|terminating transition persists before signal
+B042|covered|TC-TURNLIMIT-073|lib-agent|terminating persistence retries without signal
+B043|covered|TC-TURNLIMIT-044|lib-agent|timeout stop request persists
+B044|covered|TC-TURNLIMIT-073|lib-agent|timeout stop persistence retries
+B045|scheduler-dependent|TC-TURNLIMIT-083|lib-agent|watchdog may observe winner-free completion before parent reconciliation
+B046|covered|TC-TURNLIMIT-044|lib-agent|timeout winner maps timeout rc
+B047|covered|TC-TURNLIMIT-042|lib-agent|non-timeout winner maps controlled rc
+B048|uncovered|-|lib-agent|watchdog observes group exit after terminating persistence failure
+B049|covered|TC-TURNLIMIT-042|lib-agent|TERM is sent after durable arbitration
+B050|covered|TC-TURNLIMIT-045|lib-agent|TERM-resistant group receives KILL
+B051|covered|TC-TURNLIMIT-044|lib-agent|timeout winner finalizes
+B052|covered|TC-TURNLIMIT-042|lib-agent|turn-cap winner finalizes
+B053|covered|TC-TURNLIMIT-065|lib-agent|fanout-cancel winner finalizes
+B054|covered|TC-TURNLIMIT-073|lib-agent|winner-free group records natural completion
+B055|uncovered|-|autonomous-dev|dev execution host enables turn control
+B056|covered|TC-TURNLIMIT-077|autonomous-dev|dev turn accounting identity cannot start
+B057|covered|TC-TURNLIMIT-077|autonomous-dev|dev turn-control record cannot initialize
+B058|covered|TC-TURNLIMIT-077|autonomous-dev|dev turn-control record initializes
+B059|covered|TC-TURNLIMIT-077|autonomous-dev|dev completion has no turn-cap winner
+B060|covered|TC-TURNLIMIT-077|autonomous-dev|dev completion has a turn-cap winner
+B061|covered|TC-TURNLIMIT-077|autonomous-dev|dev turn-cap intent persistence fails
+B062|covered|TC-TURNLIMIT-077|autonomous-dev|dev turn-cap intent persists
+B063|uncovered|-|autonomous-review|review execution host enables turn control
+B064|uncovered|-|autonomous-review|parent suppresses a member before setup
+B065|uncovered|-|autonomous-review|review turn accounting identity cannot start
+B066|uncovered|-|autonomous-review|review turn-control record cannot initialize
+B067|uncovered|-|autonomous-review|review member turn-control record initializes
+B068|uncovered|-|autonomous-review|parent suppresses a member after setup
+B069|uncovered|-|autonomous-review|hard panel disables early-verdict convergence
+B070|covered|TC-TURNLIMIT-072|turn-routing|parent resolves a hard fan-out trip
+B071|covered|TC-TURNLIMIT-072|turn-routing|review turn-cap intent persistence fails
+B072|covered|TC-TURNLIMIT-072|turn-routing|review stalled transition fails
+B073|covered|TC-TURNLIMIT-072|turn-routing|review hard trip reaches terminal transition
+B074|covered|TC-TURNLIMIT-090|autonomous-review|partial turn-controlled panel refuses aggregation
+B075|covered|TC-TURNLIMIT-055|codex|active trip suppresses Codex rerun
+B076|covered|TC-TURNLIMIT-055|codex|absent trip permits Codex rerun
+B077|covered|TC-TURNLIMIT-031|turn-accounting|invalid turn accounting mode is rejected
+B078|covered|TC-TURNLIMIT-031|turn-accounting|canonical invocation identity cannot be built
+B079|covered|TC-TURNLIMIT-031|turn-accounting|supplied identity mismatch is rejected
+B080|covered|TC-TURNLIMIT-031|turn-accounting|hard accounting start failure rejects launch
+B081|covered|TC-TURNLIMIT-031|turn-accounting|turn accounting identity is returned

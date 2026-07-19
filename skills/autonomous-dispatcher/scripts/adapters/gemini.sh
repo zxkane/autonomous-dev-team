@@ -68,5 +68,7 @@ adapter_invoke_gemini() {
     "${extra_args[@]}" \
     -p \
     | _agent_progress_recorder "$_framing"
-  return "${PIPESTATUS[1]}"
+  local -a pipeline_statuses=("${PIPESTATUS[@]}")
+  _agent_pipeline_result pipeline_statuses 1
+  return $?
 }

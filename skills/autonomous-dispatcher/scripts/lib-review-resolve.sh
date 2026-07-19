@@ -117,6 +117,27 @@ _resolve_review_agent_launcher() {
   printf '%s' "${!per_agent_var:-}"
 }
 
+# _bind_review_agent_launcher_argv <name> [context]
+#
+# Apply the resolved per-agent launcher to AGENT_LAUNCHER_ARGV in the current
+# shell. A malformed operator value degrades to a naked launch after a loud
+# diagnostic, matching the historical smoke and fan-out behavior.
+_bind_review_agent_launcher_argv() {
+  local name="$1" context="${2:-review member}" per_agent_launcher
+  per_agent_launcher=$(_resolve_review_agent_launcher "$name")
+  if [[ -n "$per_agent_launcher" ]]; then
+    if bash -n -c "AGENT_LAUNCHER_ARGV=($per_agent_launcher)" 2>/dev/null; then
+      eval "AGENT_LAUNCHER_ARGV=($per_agent_launcher)"
+    else
+      printf 'ERROR: %s launcher for %s failed to tokenize; running naked. Value: %s\n' \
+        "$context" "$name" "$per_agent_launcher" >&2
+      AGENT_LAUNCHER_ARGV=()
+    fi
+  elif [[ "$name" != "claude" ]]; then
+    AGENT_LAUNCHER_ARGV=()
+  fi
+}
+
 # _resolve_review_agent_model_label <name>   (issue #220)
 #
 # Render the HONEST display label for one fan-out agent's review model — the
