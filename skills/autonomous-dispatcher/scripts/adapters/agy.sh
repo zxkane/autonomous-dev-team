@@ -82,10 +82,12 @@ adapter_invoke_agy() {
         --dangerously-skip-permissions \
         --print-timeout "$AGENT_TIMEOUT" \
         --log-file "$agy_log" \
-        "${agy_model_args[@]}" \
-        "${extra_args[@]}" \
+    "${agy_model_args[@]}" \
+    "${extra_args[@]}" \
     | _agent_progress_recorder line
-  local rc="${PIPESTATUS[1]}"
+  local -a pipeline_statuses=("${PIPESTATUS[@]}")
+  local rc=0
+  _agent_pipeline_result pipeline_statuses 1 || rc=$?
 
   # Self-healing re-capture: on dev-new this captures the freshly-minted UUID; on
   # dev-resume it is a no-op overwrite under normal operation (agy keeps the id),

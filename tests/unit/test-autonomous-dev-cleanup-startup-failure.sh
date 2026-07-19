@@ -55,6 +55,7 @@ trap 'rm -rf "$TMPROOT"' EXIT
 # Extract cleanup() from autonomous-dev.sh. The function spans from
 # `^cleanup\(\) \{` to the next standalone `^}` at column 0.
 CLEANUP_FN=$(awk '/^cleanup\(\) \{/,/^\}/' "$WRAPPER")
+TURN_CLEANUP_FN=$(awk '/^_resource_dev_handle_turn_cleanup\(\) \{/,/^\}/' "$WRAPPER")
 if [[ -z "$CLEANUP_FN" ]]; then
   echo -e "${RED}FAIL${NC}: could not extract cleanup() from $WRAPPER"
   exit 1
@@ -138,7 +139,16 @@ run_cleanup() {
       echo \"TERMINAL \$*\" >> \"\$GH_RECORD\"
       itp_transition_state \"\$1\" \"\$3\" \"\$4\"
     }
+    TURN_DEV_ACCOUNTING_FAILED=false
+    TURN_DEV_ROUTE_FAILED=false
+    TURN_DEV_WINNER=\"\"
+    TURN_DEV_RECOVERY_STAGED=false
+    TURN_DEV_LAUNCH_REFUSED=false
     _token_dev_evaluate_cleanup() { return \"\$TOKEN_EVALUATE_RC\"; }
+    _resource_dev_evaluate_budget_if_applicable() {
+      _token_dev_evaluate_cleanup
+    }
+    $TURN_CLEANUP_FN
     $CLEANUP_FN
     (exit $want_exit); cleanup
   " 2>"$stderr_log"

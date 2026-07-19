@@ -699,6 +699,32 @@
       "note": "INV-141 writes an invocation-id or digest-derived issue intent after verdict publication and explicitly invokes terminal_intent_cleanup_transition on the normal path. Invocation writes stage an accounting-backed recovery pointer and an exact whole-body trusted pending marker first; if provider writes fail, dispatcher Step 5 retries only that pinned hard decision and confirms its generation is live before terminal routing. The helper transitions first and consumes second, so a crash between them replays without resurrecting pending."
     },
     {
+      "id": "dev-turn-cap-stall",
+      "from": "in_progress",
+      "to": "stalled",
+      "event": "turn-cap",
+      "actor": "dev-wrapper-trap",
+      "guards": ["turn-cap-stop-winner", "resource-terminal-intent-live", "expected-owner-state-present", "terminal-control-not-already-stalled"],
+      "actions": ["remove-label:in-progress", "add-label:stalled", "comment:resource-terminal-intent-consume"],
+      "code_site": "lib-terminal-control.sh _terminal_control_transition_in_progress(): turn-cap intent reuses itp_transition_state in-progress stalled",
+      "mermaid": "in_progress --> stalled: turn-cap winner routes through durable terminal intent [INV-142/140]",
+      "inv_refs": ["INV-142", "INV-140"],
+      "note": "Only the durable turn-cap controller winner maps into INV-140. The triggering invocation id is both intent and invocation identity; cleanup transitions once and consumes second. Timeout and fanout-cancel winners do not take this edge."
+    },
+    {
+      "id": "review-turn-cap-stall",
+      "from": "reviewing",
+      "to": "stalled",
+      "event": "turn-cap",
+      "actor": "review-wrapper",
+      "guards": ["turn-cap-stop-winner", "resource-terminal-intent-live", "expected-owner-state-present", "terminal-control-not-already-stalled"],
+      "actions": ["remove-label:reviewing", "add-label:stalled", "comment:resource-terminal-intent-consume"],
+      "code_site": "lib-terminal-control.sh _terminal_control_transition_reviewing(): fan-out turn-cap intent reuses itp_transition_state reviewing stalled",
+      "mermaid": "reviewing --> stalled: review-member turn-cap cancels fan-out and routes the triggering intent [INV-142/140]",
+      "inv_refs": ["INV-142", "INV-140"],
+      "note": "The parent waits for member-owned watchdog cancellation and the existing residual reap path, skips aggregation/approval/merge, then routes exactly one intent keyed by the triggering member invocation and performs one stalled transition."
+    },
+    {
       "id": "hygiene-strip-residue-approved",
       "from": "approved",
       "to": "approved",

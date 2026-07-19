@@ -703,6 +703,10 @@ assert_eq "TC-TERMCTRL-054 clear race converges to autonomous stalled" \
 echo ""
 echo "== TC-TERMCTRL-070..073: source and coverage pins =="
 dev_cleanup="$(awk '/^cleanup\(\)/,/^trap cleanup EXIT/' "$DEV_WRAPPER")"
+dev_turn_cleanup="$(
+  awk '/^_resource_dev_handle_turn_cleanup\(\)/,/^}/' "$DEV_WRAPPER"
+)"
+dev_cleanup_routes="${dev_turn_cleanup}"$'\n'"${dev_cleanup}"
 review_cleanup="$(awk '/^cleanup\(\)/,/^trap cleanup EXIT/' "$REVIEW_WRAPPER")"
 # shellcheck disable=SC2016  # Source pins intentionally contain literal shell variables.
 dev_pr_guard='terminal_intent_cleanup_transition "$ISSUE_NUMBER" "in-progress" "in-progress,pending-dev" "pending-review"'
@@ -714,8 +718,8 @@ assert_eq "TC-TERMCTRL-070 dev cleanup has no unguarded pending transition" 0 \
   "$(grep -Ec 'itp_transition_state .*pending-(dev|review)' <<<"$dev_cleanup" || true)"
 assert_eq "TC-TERMCTRL-070 review cleanup has no unguarded pending transition" 0 \
   "$(grep -Ec 'itp_transition_state .*pending-(dev|review)' <<<"$review_cleanup" || true)"
-assert_eq "TC-TERMCTRL-070 dev cleanup has five guarded routes" 5 \
-  "$(grep -c 'terminal_intent_cleanup_transition' <<<"$dev_cleanup" || true)"
+assert_eq "TC-TERMCTRL-070 dev cleanup has six guarded routes" 6 \
+  "$(grep -c 'terminal_intent_cleanup_transition' <<<"$dev_cleanup_routes" || true)"
 assert_eq "TC-TERMCTRL-070 review cleanup has one guarded route" 1 \
   "$(grep -c 'terminal_intent_cleanup_transition' <<<"$review_cleanup" || true)"
 assert_eq "TC-TERMCTRL-070 dev PR route keeps exact owner/remove/target argv" 1 \

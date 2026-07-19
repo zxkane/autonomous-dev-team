@@ -413,8 +413,8 @@ assert_grep "TC-VERDICT-ARTIFACT-W24d the timeout-veto finding is a SINGLE share
 # INV-84 (#271): the observe loop's early-exit uses the mixed-panel-aware
 # _all_first_verdicts_resolved gate, names the completion signal, and a lingering
 # PID is reaped after resolution.
-assert_grep "TC-VERDICT-ARTIFACT-W25 observe loop early-exits on the mixed-panel _all_first_verdicts_resolved gate" \
-  'if _all_first_verdicts_resolved; then' "$WRAPPER"
+assert_grep "TC-VERDICT-ARTIFACT-W25 observe loop early-exits on the mixed-panel gate only outside hard turn control" \
+  '\[\[ "\$TURN_REVIEW_MODE" != "hard" \]\] && _all_first_verdicts_resolved; then' "$WRAPPER"
 assert_grep "TC-VERDICT-ARTIFACT-W26 the early-exit log names the first-verdict-resolved (mixed-panel) completion signal" \
   'INV-84:.*resolved first verdict.*artifact landed or comment observed' "$WRAPPER"
 assert_grep "TC-VERDICT-ARTIFACT-W27 a lingering PID early-exited past is reaped after resolution (_reap_fanout_processes)" \
@@ -909,7 +909,7 @@ assert_eq "TC-OBS-271-12b the REAL selector returns the matching verdict BODY (n
 # early-exit gate in the wrapper, else the comment branch silently no-ops under
 # `set -u`. Pin the source-order so a future refactor can't move it back.
 W29_def_line=$(grep -n '^_VERDICT_RE=' "$WRAPPER" | head -n1 | cut -d: -f1)
-W29_gate_line=$(grep -n 'if _all_first_verdicts_resolved; then' "$WRAPPER" | head -n1 | cut -d: -f1)
+W29_gate_line=$(grep -n '\[\[ "$TURN_REVIEW_MODE" != "hard" \]\] && _all_first_verdicts_resolved; then' "$WRAPPER" | head -n1 | cut -d: -f1)
 if [[ -n "$W29_def_line" && -n "$W29_gate_line" && "$W29_def_line" -lt "$W29_gate_line" ]]; then
   echo -e "  ${GREEN}PASS${NC}: TC-VERDICT-ARTIFACT-W29 _VERDICT_RE defined (line $W29_def_line) before the observe-loop early-exit (line $W29_gate_line)"
   PASS=$((PASS + 1))

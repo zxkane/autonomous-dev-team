@@ -290,6 +290,35 @@ One backgrounded subshell per agent. Each subshell:
 
 The fan-out loop appends each subshell's PID (`$!`) to a `_fanout_pids` array and the wrapper joins with `wait "${_fanout_pids[@]}"` — the **collected PIDs only**. A bare `wait` is forbidden here: it would also block on the long-lived `gh-token-refresh-daemon` and the heartbeat `sleep` loop (neither exits), hanging the wrapper forever after the agents finish and stranding the issue in `reviewing`. See [INV-40](invariants.md#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback) sub-rule 1.
 
+### Turn-limit fan-out cancellation ([INV-142])
+
+Review turn-limit syntax and every configured `review-member` capability are
+validated before browser E2E, smoke, or fan-out starts. Those two preliminary
+lanes remain excluded. No production adapter supports hard mode; the sequence
+below is exercised by the hermetic synthetic adapter.
+
+Each member owns an invocation record keyed by its INV-141 accounting id. When
+the triggering member denies request N+1, it atomically writes
+`${RUN_DIR}/turn-control/fanout-trip.json` and requests `turn-cap` on its own
+record. The parent checks that trip before every member launch, while the codex
+controller checks it before every internal rerun. The parent rechecks
+immediately before creating each member controller, and `_run_with_timeout`
+takes the trip record's flock around final adapter process creation. This
+serializes spawn against trip publication: an already-active trip persists
+local sibling cancellation and starts no adapter process. Active siblings
+consume the trip in their own watchdog, request `fanout-cancel`, and terminate
+their own PGID. The parent never signals a sibling PGID.
+
+Hard-controlled panels do not take INV-84's early-verdict exit: member
+controllers first converge through their own bounded watchdogs. After joins,
+the existing INV-43 reapers run only as residual cleanup. A live trip then
+short-circuits verdict aggregation, approval, and merge. The parent preserves
+parseable usage; otherwise it commits `turn-cap` for the trigger and
+`fanout-cancelled` for collateral siblings. It writes one INV-140 `turn-cap`
+intent whose intent and invocation ids are the triggering member's accounting
+id, then calls `terminal_intent_cleanup_transition` once for `reviewing ->
+stalled`. Timeout and fanout-cancel winners never write terminal intents.
+
 ### codex review subcommand (INV-62)
 
 > **Location ([INV-75](invariants.md#inv-75-all-per-cli-behavior-lives-in-that-clis-adapter--inline-cli-conditionals-in-orchestration-code-are-a-defect), #232).** The entire codex review lane (`_run_codex_review`, `_codex_review_prepare_worktree` / `_cleanup_worktree`, `_codex_review_argv`, `_codex_review_classify_stdout` / `_compose_body`, the prompt-echo malformed guard, and the `_classify_codex_drop_reason` / `_codex_drop_reason_phrase` scrapers) now lives in **`adapters/codex.sh`**. `lib-review-codex.sh` is a thin compat shim that `source`s the adapter — every `lib-review-codex.sh::<fn>` reference below resolves through it unchanged, so the function names + contracts are byte-for-byte identical to pre-#232.
@@ -563,15 +592,19 @@ its normal review-crash route, confirms that exact generation is live, then
 explicitly resolves terminal cleanup. Exact whole-body self-authored markers
 are required; a read/write failure leaves `reviewing` intact for the next tick,
 while a generation already consumed by an earlier stall is resolved without a
-second terminal route. Before provider writes, the helper stages an
-invocation-keyed recovery pointer beside the strict record. If both provider
-writes fail, Step 5 validates that pointer against the immutable review record
-and retries only that actual hard decision before ordinary crash routing;
-unrelated historical records are inert.
+second terminal route. Before provider writes, the helper stages a recovery
+pointer containing the trigger plus every launched member's canonical
+accounting id, fallback reason, and immutable turn-record path. If accounting
+or provider writes fail, Step 5 validates that set, closes every still-started
+member record, terminalizes referenced cap/cancellation lifecycles, and retries
+only the actual hard decision before ordinary crash routing; unrelated
+historical records are inert.
 
-Warn mode posts a parsed-key breadcrumb and preserves routing. Completed
-invocation checks use strict `>` semantics, so equality remains within budget.
-With both budgets unset the accounting loops return before store I/O.
+Warn mode posts a parsed-key breadcrumb and preserves routing; turn-record
+completion failures remain diagnostic and cannot suppress aggregation.
+Completed invocation checks use strict `>` semantics, so equality remains
+within budget. With both budgets unset the accounting loops return before
+store I/O.
 
 ## Prompt construction
 

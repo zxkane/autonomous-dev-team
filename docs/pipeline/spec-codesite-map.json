@@ -54,7 +54,9 @@
     "resource-terminal-intent-stall-pending-dev": {"file": "lib-terminal-control.sh", "anchor": "_terminal_control_transition_pending_dev()"},
     "resource-terminal-intent-stall-pending-review": {"file": "lib-terminal-control.sh", "anchor": "_terminal_control_transition_pending_review()"},
     "resource-terminal-intent-stall-in-progress": {"file": "lib-terminal-control.sh", "anchor": "_terminal_control_transition_in_progress()"},
-    "resource-terminal-intent-stall-reviewing": {"file": "lib-terminal-control.sh", "anchor": "_terminal_control_transition_reviewing()"}
+    "resource-terminal-intent-stall-reviewing": {"file": "lib-terminal-control.sh", "anchor": "_terminal_control_transition_reviewing()"},
+    "dev-turn-cap-stall":                   {"file": "lib-terminal-control.sh", "anchor": "_terminal_control_transition_in_progress()"},
+    "review-turn-cap-stall":                {"file": "lib-terminal-control.sh", "anchor": "_terminal_control_transition_reviewing()"}
   },
   "sites": [
     {"file": "lib-dispatch.sh",     "movement": "pending-dev|stalled",                                    "anchor": "Issue has exceeded the maximum retry limit"},

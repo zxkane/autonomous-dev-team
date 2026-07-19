@@ -17,9 +17,11 @@
 # adapter_invoke_opencode <mode> <session_id> <prompt> <model> <session_name>
 #   mode ∈ { dev-new, dev-resume }
 #
-# Returns PIPESTATUS[1] — opencode's rc (printf [0] is always 0; capture awk [2]
-# is well-behaved). Stdin marker: `opencode run` reads the prompt from stdin when
-# no positional message is given (INV-34).
+# Returns opencode's PIPESTATUS[1] rc unless the final progress recorder reports
+# a hard turn-control persistence failure, which maps to the dedicated
+# control-plane rc. Capture awk [2] remains a pass-through stage. Stdin marker:
+# `opencode run` reads the prompt from stdin when no positional message is given
+# (INV-34).
 adapter_invoke_opencode() {
   local mode="$1" session_id="$2" prompt="$3" model="${4:-}" session_name="${5:-}"
   local extra_args=()
@@ -40,7 +42,9 @@ adapter_invoke_opencode() {
           "${extra_args[@]}" \
         | _opencode_capture_session "$session_id" \
         | _agent_progress_recorder json
-      return "${PIPESTATUS[1]}"
+      local -a pipeline_statuses=("${PIPESTATUS[@]}")
+      _agent_pipeline_result pipeline_statuses 1
+      return $?
     else
       echo "[lib-agent] no captured opencode sessionID for session $session_id; starting a new opencode session" >&2
       run_agent "$session_id" "$prompt" "$model" "$session_name"
@@ -56,7 +60,9 @@ adapter_invoke_opencode() {
       "${extra_args[@]}" \
     | _opencode_capture_session "$session_id" \
     | _agent_progress_recorder json
-  return "${PIPESTATUS[1]}"
+  local -a pipeline_statuses=("${PIPESTATUS[@]}")
+  _agent_pipeline_result pipeline_statuses 1
+  return $?
 }
 
 # ---------------------------------------------------------------------------

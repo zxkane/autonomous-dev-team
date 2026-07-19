@@ -296,6 +296,32 @@ Every adapter's pipeline additionally ends in `| _agent_progress_recorder <json|
 The claude adapter's dev-new AND dev-resume argv changed from `--output-format json` (one JSON object emitted at the very end) to `--output-format stream-json --verbose` (one complete JSON record per line, streamed as the turn progresses — `--verbose` is required alongside `stream-json` or the CLI rejects the flag). This is what makes the progress recorder's json framing meaningful for Claude: under the old single-shot format, `run.log` mtime (and, before #493, the only observable signal) stayed frozen for the ENTIRE session — a session doing local test/build work for 10+ minutes between pushes looked byte-for-byte identical, at the log level, to a hung one.
 
 The final record of a stream-json run is still `{"type":"result","stop_reason":...,"terminal_reason":...,"usage":{...}}` — the SAME shape stream-json's single-shot predecessor emitted as its sole output — so the three existing consumers of "the last `{"type":"result"...}` line in the captured log" are unaffected: `is_session_completed` (`lib-dispatch.sh`), the remote probe (`session-log-probe-remote-aws-ssm.sh`), and `metrics_parse_tokens` (`lib-metrics.sh`). All three are regression-pinned in `tests/unit/test-agent-progress-lease.sh` against a realistic multi-record stream-json fixture, including a negative pin proving a reframed/indented/prefixed final line breaks the parse (i.e. the pin is load-bearing, not decorative).
+
+### Turn-limit control ([INV-142])
+
+Turn-limit syntax is validated before cleanup ownership. An effective dev
+limit is then capability-validated on the execution host before launch:
+`dev-new` for a new session, and both `dev-resume` plus `dev-new` for resume
+mode because resume can fall back to a fresh session. Production hard mode is
+always refused. Claude warn mode is accepted only after the pinned version
+probe.
+
+Each controlled attempt uses its INV-141 accounting invocation id for
+`${RUN_DIR}/turn-control/<invocation-id>.json`. The progress recorder passes
+each complete JSON record to `observe_completed_turn`; only a top-level Claude
+`assistant` record increments the count. Warn mode records one durable
+`warned` action at the threshold and continues without requesting a stop.
+Result `num_turns` is never a threshold input.
+
+The hermetic hard path routes a `turn-cap` winner through INV-140 with the same
+invocation id as both intent and invocation identity. Parseable usage commits
+normally; otherwise the accounting fallback reason is `turn-cap`. Cleanup's
+existing terminal-intent guard performs `in-progress -> stalled` and consumes
+the intent. The observer never signals and `mark_stalled` is not used.
+
+With no effective dev limit, no probe or turn-control I/O occurs and the
+existing GNU-timeout argv is unchanged.
+
 4. Agent runs (potentially for hours). The wrapper blocks on `wait`. No wall-clock timeout currently; this is [INV-13](invariants.md#inv-13-wall-clock-cap-on-agent-invocations) and is tracked in [#60](https://github.com/zxkane/autonomous-dev-team/issues/60).
 
 Within that agent-side wall clock, `autonomous-dev/SKILL.md` Step 5 (Local Verification) governs how the agent invokes its own build/test suite: one synchronous call with a generous `timeout`, never backgrounded-and-polled ([INV-107](invariants.md#inv-107-dev-agent-step-5-verification-runs-as-one-synchronous-command-with-a-generous-timeout--never-backgrounded-and-polled-across-turns), #374) — a background+poll suite run burns LLM turns without advancing the wrapper's own `wait`.
@@ -363,11 +389,11 @@ Two layers:
 ## Token accounting and post-run gates ([INV-141])
 
 When either token budget is configured, every agent launch in this wrapper run
-is a separate strict accounting invocation. `_token_dev_launch_begin` increments
+is a separate strict accounting invocation. `_resource_dev_launch_begin` increments
 a wrapper-local ordinal, derives
 `accounting_invocation_id(RUN_ID,dev,dev,attempt)`, persists
 `accounting_start`, then captures a fresh byte offset of the shared `LOG_FILE`
-immediately before the launch. `_token_dev_launch_finish` runs immediately after
+immediately before the launch. `_resource_dev_launch_finish` runs immediately after
 that one `run_agent`/`resume_agent` exits, parses only the bytes appended since
 its own offset through the unchanged `metrics_parse_tokens`, and commits usage
 or `no-usage-in-log`. Thus the initial/resume launch is attempt 1 and the
@@ -409,7 +435,10 @@ label mutation; the startup-failure report/transition is also bypassed for that
 refusal. If an earlier attempt in the same wrapper run already committed a hard
 violation, its terminal evaluation takes precedence over a later retry's
 `accounting_start` refusal: cleanup still consumes the durable violation intent
-and transitions to `stalled`. Warn mode logs the degradation and proceeds.
+and transitions to `stalled`. The wrapper retains the canonical invocation id
+across a failed turn-accounting start so any visible strict record can be
+closed. Warn mode logs observation/final-state persistence degradation and
+proceeds through normal cleanup.
 
 ## Exit trap (`cleanup`)
 

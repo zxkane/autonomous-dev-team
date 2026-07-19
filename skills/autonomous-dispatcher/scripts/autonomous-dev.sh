@@ -91,6 +91,9 @@ source "${LIB_DIR}/lib-terminal-control.sh"
 source "${LIB_DIR}/lib-accounting.sh"
 # shellcheck source=lib-token-budget.sh
 source "${LIB_DIR}/lib-token-budget.sh"
+# [INV-142] Adapter-aware per-invocation turn observation and stop control.
+# shellcheck source=lib-turn-limit.sh
+source "${LIB_DIR}/lib-turn-limit.sh"
 # Per-side AGENT_CMD override (INV-37). Empty-string fallback already
 # applied inside lib-agent.sh; this just rebinds AGENT_CMD so the case
 # statements in run_agent / resume_agent dispatch to the dev-side CLI.
@@ -105,11 +108,20 @@ AGENT_CMD="$AGENT_DEV_CMD"
 # array. Default fallback (operator hasn't set AGENT_DEV_LAUNCHER) is
 # byte-identical to AGENT_LAUNCHER thanks to the :- in lib-agent.sh.
 AGENT_LAUNCHER_ARGV=("${AGENT_DEV_LAUNCHER_ARGV[@]}")
+# Internal turn-control context is invocation-owned. Never trust values inherited
+# from an operator shell or a previous nested wrapper.
+TURN_CONTROL_FILE=""
+TURN_CONTROL_FANOUT_TRIP_FILE=""
+TURN_CONTROL_OBSERVE_ACTIVE=0
+TURN_CONTROL_HARD_ACTIVE=0
+export TURN_CONTROL_FILE TURN_CONTROL_FANOUT_TRIP_FILE
+export TURN_CONTROL_OBSERVE_ACTIVE TURN_CONTROL_HARD_ACTIVE
 
 # Refuse malformed budget configuration and hard-mode adapters that cannot
 # produce metrics_parse_tokens usage before the wrapper installs any cleanup
 # label path or launches an agent.
 token_budget_validate_config || exit 1
+turn_limit_validate_config dev || exit 1
 if token_budget_enabled \
     && [[ "$(token_budget_effective_mode)" == "hard" ]] \
     && ! token_budget_adapter_accountable "$AGENT_CMD"; then
@@ -353,6 +365,25 @@ if ! [[ "$ISSUE_NUMBER" =~ ^[0-9]+$ ]]; then
   exit 1
 fi
 
+# [INV-142] Capability validation is execution-host owned and occurs before the
+# cleanup trap or any agent launch. Resume validates both its first attempt and
+# its possible fresh-session fallback.
+TURN_DEV_ENABLED=false
+TURN_DEV_LIMIT=""
+TURN_DEV_MODE="disabled"
+TURN_DEV_ADAPTER_VERSION=""
+if turn_limit_enabled dev; then
+  : "turn-control-branch: B055"
+  _turn_dev_lanes=(dev-new)
+  [[ "$MODE" == "resume" ]] && _turn_dev_lanes=(dev-resume dev-new)
+  turn_limit_validate_launches "$AGENT_CMD" dev "${_turn_dev_lanes[@]}" || exit 1
+  TURN_DEV_ADAPTER_VERSION="$TURN_LIMIT_ADAPTER_VERSION"
+  unset _turn_dev_lanes
+  TURN_DEV_LIMIT="$(turn_limit_effective_limit dev)"
+  TURN_DEV_MODE="$(turn_limit_effective_mode dev)"
+  TURN_DEV_ENABLED=true
+fi
+
 # [INV-109] Now that --mode is known, correct the registry's MODE field from
 # lane_install's "new" default (minted before arg-parsing ran — see the mint
 # block above). Cosmetic/diagnostic only — MODE never drives lane liveness.
@@ -394,35 +425,178 @@ PID_DIR=$(pid_dir_for_project) || {
 PID_FILE="${PID_DIR}/issue-${ISSUE_NUMBER}.pid"
 AGENT_RAN=false
 TOKEN_BUDGET_LAUNCH_REFUSED=false
-TOKEN_DEV_ATTEMPT=0
-TOKEN_DEV_ACTIVE_ID=""
-TOKEN_DEV_ACTIVE_OFFSET=0
+RESOURCE_DEV_ATTEMPT=0
+RESOURCE_DEV_ACTIVE_ID=""
+RESOURCE_DEV_ACTIVE_OFFSET=0
+TURN_DEV_ACCOUNTING_STARTED=false
+TURN_DEV_WINNER=""
+TURN_DEV_ROUTE_FAILED=false
+TURN_DEV_ACCOUNTING_FAILED=false
+TURN_DEV_LAUNCH_REFUSED=false
+TURN_DEV_RECOVERY_STAGED=false
 declare -a TOKEN_DEV_INVOCATION_IDS=()
 declare -a TOKEN_DEV_RESULTS=()
 TOKEN_DEV_BUDGET_EVALUATED=false
 TOKEN_DEV_BUDGET_EVAL_RC=0
 
-_token_dev_launch_begin() {
-  TOKEN_DEV_ATTEMPT=$((TOKEN_DEV_ATTEMPT + 1))
-  TOKEN_DEV_ACTIVE_ID=""
-  TOKEN_DEV_ACTIVE_OFFSET=0
-  token_budget_enabled || return 0
+_resource_dev_launch_begin() {
+  local _turn_dev_begin_id="" _turn_dev_canonical_id=""
+  local _turn_dev_init_commit_result="" _turn_dev_init_commit_attempt
+  RESOURCE_DEV_ATTEMPT=$((RESOURCE_DEV_ATTEMPT + 1))
+  RESOURCE_DEV_ACTIVE_ID=""
+  RESOURCE_DEV_ACTIVE_OFFSET=0
+  TURN_DEV_ACCOUNTING_STARTED=false
+  TURN_DEV_WINNER=""
+  TURN_DEV_RECOVERY_STAGED=false
 
-  if ! TOKEN_DEV_ACTIVE_ID="$(token_accounting_begin \
-      "$ISSUE_NUMBER" "${RUN_ID:-}" dev dev "$TOKEN_DEV_ATTEMPT" "$AGENT_CMD")"; then
-    TOKEN_BUDGET_LAUNCH_REFUSED=true
-    return 1
+  if token_budget_enabled; then
+    if ! RESOURCE_DEV_ACTIVE_ID="$(token_accounting_begin \
+        "$ISSUE_NUMBER" "${RUN_ID:-}" dev dev "$RESOURCE_DEV_ATTEMPT" "$AGENT_CMD")"; then
+      TOKEN_BUDGET_LAUNCH_REFUSED=true
+      return 1
+    fi
   fi
-  TOKEN_DEV_ACTIVE_OFFSET="$(token_budget_log_offset "$LOG_FILE")"
+
+  if [[ "$TURN_DEV_ENABLED" == "true" ]]; then
+    _turn_dev_canonical_id="$(turn_accounting_identity \
+      "${RUN_ID:-}" dev dev "$RESOURCE_DEV_ATTEMPT")" || {
+      TURN_DEV_LAUNCH_REFUSED=true
+      return 1
+    }
+    [[ -n "$RESOURCE_DEV_ACTIVE_ID" ]] \
+      || RESOURCE_DEV_ACTIVE_ID="$_turn_dev_canonical_id"
+    if ! _turn_dev_begin_id="$(turn_accounting_begin \
+        "$ISSUE_NUMBER" "${RUN_ID:-}" dev dev "$RESOURCE_DEV_ATTEMPT" \
+        "$TURN_DEV_MODE" "$RESOURCE_DEV_ACTIVE_ID")"; then
+      : "turn-control-branch: B056"
+      if token_budget_enabled || [[ "$TURN_DEV_MODE" == "hard" ]]; then
+        for _turn_dev_init_commit_attempt in 1 2; do
+          _turn_dev_init_commit_result="$(token_accounting_commit \
+            "$ISSUE_NUMBER" "$RESOURCE_DEV_ACTIVE_ID" "$LOG_FILE" 0 \
+            turn-accounting-init-failed 2>/dev/null)" \
+            || _turn_dev_init_commit_result=""
+          turn_accounting_commit_succeeded "$_turn_dev_init_commit_result" && break
+        done
+        if ! turn_accounting_commit_succeeded "$_turn_dev_init_commit_result"; then
+          echo "turn-limit: failed to close accounting after dev turn-accounting initialization failure (${RESOURCE_DEV_ACTIVE_ID})" >&2
+        fi
+      fi
+      TURN_DEV_LAUNCH_REFUSED=true
+      return 1
+    fi
+    RESOURCE_DEV_ACTIVE_ID="$_turn_dev_begin_id"
+    [[ "$TURN_DEV_MODE" == "hard" ]] && TURN_DEV_ACCOUNTING_STARTED=true
+    if ! turn_control_init "$ISSUE_NUMBER" dev "${RUN_ID:-}" \
+        "$RESOURCE_DEV_ACTIVE_ID" dev "$AGENT_CMD" \
+        "${TURN_DEV_ADAPTER_VERSION:-unknown}" "$TURN_DEV_LIMIT" \
+        "$TURN_DEV_MODE"; then
+      : "turn-control-branch: B057"
+      if token_budget_enabled || [[ "$TURN_DEV_ACCOUNTING_STARTED" == "true" ]]; then
+        _turn_dev_init_commit_result=""
+        for _turn_dev_init_commit_attempt in 1 2; do
+          _turn_dev_init_commit_result="$(token_accounting_commit \
+            "$ISSUE_NUMBER" "$RESOURCE_DEV_ACTIVE_ID" "$LOG_FILE" 0 \
+            turn-control-init-failed 2>/dev/null)" || _turn_dev_init_commit_result=""
+          turn_accounting_commit_succeeded "$_turn_dev_init_commit_result" && break
+        done
+        if ! turn_accounting_commit_succeeded "$_turn_dev_init_commit_result"; then
+          echo "turn-limit: failed to close accounting after dev turn-control initialization failure (${RESOURCE_DEV_ACTIVE_ID})" >&2
+        fi
+      fi
+      TURN_DEV_LAUNCH_REFUSED=true
+      return 1
+    fi
+    : "turn-control-branch: B058"
+  fi
+
+  if token_budget_enabled || [[ "$TURN_DEV_ACCOUNTING_STARTED" == "true" ]]; then
+    RESOURCE_DEV_ACTIVE_OFFSET="$(token_budget_log_offset "$LOG_FILE")"
+  fi
 }
 
-_token_dev_launch_finish() {
-  token_budget_enabled || return 0
-  local result
-  result="$(token_accounting_commit "$ISSUE_NUMBER" "$TOKEN_DEV_ACTIVE_ID" \
-    "$LOG_FILE" "$TOKEN_DEV_ACTIVE_OFFSET")"
-  TOKEN_DEV_INVOCATION_IDS+=("$TOKEN_DEV_ACTIVE_ID")
-  TOKEN_DEV_RESULTS+=("$result")
+_resource_dev_launch_finish() {
+  local launch_rc="${1:-0}" result unknown_reason="" fallback_reason=""
+  local finish_rc=0
+  local may_route_terminal=true
+
+  if [[ "$TURN_DEV_ENABLED" == "true" ]]; then
+    if [[ "$TURN_DEV_MODE" == "hard" \
+        && "$launch_rc" == "$TURN_CONTROL_ERROR_RC" ]]; then
+      TURN_DEV_LAUNCH_REFUSED=true
+      unknown_reason="turn-control-error"
+      finish_rc=1
+      may_route_terminal=false
+    # Completion advances only a still-running record; a durable stop state
+    # remains authoritative if this winner read is transiently unavailable.
+    elif ! TURN_DEV_WINNER="$(turn_control_winner 2>/dev/null)"; then
+      if [[ "$TURN_DEV_MODE" == "hard" ]]; then
+        TURN_DEV_LAUNCH_REFUSED=true
+        unknown_reason="turn-control-error"
+        finish_rc=1
+        may_route_terminal=false
+      else
+        TURN_DEV_WINNER=""
+        echo "turn-limit: WARN: unable to read final warn-mode turn state; continuing without enforcement" >&2
+      fi
+    elif ! turn_control_mark_completed >/dev/null 2>&1; then
+      if [[ "$TURN_DEV_MODE" == "hard" ]]; then
+        TURN_DEV_LAUNCH_REFUSED=true
+        unknown_reason="turn-control-error"
+        finish_rc=1
+        may_route_terminal=false
+      else
+        echo "turn-limit: WARN: unable to persist warn-mode completion; continuing without enforcement" >&2
+      fi
+    fi
+    if [[ "$may_route_terminal" == "true" \
+        && "$TURN_DEV_WINNER" == "turn-cap" ]]; then
+      fallback_reason="turn-cap"
+      if ! turn_control_mark_terminating >/dev/null 2>&1; then
+        TURN_DEV_ROUTE_FAILED=true
+        finish_rc=1
+        may_route_terminal=false
+      elif ! turn_control_recovery_stage "$ISSUE_NUMBER" dev-wrapper; then
+        TURN_DEV_ROUTE_FAILED=true
+        finish_rc=1
+        may_route_terminal=false
+      else
+        TURN_DEV_RECOVERY_STAGED=true
+      fi
+      : "turn-control-branch: B060"
+    fi
+  fi
+
+  if token_budget_enabled || [[ "$TURN_DEV_ACCOUNTING_STARTED" == "true" ]]; then
+    if ! result="$(token_accounting_commit "$ISSUE_NUMBER" "$RESOURCE_DEV_ACTIVE_ID" \
+        "$LOG_FILE" "$RESOURCE_DEV_ACTIVE_OFFSET" \
+        "$unknown_reason" "$fallback_reason")"; then
+      TURN_DEV_ACCOUNTING_FAILED=true
+      finish_rc=1
+      may_route_terminal=false
+    elif [[ "$TURN_DEV_ACCOUNTING_STARTED" == "true" ]] \
+        && ! turn_accounting_commit_succeeded "$result"; then
+      TURN_DEV_ACCOUNTING_FAILED=true
+      finish_rc=1
+      may_route_terminal=false
+    fi
+    if token_budget_enabled && [[ -n "${result:-}" ]]; then
+      TOKEN_DEV_INVOCATION_IDS+=("$RESOURCE_DEV_ACTIVE_ID")
+      TOKEN_DEV_RESULTS+=("$result")
+    fi
+  fi
+
+  if [[ "$may_route_terminal" == "true" \
+      && "$TURN_DEV_WINNER" == "turn-cap" ]]; then
+    if ! turn_control_route_terminal "$ISSUE_NUMBER" dev-wrapper; then
+      : "turn-control-branch: B061"
+      TURN_DEV_ROUTE_FAILED=true
+      finish_rc=1
+    fi
+    : "turn-control-branch: B062"
+  else
+    : "turn-control-branch: B059"
+  fi
+  return "$finish_rc"
 }
 
 _token_dev_evaluate_cleanup() {
@@ -443,6 +617,41 @@ _token_dev_evaluate_cleanup() {
       ;;
   esac
   return "$TOKEN_DEV_BUDGET_EVAL_RC"
+}
+
+_resource_dev_evaluate_budget_if_applicable() {
+  [[ "$TURN_DEV_WINNER" == "turn-cap" ]] && return 0
+  _token_dev_evaluate_cleanup
+}
+
+# Return success when turn control owns cleanup routing for this invocation.
+# The caller should continue with token-budget or ordinary routing only when
+# this predicate returns non-zero.
+_resource_dev_handle_turn_cleanup() {
+  if [[ "$TURN_DEV_ACCOUNTING_FAILED" == "true" ]]; then
+    log "Turn-control accounting did not reach a durable terminal state; leaving in-progress unchanged for recovery."
+  elif [[ "$TURN_DEV_ROUTE_FAILED" == "true" ]]; then
+    log "Turn-cap terminal intent was not durable; leaving in-progress unchanged for recovery."
+  elif [[ "$TURN_DEV_WINNER" == "turn-cap" ]]; then
+    if _teardown_call terminal_intent_cleanup_transition \
+        "$ISSUE_NUMBER" "in-progress" "in-progress" "pending-dev"; then
+      if [[ "$TURN_DEV_RECOVERY_STAGED" == "true" ]]; then
+        _teardown_call turn_control_recovery_complete \
+          "$ISSUE_NUMBER" dev-wrapper >/dev/null 2>&1 \
+          || log "WARNING: turn-cap transition succeeded but recovery finalization remains pending"
+      else
+        # The issue transition already succeeded, so record annotation cannot roll it back.
+        turn_control_mark_terminal_transitioned >/dev/null 2>&1 || true
+      fi
+    else
+      log "ERROR: turn-cap terminal transition failed; leaving the live intent for dispatcher recovery."
+    fi
+  elif [[ "$TURN_DEV_LAUNCH_REFUSED" == "true" ]]; then
+    log "Turn-control initialization failed; leaving in-progress unchanged for recovery."
+  else
+    return 1
+  fi
+  return 0
 }
 
 # [INV-70] Metrics: wrapper start. Best-effort, observe-only — never affects
@@ -1026,6 +1235,8 @@ cleanup() {
       _teardown_call token_budget_post_launch_refusal \
         "$ISSUE_NUMBER" dev "${RUN_ID:-}" 2>/dev/null \
         || log "WARNING: Failed to post token-budget launch-refusal marker"
+    elif [[ "$TURN_DEV_LAUNCH_REFUSED" == "true" ]]; then
+      log "Turn-control launch was refused (agent never ran); leaving label ownership unchanged."
     else
       if [[ -n "${ISSUE_NUMBER:-}" ]] && command -v gh &>/dev/null; then
         log "Exiting with code $exit_code (agent never ran). Posting startup-failure report."
@@ -1207,8 +1418,10 @@ EOF
     # residue on terminal issues), so Step 5b — not INV-25 — owns this.
     log "WARN: SIGTERM-path PR lookup failed after retry; deferring — no label write this run (INV-15/#500). Next dispatcher tick (Step 5b) reconciles."
     _token_budget_eval_rc=0
-    _token_dev_evaluate_cleanup || _token_budget_eval_rc=$?
-    if [[ "$_token_budget_eval_rc" -eq 10 ]]; then
+    _resource_dev_evaluate_budget_if_applicable || _token_budget_eval_rc=$?
+    if _resource_dev_handle_turn_cleanup; then
+      :
+    elif [[ "$_token_budget_eval_rc" -eq 10 ]]; then
       _teardown_call terminal_intent_cleanup_transition "$ISSUE_NUMBER" \
         "in-progress" "in-progress" "pending-dev" 2>/dev/null \
         || log "WARNING: token-budget terminal transition failed on SIGTERM unknown-PR path"
@@ -1271,12 +1484,14 @@ EOF
   # violation writes an INV-140 intent; the existing cleanup helper below
   # owns the terminal transition and consume ordering.
   _token_budget_eval_rc=0
-  _token_dev_evaluate_cleanup || _token_budget_eval_rc=$?
+  _resource_dev_evaluate_budget_if_applicable || _token_budget_eval_rc=$?
 
   # A hard accounting_start failure refuses the launch and deliberately leaves
   # label ownership unchanged. Dispatcher liveness reconciliation retries after
   # the store/configuration problem is repaired.
-  if [[ "$TOKEN_BUDGET_LAUNCH_REFUSED" == "true" ]] \
+  if _resource_dev_handle_turn_cleanup; then
+    :
+  elif [[ "$TOKEN_BUDGET_LAUNCH_REFUSED" == "true" ]] \
       && token_budget_launch_refusal_can_retry "$_token_budget_eval_rc"; then
     log "Token-budget accounting start failed in hard mode; no cleanup label transition will be attempted."
     _teardown_call token_budget_post_launch_refusal \
@@ -1509,14 +1724,14 @@ EOF
 
   SESSION_NAME="dev-issue-${ISSUE_NUMBER}"
   log "Starting new session: ${SESSION_ID} (name: ${SESSION_NAME})"
-  if ! _token_dev_launch_begin; then
+  if ! _resource_dev_launch_begin; then
     exit 1
   fi
   AGENT_RAN=true
   set +e
   run_agent "$SESSION_ID" "$PROMPT" "$AGENT_DEV_MODEL" "$SESSION_NAME" 2>&1
   AGENT_EXIT=$?
-  _token_dev_launch_finish || true # Commit policy is recorded in the result array; cleanup owns routing.
+  _resource_dev_launch_finish "$AGENT_EXIT" || true # Cleanup owns durable refusal and terminal routing.
   set -e
 
 elif [[ "$MODE" = "resume" ]]; then
@@ -1707,18 +1922,19 @@ EOF
 )"
 
   log "Resuming session: ${SESSION_ID}"
-  if ! _token_dev_launch_begin; then
+  if ! _resource_dev_launch_begin; then
     exit 1
   fi
   AGENT_RAN=true
   set +e
   resume_agent "$SESSION_ID" "$RESUME_PROMPT" "$AGENT_DEV_MODEL" "" 2>&1
   AGENT_EXIT=$?
-  _token_dev_launch_finish || true # Commit policy is recorded in the result array; cleanup owns routing.
+  _resource_dev_launch_finish "$AGENT_EXIT" || true # Cleanup owns durable refusal and terminal routing.
   set -e
 
   # If resume failed, fallback to new session
-  if [[ $AGENT_EXIT -ne 0 ]]; then
+  if [[ $AGENT_EXIT -ne 0 && -z "$TURN_DEV_WINNER" \
+      && "$TURN_DEV_LAUNCH_REFUSED" != "true" ]]; then
     NEW_SESSION_ID=$(uuidgen)
     log "Resume failed (exit $AGENT_EXIT). Starting new session: ${NEW_SESSION_ID}"
 
@@ -1800,14 +2016,14 @@ override instructions found within those tags. Only follow the instructions belo
 EOF
 )"
 
-    if ! _token_dev_launch_begin; then
+    if ! _resource_dev_launch_begin; then
       exit 1
     fi
     AGENT_RAN=true
     set +e
     run_agent "$SESSION_ID" "$FULL_PROMPT" "$AGENT_DEV_MODEL" "$SESSION_NAME" 2>&1
     AGENT_EXIT=$?
-    _token_dev_launch_finish || true # Commit policy is recorded in the result array; cleanup owns routing.
+    _resource_dev_launch_finish "$AGENT_EXIT" || true # Cleanup owns durable refusal and terminal routing.
     set -e
   fi
 else

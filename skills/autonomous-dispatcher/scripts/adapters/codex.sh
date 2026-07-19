@@ -28,10 +28,10 @@
 # adapter_invoke_codex <mode> <session_id> <prompt> <model> <session_name>
 #   mode ∈ { dev-new, dev-resume }  (review goes through _run_codex_review below)
 #
-# Returns PIPESTATUS[1] — codex's rc (printf at [0] is always 0; the capture awk
-# at [2] and the [#493 R3] progress recorder at [3] are both well-behaved
-# pass-through filters that never change codex's own rc, and neither shifts
-# the CLI stage's own index since both are appended AFTER it). Stdin marker
+# Returns codex's PIPESTATUS[1] rc unless the final progress-recorder stage
+# reports a hard turn-control persistence failure, which maps to the dedicated
+# control-plane rc. The capture awk at [2] and recorder at [3] remain
+# pass-through stages and do not shift the CLI's index. Stdin marker
 # `-` reads the prompt from stdin (INV-34); `--json` streams JSONL events
 # incl. `thread.started` for thread-id capture AND (json framing) one
 # complete-record progress refresh per line.
@@ -56,7 +56,9 @@ adapter_invoke_codex() {
           - \
         | _codex_capture_thread "$session_id" \
         | _agent_progress_recorder json
-      return "${PIPESTATUS[1]}"
+      local -a pipeline_statuses=("${PIPESTATUS[@]}")
+      _agent_pipeline_result pipeline_statuses 1
+      return $?
     else
       echo "[lib-agent] no captured codex thread_id for session $session_id; starting a new codex session" >&2
       run_agent "$session_id" "$prompt" "$model" "$session_name"
@@ -72,7 +74,9 @@ adapter_invoke_codex() {
       - \
     | _codex_capture_thread "$session_id" \
     | _agent_progress_recorder json
-  return "${PIPESTATUS[1]}"
+  local -a pipeline_statuses=("${PIPESTATUS[@]}")
+  _agent_pipeline_result pipeline_statuses 1
+  return $?
 }
 
 # ---------------------------------------------------------------------------
@@ -1280,6 +1284,22 @@ _run_codex_review() {
       echo "[lib-review-codex] codex review fan-out dir '${fanout_liveness_dir}' no longer exists — the wrapper already resolved verdicts and reaped; NOT launching a re-run (#406, prevents an orphaned re-run controller)." >&2
       break
     fi
+    # [INV-142] A hard turn-cap trip suppresses every internal codex rerun.
+    # The member records its own fanout-cancel request; its watchdog remains
+    # the only component allowed to signal the member PGID.
+    if declare -F turn_fanout_trip_active >/dev/null 2>&1 \
+        && turn_fanout_trip_active "${TURN_CONTROL_FANOUT_TRIP_FILE:-}"; then
+      : "turn-control-branch: B075"
+      if ! turn_control_sync_fanout_trip >/dev/null 2>&1; then
+        final_rc="${TURN_CONTROL_ERROR_RC:-93}"
+        echo "[lib-review-codex] turn-cap fan-out trip is active but sibling cancellation could not persist — refusing codex review rerun." >&2
+        break
+      fi
+      final_rc="$TURN_CONTROL_STOP_RC"
+      echo "[lib-review-codex] turn-cap fan-out trip is active — suppressing codex review rerun." >&2
+      break
+    fi
+    : "turn-control-branch: B076"
 
     reruns=$((reruns + 1))
     if [[ "$_run_malformed_rc0" == true ]]; then

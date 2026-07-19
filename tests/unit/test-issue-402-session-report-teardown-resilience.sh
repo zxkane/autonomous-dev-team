@@ -74,6 +74,7 @@ trap 'rm -rf "$TMPROOT"' EXIT
 echo "=== TC-STR-001: session-report post precedes drain_agent_pr_create / drain_agent_bot_triggers ==="
 
 CLEANUP_FN=$(awk '/^cleanup\(\) \{/,/^\}/' "$WRAPPER")
+TURN_CLEANUP_FN=$(awk '/^_resource_dev_handle_turn_cleanup\(\) \{/,/^\}/' "$WRAPPER")
 if [[ -z "$CLEANUP_FN" ]]; then
   echo -e "${RED}FAIL${NC}: could not extract cleanup() from $WRAPPER"
   exit 1
@@ -158,7 +159,15 @@ run_cleanup_with_vanished_shim() {
       gh issue edit \"\$1\" --repo \"\$REPO\" \"\${args[@]}\"
     }
     terminal_intent_cleanup_transition() { itp_transition_state \"\$1\" \"\$3\" \"\$4\"; }
+    TURN_DEV_ACCOUNTING_FAILED=false
+    TURN_DEV_ROUTE_FAILED=false
+    TURN_DEV_WINNER=\"\"
+    TURN_DEV_RECOVERY_STAGED=false
+    TURN_DEV_LAUNCH_REFUSED=false
     _token_dev_evaluate_cleanup() { return 0; }
+    _resource_dev_evaluate_budget_if_applicable() {
+      _token_dev_evaluate_cleanup
+    }
     chp_pr_list() { gh pr list \"\$@\"; printf %s '[{\"body\":\"Closes #402\"}]'; }
     drain_agent_pr_create() { gh drain-pr-create-probe; return 0; }
     drain_agent_bot_triggers() { gh drain-bot-triggers-probe; return 0; }
@@ -185,6 +194,7 @@ run_cleanup_with_vanished_shim() {
         export PATH
       fi
     }
+    $TURN_CLEANUP_FN
     $CLEANUP_FN
     # Prime bash's command hash for 'gh' by resolving it once BEFORE the
     # shim vanishes — mirrors production, where auth setup (setup_github_auth)
@@ -268,10 +278,19 @@ run_cleanup_intact_shim() {
       gh issue edit \"\$1\" --repo \"\$REPO\" \"\${args[@]}\"
     }
     terminal_intent_cleanup_transition() { itp_transition_state \"\$1\" \"\$3\" \"\$4\"; }
+    TURN_DEV_ACCOUNTING_FAILED=false
+    TURN_DEV_ROUTE_FAILED=false
+    TURN_DEV_WINNER=\"\"
+    TURN_DEV_RECOVERY_STAGED=false
+    TURN_DEV_LAUNCH_REFUSED=false
     _token_dev_evaluate_cleanup() { return 0; }
+    _resource_dev_evaluate_budget_if_applicable() {
+      _token_dev_evaluate_cleanup
+    }
     chp_pr_list() { gh pr list \"\$@\"; printf %s '[]'; }
     drain_agent_pr_create() { gh drain-pr-create-probe; return 0; }
     drain_agent_bot_triggers() { gh drain-bot-triggers-probe; return 0; }
+    $TURN_CLEANUP_FN
     $CLEANUP_FN
     (exit 0); cleanup
   " 2>"$stderr_log"
@@ -339,7 +358,15 @@ EOF
       gh issue edit \"\$1\" --repo \"\$REPO\" \"\${args[@]}\"
     }
     terminal_intent_cleanup_transition() { itp_transition_state \"\$1\" \"\$3\" \"\$4\"; }
+    TURN_DEV_ACCOUNTING_FAILED=false
+    TURN_DEV_ROUTE_FAILED=false
+    TURN_DEV_WINNER=\"\"
+    TURN_DEV_RECOVERY_STAGED=false
+    TURN_DEV_LAUNCH_REFUSED=false
     _token_dev_evaluate_cleanup() { return 0; }
+    _resource_dev_evaluate_budget_if_applicable() {
+      _token_dev_evaluate_cleanup
+    }
     chp_pr_list() { gh pr list \"\$@\"; printf %s '[]'; }   # empty array = the no-PR branch
     drain_agent_pr_create() { gh drain-pr-create-probe; return 0; }
     drain_agent_bot_triggers() { gh drain-bot-triggers-probe; return 0; }
@@ -364,6 +391,7 @@ EOF
         export PATH
       fi
     }
+    $TURN_CLEANUP_FN
     $CLEANUP_FN
     # Prime the hash on the SHIM path (mirrors production).
     gh --help >/dev/null 2>&1

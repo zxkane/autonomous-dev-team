@@ -115,6 +115,10 @@ run_member_route() {
       RESULT_PARSED=false
       log() { printf "log|%s\n" "$*" >> "$RECORD"; }
       token_budget_evaluate_review_members() { return "$EVALUATE_RC"; }
+      _token_review_evaluate_members_once() {
+        token_budget_evaluate_review_members \
+          "$ISSUE_NUMBER" AGENT_ACCOUNTING_IDS AGENT_ACCOUNTING_RESULTS
+      }
       terminal_intent_cleanup_transition() {
         printf "terminal|%s\n" "$*" >> "$RECORD"
         return "$TRANSITION_RC"

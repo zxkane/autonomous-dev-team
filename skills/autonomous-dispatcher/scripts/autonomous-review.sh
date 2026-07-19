@@ -259,6 +259,9 @@ source "${LIB_DIR}/lib-terminal-control.sh"
 source "${LIB_DIR}/lib-accounting.sh"
 # shellcheck source=lib-token-budget.sh
 source "${LIB_DIR}/lib-token-budget.sh"
+# [INV-142] Adapter-aware per-member turn observation and fan-out control.
+# shellcheck source=lib-turn-limit.sh
+source "${LIB_DIR}/lib-turn-limit.sh"
 # Per-side AGENT_CMD override (INV-37). See autonomous-dev.sh for the
 # matching dev-side override. Together they let one project run dev
 # and review on different agent CLIs (e.g. claude for dev, agy for
@@ -273,6 +276,14 @@ AGENT_CMD="$AGENT_REVIEW_CMD"
 # rebind in autonomous-dev.sh. Default (operator hasn't set
 # AGENT_REVIEW_LAUNCHER) is byte-identical to AGENT_LAUNCHER.
 AGENT_LAUNCHER_ARGV=("${AGENT_REVIEW_LAUNCHER_ARGV[@]}")
+# Internal turn-control context is invocation-owned. Never trust values inherited
+# from an operator shell or a previous nested wrapper.
+TURN_CONTROL_FILE=""
+TURN_CONTROL_FANOUT_TRIP_FILE=""
+TURN_CONTROL_OBSERVE_ACTIVE=0
+TURN_CONTROL_HARD_ACTIVE=0
+export TURN_CONTROL_FILE TURN_CONTROL_FANOUT_TRIP_FILE
+export TURN_CONTROL_OBSERVE_ACTIVE TURN_CONTROL_HARD_ACTIVE
 
 # Per-side review wall-clock timeout (INV-48, #185). AGENT_TIMEOUT (INV-13,
 # default 4h) is shared by dev and review; a silently-hung review CLI holds a
@@ -373,6 +384,7 @@ done
 # review fan-out can launch. This path performs no label mutation; a corrected
 # configuration is retried by the next dispatcher tick.
 token_budget_validate_config || exit 1
+turn_limit_validate_config review || exit 1
 if token_budget_enabled && [[ "$(token_budget_effective_mode)" == "hard" ]]; then
   for _budget_agent in "${REVIEW_AGENTS_LIST[@]}"; do
     if ! token_budget_adapter_accountable "$_budget_agent"; then
@@ -380,6 +392,35 @@ if token_budget_enabled && [[ "$(token_budget_effective_mode)" == "hard" ]]; the
       exit 1
     fi
   done
+fi
+
+# [INV-142] The execution host validates every configured verdict member before
+# E2E, smoke, or fan-out work. Browser-E2E and smoke remain outside turn control.
+TURN_REVIEW_ENABLED=false
+TURN_REVIEW_LIMIT=""
+TURN_REVIEW_MODE="disabled"
+declare -A TURN_REVIEW_ADAPTER_VERSIONS=()
+if turn_limit_enabled review; then
+  : "turn-control-branch: B063"
+  for _turn_review_agent in "${REVIEW_AGENTS_LIST[@]}"; do
+    if [[ -z "${TURN_REVIEW_ADAPTER_VERSIONS[$_turn_review_agent]+set}" ]]; then
+      _turn_probe_saved_launcher=("${AGENT_LAUNCHER_ARGV[@]}")
+      _bind_review_agent_launcher_argv "$_turn_review_agent" \
+        "turn-capability probe"
+      turn_limit_validate_launches \
+        "$_turn_review_agent" review review-member || {
+          AGENT_LAUNCHER_ARGV=("${_turn_probe_saved_launcher[@]}")
+          exit 1
+        }
+      TURN_REVIEW_ADAPTER_VERSIONS["$_turn_review_agent"]="$TURN_LIMIT_ADAPTER_VERSION"
+      AGENT_LAUNCHER_ARGV=("${_turn_probe_saved_launcher[@]}")
+    fi
+  done
+  unset _turn_review_agent
+  unset _turn_probe_saved_launcher
+  TURN_REVIEW_LIMIT="$(turn_limit_effective_limit review)"
+  TURN_REVIEW_MODE="$(turn_limit_effective_mode review)"
+  TURN_REVIEW_ENABLED=true
 fi
 
 # Resolve + export the effective base branch ONCE, right after conf is loaded
@@ -2118,17 +2159,7 @@ if [[ "${REVIEW_SMOKE_ENABLED:-false}" == "true" ]]; then
       # Scope ALL of this member's env to the subshell — never leaks to a sibling
       # smoke or to the fan-out below (mirrors the fan-out subshell).
       AGENT_CMD="$_smoke_agent"
-      _per_agent_launcher=$(_resolve_review_agent_launcher "$_smoke_agent")
-      if [[ -n "$_per_agent_launcher" ]]; then
-        if bash -n -c "AGENT_LAUNCHER_ARGV=($_per_agent_launcher)" 2>/dev/null; then
-          eval "AGENT_LAUNCHER_ARGV=($_per_agent_launcher)"
-        else
-          log "ERROR: INV-64 AGENT_REVIEW_LAUNCHER_<$_smoke_agent> failed to tokenize for the smoke; running naked. Value: $_per_agent_launcher"
-          AGENT_LAUNCHER_ARGV=()
-        fi
-      elif [[ "$_smoke_agent" != "claude" ]]; then
-        AGENT_LAUNCHER_ARGV=()
-      fi
+      _bind_review_agent_launcher_argv "$_smoke_agent" "INV-64 smoke"
       # INV-41 (#224 review): resolve THIS member's per-agent review EXTRA-ARGS and
       # apply them BEFORE the smoke, exactly as the fan-out subshell does below
       # (AGENT_REVIEW_EXTRA_ARGS_<AGENT> override → shared AGENT_REVIEW_EXTRA_ARGS).
@@ -2368,7 +2399,28 @@ declare -a AGENT_CONTROLLER_LOGS=()
 # reruns stay inside the member's single invocation.
 declare -a AGENT_ACCOUNTING_IDS=()
 declare -a AGENT_ACCOUNTING_RESULTS=()
+declare -a AGENT_TURN_RECORDS=()
+TOKEN_REVIEW_MEMBER_BUDGET_EVALUATED=false
+TOKEN_REVIEW_MEMBER_BUDGET_RC=0
+
+_token_review_evaluate_members_once() {
+  if [[ "$TOKEN_REVIEW_MEMBER_BUDGET_EVALUATED" == "true" ]]; then
+    return "$TOKEN_REVIEW_MEMBER_BUDGET_RC"
+  fi
+  TOKEN_REVIEW_MEMBER_BUDGET_EVALUATED=true
+  TOKEN_REVIEW_MEMBER_BUDGET_RC=0
+  token_budget_evaluate_review_members "$ISSUE_NUMBER" \
+    AGENT_ACCOUNTING_IDS AGENT_ACCOUNTING_RESULTS \
+    || TOKEN_REVIEW_MEMBER_BUDGET_RC=$?
+  return "$TOKEN_REVIEW_MEMBER_BUDGET_RC"
+}
+
 TOKEN_REVIEW_LAUNCH_REFUSED=false
+TURN_REVIEW_LAUNCH_REFUSED=false
+TURN_REVIEW_TRIP_FILE=""
+if [[ "$TURN_REVIEW_ENABLED" == "true" && -n "${RUN_DIR:-}" ]]; then
+  TURN_REVIEW_TRIP_FILE="${RUN_DIR}/turn-control/fanout-trip.json"
+fi
 # INV-78 (#233): the per-agent verdict-artifact FILE path, keyed by index. The
 # wrapper provisions it (_verdict_artifact_path under the per-run state dir),
 # exports it into the agent's subshell as VERDICT_ARTIFACT_PATH, and reads it back
@@ -2481,8 +2533,17 @@ fi
 # single-run E2E lane is the strong guarantee that supersedes it.
 
 for _agent in "${REVIEW_AGENTS_LIST[@]}"; do
+  if [[ "$TURN_REVIEW_ENABLED" == "true" ]] \
+      && turn_fanout_trip_active "$TURN_REVIEW_TRIP_FILE"; then
+    : "turn-control-branch: B064"
+    log "Turn-cap fan-out trip is active; suppressing remaining review-member launches."
+    break
+  fi
+
   _agent_session_id=$(uuidgen)
   _agent_accounting_id=""
+  _agent_turn_begin_id=""
+  _agent_turn_record=""
   if token_budget_enabled; then
     if ! _agent_accounting_id="$(token_accounting_begin "$ISSUE_NUMBER" "${RUN_ID:-}" review "$_agent_session_id" 1 "$_agent")"; then
       echo "token-budget: accounting_start failed for review member '${_agent}' (${_agent_session_id}); hard mode refuses this launch" >&2
@@ -2490,9 +2551,64 @@ for _agent in "${REVIEW_AGENTS_LIST[@]}"; do
       break
     fi
   fi
+  if [[ "$TURN_REVIEW_ENABLED" == "true" ]]; then
+    _agent_turn_canonical_id="$(turn_accounting_identity \
+      "${RUN_ID:-}" review "$_agent_session_id" 1)" || {
+      TURN_REVIEW_LAUNCH_REFUSED=true
+      break
+    }
+    [[ -n "$_agent_accounting_id" ]] \
+      || _agent_accounting_id="$_agent_turn_canonical_id"
+    if ! _agent_turn_begin_id="$(turn_accounting_begin \
+        "$ISSUE_NUMBER" "${RUN_ID:-}" review "$_agent_session_id" 1 \
+        "$TURN_REVIEW_MODE" "$_agent_accounting_id")"; then
+      : "turn-control-branch: B065"
+      if [[ -n "$_agent_accounting_id" ]]; then
+        _turn_review_init_commit_result=""
+        for _turn_review_init_commit_attempt in 1 2; do
+          _turn_review_init_commit_result="$(token_accounting_commit \
+            "$ISSUE_NUMBER" "$_agent_accounting_id" /dev/null 0 \
+            turn-accounting-init-failed 2>/dev/null)" \
+            || _turn_review_init_commit_result=""
+          turn_accounting_commit_succeeded "$_turn_review_init_commit_result" && break
+        done
+        AGENT_ACCOUNTING_IDS+=("$_agent_accounting_id")
+        AGENT_ACCOUNTING_RESULTS+=("$_turn_review_init_commit_result")
+      fi
+      TURN_REVIEW_LAUNCH_REFUSED=true
+      break
+    fi
+    _agent_accounting_id="$_agent_turn_begin_id"
+    TURN_CONTROL_FANOUT_TRIP_FILE="$TURN_REVIEW_TRIP_FILE"
+    if ! turn_control_init "$ISSUE_NUMBER" review "${RUN_ID:-}" \
+        "$_agent_accounting_id" "$_agent" "$_agent" \
+        "${TURN_REVIEW_ADAPTER_VERSIONS[$_agent]:-unknown}" \
+        "$TURN_REVIEW_LIMIT" "$TURN_REVIEW_MODE"; then
+      : "turn-control-branch: B066"
+      if token_budget_enabled || [[ "$TURN_REVIEW_MODE" == "hard" ]]; then
+        _turn_review_init_commit_result=""
+        for _turn_review_init_commit_attempt in 1 2; do
+          _turn_review_init_commit_result="$(token_accounting_commit \
+            "$ISSUE_NUMBER" "$_agent_accounting_id" /dev/null 0 \
+            turn-control-init-failed 2>/dev/null)" || _turn_review_init_commit_result=""
+          turn_accounting_commit_succeeded "$_turn_review_init_commit_result" && break
+        done
+        if ! turn_accounting_commit_succeeded "$_turn_review_init_commit_result"; then
+          echo "turn-limit: failed to close accounting after review turn-control initialization failure (${_agent_accounting_id})" >&2
+        fi
+        AGENT_ACCOUNTING_IDS+=("$_agent_accounting_id")
+        AGENT_ACCOUNTING_RESULTS+=("$_turn_review_init_commit_result")
+      fi
+      TURN_REVIEW_LAUNCH_REFUSED=true
+      break
+    fi
+    : "turn-control-branch: B067"
+    _agent_turn_record="$TURN_CONTROL_FILE"
+  fi
   AGENT_NAMES+=("$_agent")
   AGENT_SESSION_IDS+=("$_agent_session_id")
   AGENT_ACCOUNTING_IDS+=("$_agent_accounting_id")
+  AGENT_TURN_RECORDS+=("$_agent_turn_record")
   # INV-78 (#233): provision THIS agent's verdict-artifact path + run dir. The
   # path is deterministic from PROJECT_ID + the session id (the `Review Session:`
   # UUID, INV-20 — one run-dir per agent run, no collision across a multi-codex
@@ -2519,7 +2635,7 @@ for _agent in "${REVIEW_AGENTS_LIST[@]}"; do
   # parent). The agent NEVER writes here; only the observe loop copies into it.
   AGENT_ARTIFACT_SNAPSHOTS+=("${_agent_artifact_path}.landed")
   _agent_log="/tmp/agent-${PROJECT_ID}-review-${ISSUE_NUMBER}-${_agent}.log"
-  if token_budget_enabled; then
+  if token_budget_enabled || [[ "$TURN_REVIEW_ENABLED" == "true" ]]; then
     _agent_log="/tmp/agent-${PROJECT_ID}-review-${ISSUE_NUMBER}-${_agent}-${_agent_session_id}.log"
   fi
   AGENT_CONTROLLER_LOGS+=("$_agent_log")
@@ -2565,6 +2681,22 @@ for _agent in "${REVIEW_AGENTS_LIST[@]}"; do
   _agent_prompt=$(build_review_prompt "$_agent" "$_agent_session_id" "$_agent_artifact_path" "$_agent_verdict_body_path")
   _agent_rc_file="${_FANOUT_DIR}/${_agent_session_id}.rc"
 
+  # Re-check after prompt/accounting setup, immediately before creating the
+  # member controller. `_run_with_timeout` also serializes its final process
+  # spawn against this trip, closing the remaining child-side race.
+  if [[ "$TURN_REVIEW_ENABLED" == "true" ]] \
+      && turn_fanout_trip_active "$TURN_REVIEW_TRIP_FILE"; then
+    : "turn-control-branch: B068"
+    TURN_CONTROL_FILE="$_agent_turn_record"
+    TURN_CONTROL_FANOUT_TRIP_FILE="$TURN_REVIEW_TRIP_FILE"
+    export TURN_CONTROL_FILE TURN_CONTROL_FANOUT_TRIP_FILE
+    if ! turn_control_sync_fanout_trip >/dev/null 2>&1; then
+      TURN_REVIEW_LAUNCH_REFUSED=true
+    fi
+    log "Turn-cap fan-out trip became active during member setup; suppressing this and remaining launches."
+    break
+  fi
+
   (
     # [Lane-GC PR-5 / INV-118] FD hygiene: close this fan-out member's
     # inherited copy of the guardian write-fd — same rationale as the smoke
@@ -2603,6 +2735,16 @@ for _agent in "${REVIEW_AGENTS_LIST[@]}"; do
     # spawner recorded a given pgids-file line). _run_with_timeout
     # (lib-agent.sh) reads it when appending to the registry's pgids file.
     export ADT_LANE_ROLE="fanout:${_agent}"
+    if [[ "$TURN_REVIEW_ENABLED" == "true" ]]; then
+      TURN_CONTROL_FILE="$_agent_turn_record"
+      TURN_CONTROL_FANOUT_TRIP_FILE="$TURN_REVIEW_TRIP_FILE"
+      TURN_CONTROL_OBSERVE_ACTIVE=1
+      [[ "$TURN_REVIEW_MODE" == "hard" ]] \
+        && TURN_CONTROL_HARD_ACTIVE=1 \
+        || TURN_CONTROL_HARD_ACTIVE=0
+      export TURN_CONTROL_FILE TURN_CONTROL_FANOUT_TRIP_FILE
+      export TURN_CONTROL_OBSERVE_ACTIVE TURN_CONTROL_HARD_ACTIVE
+    fi
     # INV-42 (#173): per-agent launcher resolution. If the operator set an
     # AGENT_REVIEW_LAUNCHER_<AGENT> key (suffix = uppercased name with every
     # non-alphanumeric char → `_`, same transform as the model/extra-args
@@ -2620,24 +2762,7 @@ for _agent in "${REVIEW_AGENTS_LIST[@]}"; do
     # launcher for non-claude members; a claude member keeps its rebound
     # AGENT_LAUNCHER_ARGV. Scope is THIS subshell only — never leaks across
     # fan-out members or to the dev side.
-    _per_agent_launcher=$(_resolve_review_agent_launcher "$_agent")
-    if [[ -n "$_per_agent_launcher" ]]; then
-      # Validate the array assignment PARSES before eval'ing it. A syntax
-      # error inside `eval` (e.g. an unbalanced quote from an operator typo)
-      # is NOT caught by `if ! eval ... 2>/dev/null` — a parse error aborts the
-      # current shell context, which here is THIS fan-out subshell, so the
-      # agent would silently die before run_agent with no log and no sidecar.
-      # `bash -n -c` parses without executing, so a malformed value is caught
-      # cleanly and we degrade to naked + a clear log line.
-      if bash -n -c "AGENT_LAUNCHER_ARGV=($_per_agent_launcher)" 2>/dev/null; then
-        eval "AGENT_LAUNCHER_ARGV=($_per_agent_launcher)"
-      else
-        log "ERROR: AGENT_REVIEW_LAUNCHER_<$_agent> failed to tokenize as a shell argv list; running naked. Value: $_per_agent_launcher"
-        AGENT_LAUNCHER_ARGV=()
-      fi
-    elif [[ "$_agent" != "claude" ]]; then
-      AGENT_LAUNCHER_ARGV=()
-    fi
+    _bind_review_agent_launcher_argv "$_agent" "review fan-out"
     # The wrapper owns the single review-N.pid; per-agent run_agent must NOT
     # rewrite it (the _run_with_timeout PID-file write is keyed on
     # AGENT_PID_FILE). Point AGENT_PID_FILE at a PRIVATE per-agent PGID sidecar
@@ -2792,6 +2917,13 @@ if [[ "$TOKEN_REVIEW_LAUNCH_REFUSED" == "true" && ${#AGENT_NAMES[@]} -eq 0 ]]; t
   RESULT_PARSED=true
   exit 1
 fi
+if [[ "$TURN_REVIEW_LAUNCH_REFUSED" == "true" && ${#AGENT_NAMES[@]} -eq 0 ]]; then
+  log "Turn-control record initialization failed before any review member launched; leaving reviewing unchanged."
+  # No member launched, so stale scratch cleanup must not mask the refusal.
+  rm -rf "$_FANOUT_DIR" 2>/dev/null || true
+  RESULT_PARSED=true
+  exit 1
+fi
 
 # Wait for the fanned-out review agents to finish — by their COLLECTED PIDs
 # only. A bare `wait` here would also block on the gh-token-refresh-daemon and
@@ -2878,10 +3010,12 @@ while :; do
   # panel-aware, INV-84 #271, see above). Artifact frozen-snapshot OR comment
   # observed per slot; the comment fetch runs only for a slot whose artifact has
   # not landed, so an all-artifact-writer panel makes zero extra comment-list calls.
-  if _all_first_verdicts_resolved; then
+  if [[ "$TURN_REVIEW_MODE" != "hard" ]] && _all_first_verdicts_resolved; then
     log "INV-84: every fan-out review agent (${#AGENT_NAMES[@]}) has a resolved first verdict (artifact landed or comment observed) — proceeding to resolve without waiting on a possibly-hung agent (mixed-panel completion signal). Lingering agent(s) are reaped after resolution."
     break
   fi
+  [[ "$TURN_REVIEW_MODE" != "hard" ]] \
+    || : "turn-control-branch: B069"
   # Absolute safety ceiling.
   if [[ "$SECONDS" -ge "$_observe_deadline" ]]; then
     log "WARNING: INV-78/INV-84 fan-out observe loop hit the absolute ceiling (${VERDICT_ARTIFACT_OBSERVE_TIMEOUT_SECONDS:-21600}s) with agent(s) still alive and not all first verdicts resolved — proceeding to reap + resolve."
@@ -2905,6 +3039,10 @@ for _i in "${!AGENT_NAMES[@]}"; do
     # Subshell never wrote a sidecar (crashed before the printf) — treat as
     # a launch failure.
     AGENT_LAUNCH_RC["$_sid"]=1
+  fi
+  if [[ "$TURN_REVIEW_MODE" == "hard" \
+      && "${AGENT_LAUNCH_RC[$_sid]}" == "$TURN_CONTROL_ERROR_RC" ]]; then
+    TURN_REVIEW_LAUNCH_REFUSED=true
   fi
   # PGID sidecar (written by run_agent → _run_with_timeout via AGENT_PID_FILE).
   # Missing/empty/non-numeric → no PGID to reap for this agent (it may have
@@ -3381,6 +3519,87 @@ _reap_fanout_controller_subshells "${_fanout_pids[@]:-}"
 # one the first pass structurally could not see yet.
 _reap_fanout_recorded_descendants "ADT_FANOUT_LANE_MARKER" "${AGENT_SESSION_IDS[@]:-}"
 
+# [INV-142] A hard member trip or unpublished cap is resolved only after each
+# live member had the opportunity to terminate through its own watchdog and the
+# existing INV-43 post-resolution reapers ran as last-resort containment.
+# Prefer the shared trip's selected trigger; if publication failed, recover the
+# durable cap winner directly from member records. The shared orchestration also
+# records natural completion and handles a partial launch refusal. Its terminal
+# return codes bypass verdict aggregation, approval, and merge.
+_turn_review_post_fanout_decision() {
+  local post_rc="${1:-1}"
+  case "$post_rc" in
+    0)
+      # Return 2 exclusively for the non-terminal "continue aggregation" path.
+      return 2
+      ;;
+    "$TURN_CONTROL_REVIEW_ROUTED_RC")
+      RESULT_PARSED=true
+      return 0
+      ;;
+    "$TURN_CONTROL_REVIEW_REFUSED_RC")
+      : "turn-control-branch: B074"
+      log "Turn-control initialization failed after a partial review launch; refusing verdict aggregation and leaving reviewing unchanged."
+      RESULT_PARSED=true
+      return 1
+      ;;
+    *)
+      log "ERROR: review post-fan-out turn control could not complete; refusing aggregation and leaving any live intent for recovery."
+      RESULT_PARSED=true
+      return 1
+      ;;
+  esac
+}
+
+if [[ "$TURN_REVIEW_ENABLED" == "true" ]]; then
+  _turn_review_accounting_required=false
+  if token_budget_enabled || [[ "$TURN_REVIEW_MODE" == "hard" ]]; then
+    _turn_review_accounting_required=true
+  fi
+  _turn_review_post_rc=0
+  turn_control_review_post_fanout \
+    "$ISSUE_NUMBER" "$TURN_REVIEW_TRIP_FILE" \
+    AGENT_TURN_RECORDS AGENT_ACCOUNTING_IDS \
+    AGENT_GENERIC_LOGS AGENT_ACCOUNTING_RESULTS \
+    "$TURN_REVIEW_LAUNCH_REFUSED" "$_turn_review_accounting_required" \
+    "$TURN_REVIEW_MODE" \
+    || _turn_review_post_rc=$?
+  if [[ "$_turn_review_post_rc" == "$TURN_CONTROL_REVIEW_REFUSED_RC" ]] \
+      && token_budget_enabled; then
+    _turn_review_partial_budget_rc=0
+    _token_review_evaluate_members_once || _turn_review_partial_budget_rc=$?
+    case "$_turn_review_partial_budget_rc" in
+      10)
+        if ! terminal_intent_cleanup_transition \
+            "$ISSUE_NUMBER" "reviewing" "reviewing" "pending-dev"; then
+          log "ERROR: token-budget member terminal transition failed during partial turn-control refusal; leaving the live intent for dispatcher recovery."
+          RESULT_PARSED=true
+          exit 1
+        fi
+        RESULT_PARSED=true
+        exit 0
+        ;;
+      0) ;;
+      21)
+        log "ERROR: token-budget member violation could not persist its terminal intent during partial turn-control refusal."
+        RESULT_PARSED=true
+        exit 1
+        ;;
+      *)
+        log "ERROR: token-budget member evaluation failed during partial turn-control refusal (rc=${_turn_review_partial_budget_rc})."
+        RESULT_PARSED=true
+        exit 1
+        ;;
+    esac
+  fi
+  _turn_review_wrapper_rc=0
+  _turn_review_post_fanout_decision "$_turn_review_post_rc" \
+    || _turn_review_wrapper_rc=$?
+  if [[ "$_turn_review_wrapper_rc" -ne 2 ]]; then
+    exit "$_turn_review_wrapper_rc"
+  fi
+fi
+
 # ---------------------------------------------------------------------------
 # Issue #449 (R1): pre-aggregation severity-aware blocking ratchet.
 # ---------------------------------------------------------------------------
@@ -3519,6 +3738,18 @@ done
 # downstream PASS / FAIL / crash branches and the six emit_verdict_trailer
 # call sites run UNCHANGED — exactly ONE aggregated INV-35 trailer and ONE
 # INV-04 Reviewed-HEAD trailer per review run.
+# Hard turn control started strict accounting for every member. Close those
+# records before aggregate computation so a timeout/control-plane run cannot
+# advance toward approval with usage left in a nonterminal state.
+if [[ "$TURN_REVIEW_MODE" == "hard" ]] \
+    && ! _turn_control_commit_review_results \
+      "$ISSUE_NUMBER" AGENT_ACCOUNTING_IDS AGENT_GENERIC_LOGS \
+      AGENT_VERDICTS AGENT_ACCOUNTING_RESULTS; then
+  log "ERROR: hard review usage accounting did not reach a durable terminal state; refusing verdict aggregation."
+  RESULT_PARSED=true
+  exit 1
+fi
+
 AGGREGATE=$(_aggregate_review_verdicts "${AGENT_VERDICTS[@]}")
 log "Per-agent verdicts: ${AGENT_VERDICTS[*]} → aggregate: ${AGGREGATE}"
 
@@ -3786,7 +4017,7 @@ done
 # [INV-141] Strict usage commit is independent of INV-70 metrics emission and
 # runs for every started member. Pass/fail members parse the same generic log
 # as metrics_parse_tokens; dropped/timed-out members commit member-dropped.
-if token_budget_enabled; then
+if [[ "$TURN_REVIEW_MODE" != "hard" ]] && token_budget_enabled; then
   for _mi in "${!AGENT_NAMES[@]}"; do
     _mstate="${AGENT_VERDICTS[$_mi]}"
     _munknown=""
@@ -4000,8 +4231,7 @@ fi
 # member violation writes its invocation-keyed terminal intent; this explicit
 # cleanup call is required because normal review exits bypass crash teardown.
 _token_review_member_gate_rc=0
-token_budget_evaluate_review_members "$ISSUE_NUMBER" \
-  AGENT_ACCOUNTING_IDS AGENT_ACCOUNTING_RESULTS || _token_review_member_gate_rc=$?
+_token_review_evaluate_members_once || _token_review_member_gate_rc=$?
 if [[ "$_token_review_member_gate_rc" -eq 10 ]]; then
   if ! terminal_intent_cleanup_transition "$ISSUE_NUMBER" "reviewing" "reviewing" "pending-dev"; then
     log "ERROR: token-budget member terminal transition failed for issue #${ISSUE_NUMBER}; leaving the live intent for dispatcher recovery."

@@ -184,6 +184,7 @@ TMPROOT=$(mktemp -d)
 trap 'rm -rf "$TMPROOT"' EXIT
 
 CLEANUP_FN=$(awk '/^cleanup\(\) \{/,/^\}/' "$WRAPPER")
+TURN_CLEANUP_FN=$(awk '/^_resource_dev_handle_turn_cleanup\(\) \{/,/^\}/' "$WRAPPER")
 if [[ -z "$CLEANUP_FN" ]]; then
   echo -e "  ${RED}FAIL${NC}: could not extract cleanup() from $WRAPPER"
   FAIL=$((FAIL + 1))
@@ -202,6 +203,8 @@ fi
 # CALL_COUNT (times chp_pr_list was invoked), SLEEP_COUNT (times sleep ran).
 run_retry_cleanup() {
   local label="$1" received_sigterm="$2" behavior="$3" token_eval_rc="${4:-0}"
+  local turn_winner="${5:-}" turn_recovery_staged=false
+  [[ "$turn_winner" == "turn-cap" ]] && turn_recovery_staged=true
   local record="$TMPROOT/gh-${label}.log"
   local stderr_log="$TMPROOT/stderr-${label}.log"
   local call_count_file="$TMPROOT/calls-${label}.log"
@@ -225,6 +228,8 @@ run_retry_cleanup() {
   SLEEP_COUNT_FILE="$sleep_count_file" \
   PR_LIST_BEHAVIOR="$behavior" \
   TOKEN_EVAL_RC="$token_eval_rc" \
+  TURN_DEV_WINNER="$turn_winner" \
+  TURN_DEV_RECOVERY_STAGED="$turn_recovery_staged" \
   AGENT_RAN="true" \
   TOKEN_BUDGET_LAUNCH_REFUSED="false" \
   ISSUE_NUMBER="77" \
@@ -250,15 +255,28 @@ run_retry_cleanup() {
     }
     terminal_intent_cleanup_transition() {
       echo \"TERMINAL-CLEANUP \$*\" >> \"\$GH_RECORD\"
-      if [[ \"\$TOKEN_EVAL_RC\" -eq 10 ]]; then
+      if [[ \"\$TOKEN_EVAL_RC\" -eq 10 || \"\$TURN_DEV_WINNER\" == \"turn-cap\" ]]; then
         itp_transition_state \"\$1\" \"\$3\" stalled
       else
         itp_transition_state \"\$1\" \"\$3\" \"\$4\"
       fi
     }
+    TURN_DEV_ACCOUNTING_FAILED=false
+    TURN_DEV_ROUTE_FAILED=false
+    TURN_DEV_LAUNCH_REFUSED=false
     _token_dev_evaluate_cleanup() {
       echo \"TOKEN-EVAL rc=\$TOKEN_EVAL_RC\" >> \"\$GH_RECORD\"
       return \"\$TOKEN_EVAL_RC\"
+    }
+    _resource_dev_evaluate_budget_if_applicable() {
+      [[ \"\$TURN_DEV_WINNER\" == \"turn-cap\" ]] && return 0
+      _token_dev_evaluate_cleanup
+    }
+    turn_control_recovery_complete() {
+      echo \"TURN-RECOVERY-COMPLETE \$*\" >> \"\$GH_RECORD\"
+    }
+    turn_control_mark_terminal_transitioned() {
+      echo \"TURN-TERMINAL-TRANSITIONED\" >> \"\$GH_RECORD\"
     }
     drain_agent_pr_create() { return 0; }
     drain_agent_bot_triggers() { echo \"BOT-TRIGGER-DRAIN \$1\" >> \"\$GH_RECORD\"; return 0; }
@@ -277,6 +295,7 @@ run_retry_cleanup() {
         *) return 1 ;;
       esac
     }
+    $TURN_CLEANUP_FN
     $CLEANUP_FN
     (exit 143); cleanup
   " 2>"$stderr_log"
@@ -376,6 +395,23 @@ assert_contains "TC-TOKENBUDGET-050 invokes terminal cleanup routing" \
 assert_contains "TC-TOKENBUDGET-050 converges to stalled" \
   "--add-label stalled" "$GH_LOG"
 assert_not_contains "TC-TOKENBUDGET-050 does not resurrect pending-dev" \
+  "--add-label pending-dev" "$GH_LOG"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- TC-TURNLIMIT-058: UNKNOWN-defer still routes a durable turn-cap winner ---"
+# ---------------------------------------------------------------------------
+run_retry_cleanup "turn-cap-unknown" 1 "fail,fail" 0 turn-cap
+
+assert_contains "TC-TURNLIMIT-058 invokes terminal cleanup routing" \
+  "TERMINAL-CLEANUP 77 in-progress in-progress pending-dev" "$GH_LOG"
+assert_contains "TC-TURNLIMIT-058 converges to stalled" \
+  "--add-label stalled" "$GH_LOG"
+assert_contains "TC-TURNLIMIT-058 finalizes recovery after the transition" \
+  "TURN-RECOVERY-COMPLETE 77 dev-wrapper" "$GH_LOG"
+assert_not_contains "TC-TURNLIMIT-058 does not evaluate an unrelated token budget" \
+  "TOKEN-EVAL" "$GH_LOG"
+assert_not_contains "TC-TURNLIMIT-058 does not resurrect pending-dev" \
   "--add-label pending-dev" "$GH_LOG"
 
 # ---------------------------------------------------------------------------

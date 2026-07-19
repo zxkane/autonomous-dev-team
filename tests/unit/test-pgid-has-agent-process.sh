@@ -62,25 +62,26 @@ assert_returns() {
 # background children when it exits, killing our setsid child before
 # the helper can probe it. Use a side-channel global instead.
 #
-# `comm` reads from /proc/<pid>/comm which is the binary's basename
-# (NOT argv[0] — `exec -a` doesn't change comm). Portable trick: copy
-# /bin/sleep to a renamed file under a tempdir, exec it. `setsid`
-# makes the child its own session/process-group leader so its PGID
+# `comm` reads from /proc/<pid>/comm, not argv[0]. Set the controlled shell's
+# comm directly instead of copying /bin/sleep: uutils installs sleep as a
+# multicall binary and rejects an unknown copied basename such as fake-agy.
+# `setsid` makes the child its own session/process-group leader so its PGID
 # equals its PID — same invariant lib-agent.sh::_run_with_timeout sets up.
-TMPBINS=$(mktemp -d)
 SPAWN_PID=""
 spawn_named_child() {
   local name="$1"
-  local bin="$TMPBINS/$name"
-  cp /bin/sleep "$bin"
-  setsid "$bin" 60 &
+  setsid bash -c '
+    printf "%s\n" "$1" > /proc/self/comm
+    sleep 60 &
+    wait
+  ' _ "$name" &
   SPAWN_PID=$!
   # Brief wait so /proc/<pid>/comm settles after exec.
   sleep 0.1
 }
 
 cleanup_pids=()
-trap 'for p in "${cleanup_pids[@]}"; do kill -TERM "$p" 2>/dev/null; done; rm -rf "$TMPBINS"' EXIT
+trap 'for p in "${cleanup_pids[@]}"; do kill -TERM -- "-$p" 2>/dev/null; done' EXIT
 
 echo "=== test-pgid-has-agent-process.sh — per-side CLI argument ==="
 

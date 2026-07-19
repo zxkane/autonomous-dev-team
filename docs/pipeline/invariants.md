@@ -8923,3 +8923,120 @@ no pending resurrection).
 - [`dev-agent-flow.md`](dev-agent-flow.md#exit-trap-cleanup) and [`review-agent-flow.md`](review-agent-flow.md#exit-trap-cleanup) - wrapper-specific cleanup ordering.
 
 ---
+
+## INV-142: turn limits are capability-gated per adapter and lane, with durable first-reason stop arbitration and one live-PGID signaller
+
+_Triage (issue #236): [machine-checked: tests/unit/test-lib-turn-limit.sh, tests/unit/test-turn-limit-wiring.sh, tests/unit/test-turn-limit-control-e2e.sh]_
+
+**Rule**: `lib-turn-limit.sh` is the side-effect-free-on-source authority for
+turn-limit precedence, syntax, capability, observation, admission, and
+run-local stop arbitration. `AGENT_DEV_TURN_LIMIT` and
+`AGENT_REVIEW_TURN_LIMIT` override `AGENT_TURN_LIMIT` only when they are set;
+explicit empty or invalid effective values are refused. Values match
+`^[1-9][0-9]*$`. `TURN_LIMIT_MODE` is `warn|hard`, defaults to warn when a
+limit exists, and is validated whenever set even when both sides are disabled.
+The dispatcher and both wrappers validate syntax, but only the execution-host
+wrapper probes capability before an affected launch. Turn limits are
+per-invocation, so the dispatcher has no cumulative turn admission gate.
+
+`turn_capability ADAPTER LANE MODE` is the static matrix authority. Controlled
+lanes are exactly `dev-new`, `dev-resume`, and `review-member`; browser E2E and
+smoke probes are excluded. Claude warn is supported only when
+`claude --version` normalizes to at least `2.1.215`. Every production adapter
+is unsupported in hard mode. The hard-capable synthetic adapter exists only
+under test fixtures and is unreachable through production dispatch or
+operator configuration.
+
+The observer contracts never substitute for each other.
+`observe_completed_turn` is post-response and, for Claude warn mode, counts
+each complete top-level `type=assistant` stream-json record once while ignoring
+all other records, including result `num_turns`. `admit_next_request` is a
+synchronous pre-request boundary called before every request; it denies request
+N+1 once N completed turns are durable. Hard capability requires this second
+contract. Warn mode records threshold evidence once and continues. Neither
+observer sends a signal. A warn-mode observation, final-state read, or
+completion-write failure is diagnostic only and cannot refuse cleanup or
+review aggregation.
+
+Each controlled invocation owns
+`${RUN_DIR}/turn-control/<accounting-invocation-id>.json`, protected by flock
+and same-directory atomic replacement. Its lifecycle is
+`running -> stop-requested(reason) -> terminating -> terminal-transitioned`;
+natural completion may instead move `running -> completed`. The first durable
+stop reason from `timeout|turn-cap|fanout-cancel` wins. Later stop requests,
+including any request after completed, append `late-ignored` evidence and
+never replace the winner. Lifecycle transitions cannot skip `terminating`.
+Evidence actions are idempotent by
+`(invocation_id,action)` and carry issue, side, run id, invocation/member,
+adapter/version, observed count, limit, mode, action, winning reason, and
+timestamp.
+
+`_run_with_timeout` remains the sole signaller for a live controlled PGID.
+Hard-controlled launches use its shell watchdog. The watchdog persists the
+winner and `terminating` before TERM, retrying persistence without signalling
+while the process group is live, then KILLs the same PGID after grace if
+needed. If the group exits before `terminating` can be persisted, the durable
+winner remains `stop-requested` and no signal is sent. Only a timeout winner
+whose terminal lifecycle is durable returns 124/137 and participates in
+INV-48; a durably finalized turn-cap or fanout-cancel winner returns 92. A
+final lifecycle persistence failure returns the control-plane rc 93 instead
+of claiming a completed timeout/cancellation. INV-43 reapers remain unchanged
+last-resort post-resolution cleanup, never the cancellation mechanism.
+
+On a review turn-cap, the trigger atomically writes the shared fan-out trip and
+requests its own stop. The parent checks the trip before every member launch;
+the parent rechecks immediately before controller creation, and the codex
+controller checks before each rerun. Final adapter process creation is
+serialized against trip publication with the trip record's flock; an active
+trip persists local sibling cancellation and admits no process. Each active
+sibling requests fanout-cancel and terminates through its own watchdog. After
+joins and the existing residual reap path, the parent skips aggregation,
+approval, and merge. Parseable usage commits normally; otherwise the trigger
+commits unknown reason `turn-cap` and siblings `fanout-cancelled`.
+
+Only a `turn-cap` winner maps into INV-140, using the triggering accounting
+invocation id for both intent and invocation identity. Timeout and
+fanout-cancel write no intent. Dev cleanup and the review violation site reuse
+`terminal_intent_cleanup_transition` to perform one stalled transition and
+consume the intent; `mark_stalled` is never used.
+
+Before any provider write, terminal routing stages a recovery pointer beside
+the strict accounting record, bound to the wrapper owner, triggering
+invocation id, and absolute turn-control record path. Review pointers also
+carry the complete launched-member recovery set: each canonical accounting
+id, its pinned fallback reason, and its absolute turn-control record path. If
+the wrapper dies, dispatcher Step 5 validates those bindings, closes every
+still-started member accounting record, and reconstructs the turn-cap intent
+before ordinary crash routing. For `remote-aws-ssm`, both recovery reads and
+completion run on the execution host that owns those files. The pointer is
+cleared only after the stalled transition succeeds and every referenced
+turn-cap/fanout-cancel lifecycle is durably `terminal-transitioned`; any
+earlier failure preserves active ownership for a later tick.
+
+With no effective limit for a side, the feature performs no version probe,
+record creation, fan-out-trip read, or observer work, and the existing GNU
+timeout argv path is byte-identical.
+
+**Producer**: `lib-turn-limit.sh`; the complete-record hook in
+`lib-agent.sh::_agent_progress_recorder`; the synthetic fixture's pre-request
+hook.
+**Consumer**: `autonomous-dev.sh`, `autonomous-review.sh`, and
+`lib-agent.sh::_run_with_timeout`.
+**Status**: **ENFORCED** for configuration, capability refusal, warning
+observation, hard synthetic boundaries, arbitration, fan-out cancellation,
+terminal routing, and disabled-path isolation.
+**Test**: `tests/unit/test-lib-turn-limit.sh` (configuration, full capability
+matrix and doc parity, version probe, observer, lifecycle/evidence);
+`tests/unit/test-turn-limit-control-e2e.sh` and
+`tests/e2e/run-turn-limit-control-e2e.sh` (exact-N admission, race order,
+TERM/KILL process-group cleanup, sibling cancellation);
+`tests/unit/test-turn-limit-wiring.sh` (production isolation and wrapper/spec
+wiring).
+
+**Cross-references**:
+- [INV-43](#inv-43-command-mode-e2e-review-wait-budgets-must-not-be-smaller-than-the-e2e-they-dispatched) - residual post-resolution reaping boundary.
+- [INV-140](#inv-140-resource-terminal-intent-comments-are-the-durable-authoritative-terminal-control-record-and-wrapper-cleanup-must-resolve-a-live-intent-before-any-pending-state-write) - the only issue-terminal route for a turn-cap winner.
+- [INV-141](#inv-141-token-budgets-use-strict-accounting-for-post-run-wrapper-gates-and-pre-dispatch-admission-with-durable-terminal-routing) - accounting identities and usage commit path.
+- [`adapter-spec.md`](adapter-spec.md#36-turn-limit-capability-inv-142) - published production capability matrix.
+
+---
