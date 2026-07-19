@@ -744,18 +744,13 @@ _agent_progress_init
 # (AGENT_GH_TOKEN_FILE set by setup_agent_token), `gh pr create` (which needs
 # pull_requests:write) is brokered: the agent writes the PR title+body here and
 # the wrapper opens the PR in cleanup (drain_agent_pr_create). Exported so it
-# survives the agent env scrub. Lives inside the per-run GH_WRAPPER_DIR (mode
-# 700) when available, else a private mktemp file. Harmless when scoping is off
-# (drain_agent_pr_create no-ops unless AGENT_GH_TOKEN_FILE is set).
-if [[ -n "${GH_WRAPPER_DIR:-}" && -d "${GH_WRAPPER_DIR}" ]]; then
-  AGENT_PR_CREATE_FILE="${GH_WRAPPER_DIR}/agent-pr-create"
-else
-  # Split declare+assign so the mktemp exit status isn't masked by `export`
-  # (SC2155). A mktemp failure here is benign — the drain helper's `-s` guard
-  # no-ops on a missing file — but keep the file's style parity.
-  AGENT_PR_CREATE_FILE="$(mktemp "/tmp/agent-pr-create-${ISSUE_NUMBER}-XXXXXX")"
-fi
-export AGENT_PR_CREATE_FILE
+# survives the agent env scrub. #519: the file lives in the DURABLE INV-81
+# RUN_DIR (never GH_WRAPPER_DIR — that auth dir vanishes mid-cleanup per
+# INV-111/#402, and a vanished request silently burned the retry budget),
+# else a private mktemp file; pre-created 0600 by the helper. Harmless when
+# scoping is off (drain_agent_pr_create no-ops unless AGENT_GH_TOKEN_FILE is
+# set).
+provision_agent_pr_create_file "$ISSUE_NUMBER"
 
 # [INV-79] Bot-trigger broker file. GH_USER_PAT is scrubbed from the agent subtree
 # (#234 review [P1]), so the agent can no longer post the real-user bot-trigger
@@ -1359,7 +1354,16 @@ EOF
   # open the PR now with the wrapper's full-write token — BEFORE the PR_EXISTS
   # lookup below so a brokered create routes the success path to pending-review.
   # No-op when scoping is off or the agent already created the PR directly.
-  _teardown_call drain_agent_pr_create "$ISSUE_NUMBER" "$REPO" || true
+  # #519: the third argument is the issue title for the recovery fallback's
+  # synthesized PR — parsed from the already-fetched normalized ISSUE_BODY
+  # object (no cleanup-time issue read). Empty when cleanup fires before the
+  # fetch (startup failure); the recovery path then uses its deterministic
+  # fallback title.
+  _drain_issue_title=""
+  if [[ -n "${ISSUE_BODY:-}" ]]; then
+    _drain_issue_title=$(jq -r '.title // ""' <<<"$ISSUE_BODY" 2>/dev/null) || _drain_issue_title=""
+  fi
+  _teardown_call drain_agent_pr_create "$ISSUE_NUMBER" "$REPO" "$_drain_issue_title" || true
 
   # [INV-111] (#402 review round-1 [P1]) re-arm before the PR_EXISTS lookup.
   rearm_gh_resolution

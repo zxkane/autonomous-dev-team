@@ -4308,6 +4308,58 @@ an agent that runs `gh pr review --approve` / `gh pr merge` gets a deterministic
   emits an EMPTY prefix (no scrub), and behavior is byte-identical to pre-INV-79.
   An app-mode scoped-mint failure degrades the same way (WARN + no scrub) —
   availability over the defense-in-depth bonus.
+
+**Broker-request durability + lost-request recovery (#519 amendment).** The
+brokered PR-create request is a LOAD-BEARING handoff: losing it converts a
+fully-verified push into a "no PR was created" retry, and three clean runs
+exhaust the retry budget to `stalled`. Three rules close that class:
+
+1. **Durable location.** `AGENT_PR_CREATE_FILE` is provisioned by
+   `lib-auth.sh::provision_agent_pr_create_file` at
+   `${RUN_DIR}/agent-pr-create` (the [INV-81](#inv-81-every-wrapper-run-gets-a-durable-per-run-artifact-dir) durable per-run dir; private `mktemp
+   /tmp/agent-pr-create-<issue>-XXXXXX` fallback when RUN_DIR is unusable),
+   pre-created empty with mode `0600` so the mode never depends on the
+   agent's umask. It must NEVER live inside `GH_WRAPPER_DIR` — that per-run
+   auth dir is documented ([INV-111](#inv-111-the-dev-wrappers-session-report-is-the-first-durable-write-in-cleanup-gh-resolution-is-re-armed-per-write-against-a-vanished-auth-shim-and-a-same-head-review-fail-with-no-resolvable-session-id-self-heals-via-a-bounded-fresh-dev-new-instead-of-parking-forever)/#402) to vanish mid-cleanup from an
+   external deleter, which is exactly how the #519 incident lost the request.
+   The drain never deletes the artifact (it survives until
+   `RUN_RETENTION_DAYS` pruning — post-hoc diagnosis of this bug class
+   depends on it).
+
+2. **Loud guards.** When the scoped token is armed, `drain_agent_pr_create`
+   runs the PR-existence check FIRST (an existing PR makes a missing request
+   harmless → silent return); only on a confirmed zero-match with the
+   request unset/absent/empty does it WARN with the pinned field grammar
+   (`path=<unset|path> exists=<yes|no> size=<0|unknown>`) — never request
+   content, never credentials. The unscoped first guard stays silent
+   (scoping off = broker never in play; a vanished auth DIR leaves the
+   `AGENT_GH_TOKEN_FILE` VARIABLE non-empty, so the diagnostic stays
+   reachable in the incident shape).
+
+3. **Strict single-branch recovery.** After the WARN,
+   `_pr_broker_recover` opens ONE minimal PR — `Closes #<N>` plus a fixed
+   note with no other numeric `#` reference (body `#N`-mention selectors
+   treat any match as PR existence) — IFF all hold: the existence read was a
+   SUCCESSFUL parseable zero-match ("never duplicate" outranks the normal
+   path's fail-soft `existing=0`, which is preserved for the request-file
+   path only); exactly ONE pushed branch passes the numeric boundary
+   `issue-<N>([^0-9]|$)`; and that branch is STRICTLY AHEAD of the resolved
+   [INV-131](#inv-131-the-pipelines-base-branch-is-a-resolved-exported-validated-conf-value--never-a-hardcoded-main-literal-in-a-prompt-hook-or-provider-argv) base branch — remote-base SHA via `ls-remote`,
+   ancestry REQUIRED (`merge-base --is-ancestor`) plus rev-list count > 0,
+   no SHA-inequality fallback (a diverged branch needs a human). Recovery
+   runs ONLY for an unset/missing/zero-byte request — malformed non-empty
+   requests and failed normal creates never trigger a second create. The
+   synthesized title is the wrapper-supplied issue title (3rd drain
+   argument, parsed from the already-fetched normalized issue object; a
+   deterministic fallback title when absent). Validation base and create
+   target are both `${BASE_BRANCH}`; the repo must keep provider-default ==
+   BASE_BRANCH for `chp_create_pr`'s implicit target. Both create paths
+   share one leaf selector (`_pr_broker_create_leaf`) so the [INV-91]
+   github-gated raw fallback and the non-GitHub fail-loud refusal cannot
+   drift between them.
+
+   Proven by `tests/unit/test-pr-broker-durability.sh` (TC-PRBROKER-001..030)
+   and `tests/e2e/run-pr-broker-durability-e2e.sh` (TC-PRBROKER-040).
 - **Containment boundary (NOT isolation)**: same OS user, so the agent could read
   the wrapper's token file off disk if it deliberately went looking — this is
   defense-in-depth, not a sandbox. OS-user / container isolation is out of scope
