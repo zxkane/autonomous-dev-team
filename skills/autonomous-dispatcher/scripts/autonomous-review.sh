@@ -2786,6 +2786,8 @@ if [[ "$TOKEN_REVIEW_LAUNCH_REFUSED" == "true" && ${#AGENT_NAMES[@]} -eq 0 ]]; t
   emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-non-substantive" \
     "token-budget-launch-refused" 2>/dev/null \
     || log "WARNING: token-budget launch-refusal trailer failed for issue #${ISSUE_NUMBER}"
+  # [INV-129 [P3]] round=0 second reset channel (see the aggregate PASS branch).
+  itp_post_comment "$ISSUE_NUMBER" "$(_review_round_marker "$ISSUE_NUMBER" "${PR_HEAD_SHA:-}" 0)" 2>/dev/null || true
   rm -rf "$_FANOUT_DIR" 2>/dev/null || true # Temp cleanup failure must not replace launch-refusal routing.
   RESULT_PARSED=true
   exit 1
@@ -4026,6 +4028,8 @@ if [[ "$TOKEN_REVIEW_LAUNCH_REFUSED" == "true" ]]; then
   emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-non-substantive" \
     "token-budget-launch-refused" 2>/dev/null \
     || log "WARNING: token-budget launch-refusal trailer failed for issue #${ISSUE_NUMBER}"
+  # [INV-129 [P3]] round=0 second reset channel (see the aggregate PASS branch).
+  itp_post_comment "$ISSUE_NUMBER" "$(_review_round_marker "$ISSUE_NUMBER" "${PR_HEAD_SHA:-}" 0)" 2>/dev/null || true
   RESULT_PARSED=true
   exit 1
 fi
@@ -4626,6 +4630,8 @@ if [[ "$PASSED_VERDICT" == "true" ]]; then
       _token_hold_trailer_ok=false
       log "WARNING: token-budget unavailable hold trailer failed for issue #${ISSUE_NUMBER}"
     fi
+    # [INV-129 [P3]] round=0 second reset channel (see the aggregate PASS branch).
+    itp_post_comment "$ISSUE_NUMBER" "$(_review_round_marker "$ISSUE_NUMBER" "$PR_HEAD_SHA" 0)" 2>/dev/null || true
     if ! itp_transition_state "$ISSUE_NUMBER" "reviewing" "pending-review" 2>/dev/null; then
       if [[ "$_token_hold_trailer_ok" == "true" ]]; then
         log "ERROR: itp_transition_state reviewing→pending-review failed for issue #${ISSUE_NUMBER} (token-budget unavailable hold); dispatcher recovery will honor the durable hold trailer."

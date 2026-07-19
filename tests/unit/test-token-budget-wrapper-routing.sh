@@ -41,6 +41,13 @@ awk '
   copy
 ' "$REVIEW" > "$MEMBER_SNIPPET"
 
+EARLY_REFUSAL_SNIPPET="$WORK/early-refusal.sh"
+awk '
+  /^# No member was launched, so there is no fan-out state to resolve or commit\./ { copy=1 }
+  /^# Wait for the fanned-out review agents to finish/ { copy=0 }
+  copy
+' "$REVIEW" > "$EARLY_REFUSAL_SNIPPET"
+
 ISSUE_SNIPPET="$WORK/issue.sh"
 awk '
   /^# Token-budget cumulative hard gate/ { copy=1 }
@@ -48,20 +55,52 @@ awk '
   copy
 ' "$REVIEW" > "$ISSUE_SNIPPET"
 
-if [[ ! -s "$MEMBER_SNIPPET" || ! -s "$ISSUE_SNIPPET" ]]; then
+if [[ ! -s "$MEMBER_SNIPPET" || ! -s "$EARLY_REFUSAL_SNIPPET" \
+      || ! -s "$ISSUE_SNIPPET" ]]; then
   echo "FAIL: could not extract token-budget review routing snippets" >&2
   exit 1
 fi
 
+run_early_refusal_route() {
+  local trailer_rc="${1:-0}" record="$WORK/early-refusal-record"
+  local fanout_dir="$WORK/fanout"
+  mkdir -p "$fanout_dir"
+  : > "$record"
+  TRAILER_RC="$trailer_rc" RECORD="$record" FANOUT_DIR="$fanout_dir" \
+    bash -uo pipefail -c '
+      TOKEN_REVIEW_LAUNCH_REFUSED=true
+      AGENT_NAMES=()
+      ISSUE_NUMBER=506
+      REPO=zxkane/autonomous-dev-team
+      PR_HEAD_SHA=head-506
+      _FANOUT_DIR="$FANOUT_DIR"
+      RESULT_PARSED=false
+      log() { printf "log|%s\n" "$*" >> "$RECORD"; }
+      emit_verdict_trailer() {
+        printf "trailer|%s\n" "$*" >> "$RECORD"
+        return "$TRAILER_RC"
+      }
+      _review_round_marker() {
+        printf "review-round-counter|issue=%s|head=%s|round=%s" "$1" "$2" "$3"
+      }
+      itp_post_comment() { printf "comment|%s\n" "$*" >> "$RECORD"; }
+      source "'"$EARLY_REFUSAL_SNIPPET"'"
+    ' >/dev/null 2>&1
+  return $?
+}
+
 run_member_route() {
   local evaluate_rc="$1" transition_rc="$2" launch_refused="${3:-false}"
+  local trailer_rc="${4:-0}"
   local record="$WORK/member-record"
   : > "$record"
   EVALUATE_RC="$evaluate_rc" TRANSITION_RC="$transition_rc" \
-    TOKEN_REVIEW_LAUNCH_REFUSED="$launch_refused" RECORD="$record" \
+    TOKEN_REVIEW_LAUNCH_REFUSED="$launch_refused" TRAILER_RC="$trailer_rc" \
+    RECORD="$record" \
     bash -uo pipefail -c '
       ISSUE_NUMBER=506
       REPO=zxkane/autonomous-dev-team
+      PR_HEAD_SHA=head-506
       AGENT_ACCOUNTING_IDS=(inv-a)
       AGENT_ACCOUNTING_RESULTS=("{\"state\":\"usage-committed\",\"total_tokens\":101}")
       AGENT_VERDICTS=(fail)
@@ -72,7 +111,14 @@ run_member_route() {
         printf "terminal|%s\n" "$*" >> "$RECORD"
         return "$TRANSITION_RC"
       }
-      emit_verdict_trailer() { printf "trailer|%s\n" "$*" >> "$RECORD"; }
+      emit_verdict_trailer() {
+        printf "trailer|%s\n" "$*" >> "$RECORD"
+        return "$TRAILER_RC"
+      }
+      _review_round_marker() {
+        printf "review-round-counter|issue=%s|head=%s|round=%s" "$1" "$2" "$3"
+      }
+      itp_post_comment() { printf "comment|%s\n" "$*" >> "$RECORD"; }
       trap '"'"'printf "verdict|%s\n" "${AGENT_VERDICTS[0]}" >> "$RECORD"'"'"' EXIT
       source "'"$MEMBER_SNIPPET"'"
     ' >/dev/null 2>&1
@@ -90,6 +136,7 @@ run_issue_route() {
       ISSUE_NUMBER=506
       RUN_ID=review-run
       REPO=zxkane/autonomous-dev-team
+      PR_HEAD_SHA=head-506
       RESULT_PARSED=false
       log() { printf "log|%s\n" "$*" >> "$RECORD"; }
       token_budget_evaluate_issue() { return "$EVALUATE_RC"; }
@@ -98,6 +145,9 @@ run_issue_route() {
         return "$TRANSITION_RC"
       }
       itp_post_comment() { printf "comment|%s\n" "$*" >> "$RECORD"; }
+      _review_round_marker() {
+        printf "review-round-counter|issue=%s|head=%s|round=%s" "$1" "$2" "$3"
+      }
       emit_verdict_trailer() {
         printf "trailer|%s\n" "$*" >> "$RECORD"
         return "$TRAILER_RC"
@@ -110,6 +160,14 @@ run_issue_route() {
     ' >/dev/null 2>&1
   return $?
 }
+
+echo "== Review early launch-refusal routing =="
+run_early_refusal_route 1
+assert_eq "TC-TOKENBUDGET-084 no-member refusal remains retryable" 1 "$?"
+early_refusal_record="$(cat "$WORK/early-refusal-record")"
+assert_contains "TC-TOKENBUDGET-084 no-member refusal resets round despite trailer failure" \
+  $'trailer|506 zxkane/autonomous-dev-team failed-non-substantive token-budget-launch-refused\nlog|WARNING: token-budget launch-refusal trailer failed for issue #506\ncomment|506 review-round-counter|issue=506|head=head-506|round=0' \
+  "$early_refusal_record"
 
 echo "== Review member hard-violation routing =="
 run_member_route 10 0
@@ -137,11 +195,14 @@ assert_contains "TC-TOKENBUDGET-065 prior member is evaluated before refusal" \
 assert_not_contains "TC-TOKENBUDGET-065 violation route wins over retry trailer" \
   "token-budget-launch-refused" "$member_record"
 
-run_member_route 0 0 true
+run_member_route 0 0 true 1
 assert_eq "TC-TOKENBUDGET-066 partial refusal remains retryable" 1 "$?"
 member_record="$(cat "$WORK/member-record")"
 assert_contains "TC-TOKENBUDGET-066 partial refusal leaves durable retry class" \
   "failed-non-substantive token-budget-launch-refused" "$member_record"
+assert_contains "TC-TOKENBUDGET-084 partial refusal resets round despite trailer failure" \
+  $'trailer|506 zxkane/autonomous-dev-team failed-non-substantive token-budget-launch-refused\nlog|WARNING: token-budget launch-refusal trailer failed for issue #506\ncomment|506 review-round-counter|issue=506|head=head-506|round=0' \
+  "$member_record"
 
 echo "== Review issue pre-approval routing =="
 run_issue_route 20 0
@@ -151,6 +212,9 @@ assert_contains "TC-TOKENBUDGET-054 unavailable hold posts operator note" \
   "comment|506 Review held" "$issue_record"
 assert_contains "TC-TOKENBUDGET-054 unavailable hold writes durable trailer" \
   "failed-non-substantive token-budget-unavailable" "$issue_record"
+assert_contains "TC-TOKENBUDGET-084 unavailable hold resets review round after trailer" \
+  $'trailer|506 zxkane/autonomous-dev-team failed-non-substantive token-budget-unavailable\ncomment|506 review-round-counter|issue=506|head=head-506|round=0' \
+  "$issue_record"
 assert_contains "TC-TOKENBUDGET-054 unavailable hold requeues review" \
   "transition|506 reviewing pending-review" "$issue_record"
 assert_not_contains "TC-TOKENBUDGET-054 unavailable hold writes no intent" \
@@ -169,6 +233,9 @@ assert_eq "TC-TOKENBUDGET-066 failed trailer and transition refuse approval" 1 "
 issue_record="$(cat "$WORK/issue-record")"
 assert_contains "TC-TOKENBUDGET-066 dual hold persistence failure is loud" \
   "log|ERROR:" "$issue_record"
+assert_contains "TC-TOKENBUDGET-084 round reset remains independent of trailer failure" \
+  "comment|506 review-round-counter|issue=506|head=head-506|round=0" \
+  "$issue_record"
 
 echo "== Dispatcher Step 5 terminal and hold recovery =="
 CLASSIFIER_SNIPPET="$WORK/classifier.sh"
