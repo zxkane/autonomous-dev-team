@@ -322,11 +322,13 @@ RECOVERY_REVIEW_ID="$(accounting_invocation_id recovery-review review member-uui
 accounting_start 506 "$RECOVERY_DEV_ID" dev recovery-dev dev 1
 accounting_commit_usage 506 "$RECOVERY_DEV_ID" 101 - -
 accounting_start 506 "$RECOVERY_REVIEW_ID" review recovery-review member-uuid 1
+# shellcheck disable=SC2218
 accounting_commit_unknown 506 "$RECOVERY_REVIEW_ID" no-usage-in-log
 AGENT_TOKEN_BUDGET=100
 TOKEN_BUDGET_MODE=hard
 assert_eq "TC-TOKENBUDGET-079 historical records without a decision pointer are inert" \
   '[]' "$(token_budget_recovery_pointer_read 506 dev-wrapper)"
+# shellcheck disable=SC2218
 token_budget_recovery_pointer_stage \
   506 "$RECOVERY_DEV_ID" "$RECOVERY_DEV_ID" token-cap dev-wrapper
 recovery_records="$(token_budget_recovery_pointer_read 506 dev-wrapper)"
@@ -334,7 +336,9 @@ assert_eq "TC-TOKENBUDGET-079 durable dev decision pointer derives token-cap rec
   "$RECOVERY_DEV_ID" "$(jq -r '.[0].invocation' <<<"$recovery_records")"
 assert_eq "TC-TOKENBUDGET-079 dev recovery preserves the record side" \
   1 "$(jq 'length' <<<"$recovery_records")"
+# shellcheck disable=SC2218
 token_budget_recovery_pointer_clear 506 dev-wrapper "$RECOVERY_DEV_ID"
+# shellcheck disable=SC2218
 token_budget_recovery_pointer_stage \
   506 "$RECOVERY_REVIEW_ID" "$RECOVERY_REVIEW_ID" usage-unknown review-wrapper
 recovery_records="$(token_budget_recovery_pointer_read 506 review-wrapper)"
@@ -342,6 +346,7 @@ assert_eq "TC-TOKENBUDGET-079 durable review decision pointer derives fail-close
   "$RECOVERY_REVIEW_ID" "$(jq -r '.[0].invocation' <<<"$recovery_records")"
 assert_eq "TC-TOKENBUDGET-079 review recovery preserves the record side" \
   usage-unknown "$(jq -r '.[0].reason' <<<"$recovery_records")"
+# shellcheck disable=SC2218
 token_budget_recovery_pointer_clear 506 review-wrapper "$RECOVERY_REVIEW_ID"
 
 # Pointer mutation must use the same mandatory issue lock as strict accounting.
@@ -349,6 +354,7 @@ token_budget_recovery_pointer_clear 506 review-wrapper "$RECOVERY_REVIEW_ID"
 # assertion injects a newer generation while clear acquires the lock; clear
 # must compare only after that point and leave the newer generation intact.
 POINTER_FILE="$AUTONOMOUS_ACCOUNTING_DIR/506/.token-budget-recovery-dev-wrapper.json"
+# shellcheck disable=SC2218
 token_budget_recovery_pointer_stage \
   506 "$RECOVERY_DEV_ID" "$RECOVERY_DEV_ID" token-cap dev-wrapper
 _REAL_POINTER_RECORD="$(cat "$POINTER_FILE")"
@@ -382,6 +388,7 @@ assert_rc "TC-TOKENBUDGET-082 stale clear refuses a newer locked generation" 1 \
 assert_eq "TC-TOKENBUDGET-082 stale clear preserves the newer generation" \
   "$RECOVERY_DEV_NEW_ID" "$(jq -r .invocation "$POINTER_FILE")"
 source "$ACCOUNTING_LIB"
+# shellcheck disable=SC2218
 token_budget_recovery_pointer_clear 506 dev-wrapper "$RECOVERY_DEV_NEW_ID"
 
 REMOTE_POINTER_CALLS="$WORK/remote-pointer-calls"
@@ -540,6 +547,7 @@ assert_contains "TC-TOKENBUDGET-039 remote recovery uses SSM transport" \
   "remote-recovery|read 506 dev-wrapper" "$(cat "$CALLS")"
 assert_eq "TC-TOKENBUDGET-039 remote recovery never scans controller-local state" \
   "" "$(grep '^local-recovery|' "$CALLS" || true)"
+# shellcheck disable=SC2218
 token_budget_recovery_pointer_clear 506 dev-wrapper "$RECOVERY_DEV_ID"
 assert_contains "TC-TOKENBUDGET-039 remote recovery clear also uses SSM transport" \
   "remote-recovery|clear 506 dev-wrapper ${RECOVERY_DEV_ID}" "$(cat "$CALLS")"

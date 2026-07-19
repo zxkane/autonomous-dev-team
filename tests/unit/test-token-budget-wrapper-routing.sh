@@ -326,6 +326,7 @@ dispatch_set_labels autonomous in-progress
 DISPATCH_FAIL_RESOLVED=1
 token_budget_write_invocation_intent \
   506 retired-after-stall retired-after-stall token-cap dev-wrapper
+# shellcheck disable=SC2218
 terminal_intent_cleanup_transition 506 in-progress in-progress pending-dev
 assert_eq "TC-TOKENBUDGET-079 initial unresolved generation still stalls" \
   '["autonomous","stalled"]' "$(jq -c . "$DISPATCH_LABELS")"
