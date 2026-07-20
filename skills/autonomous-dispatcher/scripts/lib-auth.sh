@@ -541,6 +541,187 @@ rearm_gh_resolution() {
   fi
 }
 
+# [INV-79]/#519 provision_agent_pr_create_file <issue> — provision the broker
+# request file at its DURABLE location and export AGENT_PR_CREATE_FILE.
+#
+# The file must NOT live inside GH_WRAPPER_DIR: that per-run auth dir is
+# documented (INV-111/#402) to vanish mid-cleanup from an external deleter,
+# and a vanished request file made the drain below silently skip a valid,
+# fully-verified PR request — three clean runs then burned the no-PR retry
+# budget to `stalled` (#519). The INV-81 RUN_DIR survives the run (pruned
+# only by RUN_RETENTION_DAYS), so the request rides there; the private
+# mktemp fallback covers a wrapper without run artifacts. Pre-created empty
+# with mode 0600 so the mode never depends on the agent's umask; the drain
+# never deletes it (post-hoc diagnosis of this bug class depends on the
+# artifact surviving the run).
+provision_agent_pr_create_file() {
+  local issue="$1"
+  if [[ -n "${RUN_DIR:-}" && -d "${RUN_DIR}" && -w "${RUN_DIR}" ]]; then
+    AGENT_PR_CREATE_FILE="${RUN_DIR}/agent-pr-create"
+  else
+    # Split declare+assign so the mktemp exit status isn't masked (SC2155). A
+    # mktemp failure is benign — the drain's guard treats a missing file as a
+    # missing request.
+    AGENT_PR_CREATE_FILE="$(mktemp "/tmp/agent-pr-create-${issue}-XXXXXX" 2>/dev/null)" \
+      || AGENT_PR_CREATE_FILE=""
+  fi
+  if [[ -n "$AGENT_PR_CREATE_FILE" ]]; then
+    # Both fail SAFE toward "no request": an unwritable path leaves the file
+    # absent/empty, which the drain's `-s` guard reads as a missing request
+    # (WARN + recovery) — never a wrapper-startup crash.
+    : > "$AGENT_PR_CREATE_FILE" 2>/dev/null || true
+    chmod 600 "$AGENT_PR_CREATE_FILE" 2>/dev/null || true
+  fi
+  export AGENT_PR_CREATE_FILE
+}
+
+# [INV-79]/#519 _pr_broker_create_leaf <issue> <repo> <branch> <title> <body> —
+# the shared create leaf used by the normal brokered path AND the #519
+# recovery fallback (so the two cannot drift). Owns the whole leaf selection:
+#
+#   [INV-87] (#282, W1e-abstracted #400) the `gh pr create` leaf sits behind
+#   chp_create_pr — the verb takes THREE POSITIONALS `<head-branch> <title>
+#   <body>` (#347/#400); the GitHub leaf owns the `--head/--title/--body` flags
+#   internally, emitting argv IDENTICAL to the pre-#400 broker-composed line.
+#   The guard is `chp_has_leaf`, NOT `declare -F chp_create_pr` — the shim is
+#   always defined once lib-code-host is sourced, so the latter would dispatch
+#   to an undefined leaf and abort under set -e on a backend without it (#282
+#   review round 4 [P1]).
+#
+#   [INV-91] (#346) fail-loud when the leaf is absent: the raw `gh pr create`
+#   fallback is retained ONLY under an explicit `CODE_HOST == github` guard
+#   (spec-sanctioned github-gated residue). A non-GitHub backend that omits the
+#   `create_pr` leaf must NOT silently open a GitHub PR — it fails LOUD (#303/B1
+#   + #327 no-silent-fallback) and creates no PR. `${CODE_HOST:-github}` (#327
+#   precedent): an unset CODE_HOST — lib-code-host.sh not sourced because
+#   chp_create_pr was already defined, or unreadable — defaults to `github`,
+#   today's exact behavior. The raw `gh pr create` line stays BYTE-IDENTICAL
+#   (cutover-baseline pinned; the baseline may only shrink) — hence the
+#   _pr_create_ok indirection shape.
+#
+# rc 0 = created; rc 1 = create attempt failed; rc 2 = no usable leaf
+# (already logged loudly).
+_pr_broker_create_leaf() {
+  local issue_number="$1" repo="$2" branch="$3" title="$4" body="$5"
+  if declare -F chp_has_leaf >/dev/null 2>&1 && chp_has_leaf create_pr; then
+    _pr_create_ok() { chp_create_pr "$branch" "$title" "$body" >/dev/null 2>&1; }
+  elif [[ "${CODE_HOST:-github}" == "github" ]]; then
+    _pr_create_ok() { gh pr create --repo "$repo" --head "$branch" --title "$title" --body "$body" >/dev/null 2>&1; }
+  else
+    echo "ERROR: [INV-79]/[INV-91] brokered PR create for issue #${issue_number} (head=${branch}): CODE_HOST='${CODE_HOST:-github}' has no chp_create_pr leaf — refusing to open a GitHub PR on a non-GitHub backend. NO PR created; the success path's no-PR retry will re-queue the issue to pending-dev." >&2
+    unset -f _pr_create_ok 2>/dev/null || true  # fails harmless: fn may be undefined on this arm; leftover defs are per-call overwritten
+    return 2
+  fi
+  local _rc=0
+  _pr_create_ok || _rc=1
+  unset -f _pr_create_ok
+  return "$_rc"
+}
+
+# [INV-79]/#519 _pr_broker_recover <issue> <repo> <title> <pr_list_ok> —
+# single-branch recovery fallback for a LOST broker request. Runs only from
+# drain_agent_pr_create's missing/empty-request branch. Deliberately STRICTER
+# than the normal path (recovery auto-opens a PR nobody reviewed the request
+# for):
+#   - pr_list_ok != 1 (the existence read was UNKNOWN) → never create;
+#     "never duplicate" outranks the normal path's fail-soft existing=0.
+#   - candidate refs must pass the numeric boundary `issue-<N>([^0-9]|$)`
+#     (the raw glob would let issue-12 claim an issue-123 branch; same
+#     boundary needs_open_pr_only applies).
+#   - EXACTLY one candidate, and it must be STRICTLY AHEAD of the resolved
+#     [INV-131] base branch: ancestry REQUIRED (merge-base --is-ancestor) +
+#     rev-list count > 0. No SHA-inequality fallback — a diverged branch
+#     needs a human.
+# The recovery body carries `Closes #<N>` and a FIXED note with no other
+# numeric `#` reference (body #N-mention selectors treat any match as PR
+# existence). Always returns 0 (fail-safe, like the drain itself).
+_pr_broker_recover() {
+  local issue_number="$1" repo="$2" issue_title="$3" pr_list_ok="$4"
+
+  if [[ "$pr_list_ok" != "1" ]]; then
+    echo "WARN: [INV-79]/#519 recovery skipped for issue #${issue_number}: the PR-existence read was UNKNOWN (chp_pr_list failed/unparseable) — never-duplicate outranks recovery. The no-PR retry re-queues to pending-dev." >&2
+    return 0
+  fi
+
+  # Resolve the [INV-131] base branch — exported by the wrapper; fall back to
+  # resolve_base_branch when sourced standalone. No branch resolvable → skip.
+  local base="${BASE_BRANCH:-}"
+  if [[ -z "$base" ]] && declare -F resolve_base_branch >/dev/null 2>&1; then
+    base="$(resolve_base_branch 2>/dev/null)" || base=""
+  fi
+  if [[ -z "$base" ]]; then
+    echo "WARN: [INV-79]/#519 recovery skipped for issue #${issue_number}: no resolvable base branch (BASE_BRANCH unset and resolve_base_branch unavailable)." >&2
+    return 0
+  fi
+
+  # Enumerate boundary-valid pushed candidates as "<sha> <branch>" pairs.
+  local -a cand_shas=() cand_branches=()
+  local _ls_line _sha _ref
+  while IFS= read -r _ls_line; do
+    [[ -n "$_ls_line" ]] || continue
+    _sha="${_ls_line%%$'\t'*}"
+    _ref="${_ls_line##*$'\t'}"
+    _ref="${_ref#refs/heads/}"
+    # Numeric boundary (see the header) — bash-native ERE, no fork per candidate.
+    [[ "$_ref" =~ issue-${issue_number}([^0-9]|$) ]] || continue
+    cand_shas+=("$_sha")
+    cand_branches+=("$_ref")
+  # `|| true`: an ls-remote failure fails SAFE to zero candidates → the
+  # count-≠-1 WARN below skips recovery (never a create from unknown state).
+  done < <(git ls-remote --heads origin "*issue-${issue_number}*" 2>/dev/null || true)
+
+  local count="${#cand_branches[@]}"
+  if [[ "$count" -ne 1 ]]; then
+    echo "WARN: [INV-79]/#519 recovery skipped for issue #${issue_number}: ${count} boundary-valid candidate branch(es) on origin — recovery requires exactly one and never selects among ambiguous branches. The no-PR retry re-queues to pending-dev." >&2
+    return 0
+  fi
+  local branch="${cand_branches[0]}" cand_sha="${cand_shas[0]}"
+
+  # Strictly-ahead check against the CURRENT remote base (a local origin/<base>
+  # ref may be stale, and fetching a head does not refresh it): resolve the
+  # remote base SHA, fetch both refs' objects, then require ancestry + a
+  # non-zero ahead count.
+  local base_sha
+  base_sha=$(git ls-remote origin "refs/heads/${base}" 2>/dev/null \
+    | head -n1 | cut -f1) || base_sha=""
+  if [[ -z "$base_sha" ]]; then
+    echo "WARN: [INV-79]/#519 recovery skipped for issue #${issue_number}: cannot resolve remote base branch '${base}' on origin." >&2
+    return 0
+  fi
+  # `|| true`: a fetch failure fails SAFE — the ancestry check below then
+  # cannot prove ahead-ness and recovery is skipped (never a blind create).
+  git fetch -q origin "refs/heads/${branch}" "refs/heads/${base}" 2>/dev/null || true
+  local ahead=0
+  if git merge-base --is-ancestor "$base_sha" "$cand_sha" 2>/dev/null; then
+    ahead=$(git rev-list --count "${base_sha}..${cand_sha}" 2>/dev/null) || ahead=0
+  fi
+  [[ "$ahead" =~ ^[0-9]+$ ]] || ahead=0
+  if [[ "$ahead" -eq 0 ]]; then
+    echo "WARN: [INV-79]/#519 recovery skipped for issue #${issue_number}: candidate '${branch}' is not strictly ahead of base '${base}' (diverged, equal, or unreadable) — a non-fast-forward candidate needs a human. The no-PR retry re-queues to pending-dev." >&2
+    return 0
+  fi
+
+  # Deterministic fallback title when the wrapper couldn't supply one. No `#`
+  # anywhere outside the body's Closes line.
+  local title="$issue_title"
+  [[ -n "$title" ]] || title="fix: recovered PR for issue ${issue_number} (broker request lost)"
+  local body="Closes #${issue_number}
+
+> Recovery PR opened by the dev wrapper's PR-create broker: the agent's
+> brokered request file was lost after a verified push, and exactly one
+> pushed issue branch is strictly ahead of the base branch. See the INV-79
+> broker-durability amendment in the pipeline invariants doc."
+
+  local _rc=0
+  _pr_broker_create_leaf "$issue_number" "$repo" "$branch" "$title" "$body" || _rc=$?
+  if [[ "$_rc" -eq 0 ]]; then
+    echo "[INV-79]/#519 recovery: wrapper opened the PR for issue #${issue_number} from the unique pushed branch '${branch}' (${ahead} commit(s) ahead of ${base}; the brokered request file was lost)." >&2
+  elif [[ "$_rc" -eq 1 ]]; then
+    echo "WARN: [INV-79]/#519 recovery PR create (head=${branch}) failed — the no-PR retry re-queues to pending-dev." >&2
+  fi
+  return 0
+}
+
 # [INV-79] drain_agent_pr_create — the narrow PR-CREATE broker. `gh pr create`
 # requires pull_requests:write, which the scoped agent token (pull_requests:read)
 # does NOT have — but the agent must still be able to open its PR. So when the
@@ -571,31 +752,64 @@ rearm_gh_resolution() {
 # app-mode-without-scoping / PAT run, or a prior tick did). Returns 0 always; a
 # `gh pr create` failure is logged (the success path's no-PR retry still applies).
 #
-# Args: $1=issue_number, $2=repo. Reads AGENT_GH_TOKEN_FILE / AGENT_PR_CREATE_FILE.
+# Args: $1=issue_number, $2=repo, $3=issue title (optional — the wrapper's
+# already-fetched normalized title, used only by the #519 recovery fallback's
+# synthesized PR; the drain never fetches it itself).
+# Reads AGENT_GH_TOKEN_FILE / AGENT_PR_CREATE_FILE.
 drain_agent_pr_create() {
-  local issue_number="$1" repo="$2"
+  local issue_number="$1" repo="$2" issue_title="${3-}"
   # Only relevant when scoping is active (app mode + scoped mint succeeded).
+  # This unscoped return stays SILENT on purpose (#519 D2): scoping off means
+  # the broker was never in play — the agent ran `gh pr create` itself. The
+  # guard is shared by the normal and SIGTERM cleanup paths, and a vanished
+  # auth DIR leaves this VARIABLE non-empty, so the loud diagnostics below
+  # stay reachable in the INV-111-style incident.
   [[ -n "$AGENT_GH_TOKEN_FILE" ]] || return 0
-  [[ -n "${AGENT_PR_CREATE_FILE:-}" && -s "${AGENT_PR_CREATE_FILE}" ]] || return 0
 
-  # Skip if a PR already exists for this issue (agent created it directly, or a
-  # prior tick did). Same body-#N selector the wrapper's PR_EXISTS uses.
+  # Existence check FIRST (#519 D2 reordering): an existing PR makes a
+  # missing request harmless, so it must return silently BEFORE the
+  # missing-request diagnostics. Same body-#N selector the wrapper's
+  # PR_EXISTS uses.
   # [INV-87]/[INV-91] (W1c1, #397) the body-mention existence read routes
   # through the ABSTRACT `chp_pr_list STATE FIELDS-CSV` contract (spec §3.2 /
   # provider-spec §3.5 COMPLETE-set); body is normalized to a string so the
   # `.body != null` guard is redundant (the #148-class fix). Fail-soft
-  # (`|| existing=0`) — a transient read error routes conservative (assume no
-  # existing PR ⇒ let the broker attempt create; a same-branch `gh pr create`
-  # against an already-open PR errors LOUDLY, still no double-open).
-  local existing _pr_list
-  _pr_list=$(chp_pr_list open "body" 2>/dev/null || true)
-  if [[ -n "$_pr_list" ]]; then
-    existing=$(jq -r "[.[] | select((.body | test(\"#${issue_number}[^0-9]\")) or (.body | test(\"#${issue_number}\$\")))] | length" <<<"$_pr_list" 2>/dev/null || echo "0")
+  # (`|| existing=0`) — a transient read error routes conservative for the
+  # NORMAL request path (assume no existing PR ⇒ let the broker attempt
+  # create; a same-branch `gh pr create` against an already-open PR errors
+  # LOUDLY, still no double-open). The #519 recovery path is the opposite:
+  # it requires a SUCCESSFUL zero-match read (`_pr_list_ok`) — recovery
+  # synthesizes a PR nobody staged a request for, so "never duplicate"
+  # outranks fail-soft there.
+  local existing _pr_list _pr_list_ok=0
+  if _pr_list=$(chp_pr_list open "body" 2>/dev/null) && [[ -n "$_pr_list" ]]; then
+    if existing=$(jq -r "[.[] | select((.body | test(\"#${issue_number}[^0-9]\")) or (.body | test(\"#${issue_number}\$\")))] | length" <<<"$_pr_list" 2>/dev/null); then
+      _pr_list_ok=1
+    else
+      existing=0
+    fi
   else
     existing=0
   fi
-  [[ "$existing" =~ ^[0-9]+$ ]] || existing=0
+  [[ "$existing" =~ ^[0-9]+$ ]] || { existing=0; _pr_list_ok=0; }
   if [[ "$existing" -gt 0 ]]; then
+    return 0
+  fi
+
+  # #519 D2: a scoped run reaching this point with NO usable request is the
+  # silent-loss incident shape — say so loudly (path/existence/size only;
+  # never request content, never credentials), then attempt the D3 recovery.
+  if [[ -z "${AGENT_PR_CREATE_FILE:-}" || ! -s "${AGENT_PR_CREATE_FILE:-}" ]]; then
+    local _diag
+    if [[ -z "${AGENT_PR_CREATE_FILE:-}" ]]; then
+      _diag="path=<unset> exists=no size=unknown"
+    elif [[ ! -e "${AGENT_PR_CREATE_FILE}" ]]; then
+      _diag="path=${AGENT_PR_CREATE_FILE} exists=no size=unknown"
+    else
+      _diag="path=${AGENT_PR_CREATE_FILE} exists=yes size=0"
+    fi
+    echo "WARN: [INV-79]/#519 scoped run reached the PR broker with no usable request (${_diag}) and no PR exists for issue #${issue_number} — the agent's brokered request was never written or was lost. Attempting single-branch recovery." >&2
+    _pr_broker_recover "$issue_number" "$repo" "$issue_title" "$_pr_list_ok"
     return 0
   fi
 
@@ -644,46 +858,21 @@ drain_agent_pr_create() {
   fi
 
   # Explicit head: the wrapper's cwd (PROJECT_DIR) is on the base branch, so a
-  # bare create would infer the wrong head (#234 [P1]).
-  #
-  # [INV-87] (#282, W1e-abstracted #400) the `gh pr create` leaf moves behind
-  # chp_create_pr — the verb now takes THREE POSITIONALS `<head-branch> <title>
-  # <body>` (W1e abstract contract, #347/#400); the GitHub leaf owns the
-  # `--head/--title/--body` flags internally. The emitted gh argv is IDENTICAL to
-  # the pre-#400 broker-composed line — the leaf still emits the same flags, but
-  # they no longer cross the seam. ALL of the INV-79 broker logic above (token
-  # scoping, file parse, head resolution, the no-PR-yet idempotency guard) is
-  # unchanged. `$REPO` is the wrapper's required env (the broker's `$repo` arg
-  # always equals it). The leaf guard is `chp_has_leaf`, NOT `declare -F
-  # chp_create_pr` — the shim is always defined once lib-code-host is sourced, so
-  # that would dispatch to an undefined leaf and abort under set -e on a backend
-  # without it (#282 review round 4 [P1]).
-  #
-  # [INV-91] (#346) fail-loud disposition for the leaf-absent case: the raw
-  # `gh pr create` fallback is retained ONLY under an explicit `CODE_HOST == github`
-  # guard (spec-sanctioned github-gated residue). A non-GitHub backend that omits
-  # the `create_pr` leaf must NOT silently open a GitHub PR — it fails LOUD (the
-  # #303/B1 + #327 no-silent-fallback pattern) and creates no PR. `${CODE_HOST:-github}`
-  # (the #327 precedent): an unset CODE_HOST — lib-code-host.sh not sourced because
-  # chp_create_pr was already defined, or the lib was unreadable — defaults to
-  # `github`, i.e. today's exact behavior; the raw path is retained BYTE-IDENTICAL
-  # (its cutover-baseline signature is unchanged — a spec-sanctioned [INV-91]
-  # residue, NOT the caller's flag-tail).
-  if declare -F chp_has_leaf >/dev/null 2>&1 && chp_has_leaf create_pr; then
-    _pr_create_ok() { chp_create_pr "$branch" "$title" "$body" >/dev/null 2>&1; }
-  elif [[ "${CODE_HOST:-github}" == "github" ]]; then
-    _pr_create_ok() { gh pr create --repo "$repo" --head "$branch" --title "$title" --body "$body" >/dev/null 2>&1; }
-  else
-    echo "ERROR: [INV-79]/[INV-91] brokered PR create for issue #${issue_number} (head=${branch}): CODE_HOST='${CODE_HOST:-github}' has no chp_create_pr leaf — refusing to open a GitHub PR on a non-GitHub backend. NO PR created; the success path's no-PR retry will re-queue the issue to pending-dev." >&2
-    unset -f _pr_create_ok 2>/dev/null || true
-    return 0
-  fi
-  if _pr_create_ok; then
+  # bare create would infer the wrong head (#234 [P1]). ALL of the INV-79 broker
+  # logic above (token scoping, file parse, head resolution, the no-PR-yet
+  # idempotency guard) is unchanged; `$REPO` is the wrapper's required env (the
+  # broker's `$repo` arg always equals it). The [INV-87]/[INV-91] leaf selection
+  # (chp_create_pr / github-gated raw-gh / fail-loud) lives in the shared
+  # _pr_broker_create_leaf so this normal path and the #519 recovery fallback
+  # cannot drift. #519 D3: a failed normal create does NOT trigger recovery (no
+  # second create after a create attempt).
+  local _create_rc=0
+  _pr_broker_create_leaf "$issue_number" "$repo" "$branch" "$title" "$body" || _create_rc=$?
+  if [[ "$_create_rc" -eq 0 ]]; then
     echo "[INV-79] wrapper brokered the PR create for issue #${issue_number} (head=${branch}, agent wrote ${AGENT_PR_CREATE_FILE})." >&2
-  else
+  elif [[ "$_create_rc" -eq 1 ]]; then
     echo "WARN: [INV-79] brokered PR create (head=${branch}) failed — the success path's no-PR retry will re-queue the issue to pending-dev." >&2
   fi
-  unset -f _pr_create_ok
   return 0
 }
 

@@ -263,6 +263,8 @@ jobs:
             tests/unit/test-token-budget-wrapper-routing.sh \
             tests/unit/test-token-budget-e2e.sh \
             tests/e2e/run-token-budget-gates-e2e.sh \
+            tests/unit/test-pr-broker-durability.sh \
+            tests/e2e/run-pr-broker-durability-e2e.sh \
             skills/autonomous-dispatcher/scripts/metrics-report.sh \
             skills/autonomous-dispatcher/scripts/lib-run-artifacts.sh \
             skills/autonomous-dispatcher/scripts/status.sh \

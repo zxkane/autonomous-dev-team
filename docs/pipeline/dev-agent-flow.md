@@ -182,9 +182,17 @@ explicit head is load-bearing: the wrapper runs from `PROJECT_DIR` (checked out 
 the BASE branch), so a bare `gh pr create` would infer head=base and fail — the
 broker takes the agent's `branch:` line, else derives the pushed `*issue-<N>*`
 branch from origin (the [INV-45] glob), and skips with a WARN if neither yields a
-branch (#234 review). In PAT
+branch (#234 review). The request file itself is DURABLE (#519): provisioned by
+`provision_agent_pr_create_file` at `${RUN_DIR}/agent-pr-create` (mode `0600`,
+never inside the vanish-prone `GH_WRAPPER_DIR` — [INV-111]/#402), and a scoped
+run reaching the drain with a lost/empty request WARNs loudly and attempts the
+strict single-branch recovery (unique boundary-valid `issue-<N>` branch,
+strictly ahead of `${BASE_BRANCH}`, successful zero-match existence read) —
+see the [INV-79](invariants.md#inv-79-in-app-mode-the-agent-process-gets-only-a-scoped-token-the-wrapper-keeps-full-write-and-is-the-sole-approvemergepr-create-path)
+#519 amendment. The wrapper passes the issue title as the drain's 3rd argument
+for the recovery PR's synthesized title. In PAT
 mode / app-mode-mint-failure the prefix is empty (no scrub) — byte-identical to
-pre-INV-79. See [INV-79](invariants.md#inv-79-in-app-mode-the-agent-process-gets-only-a-scoped-token-the-wrapper-keeps-full-write-and-is-the-sole-approvemergepr-create-path).
+pre-INV-79.
 
 ### Structured blocked-403 marker ([INV-85], #511)
 
