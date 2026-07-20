@@ -478,11 +478,12 @@ else
 fi
 # [review P2-1] Scoped to the ADMISSION-DECISION code only (never a claim
 # about adt-gc.sh's own, separately-INV-117-governed, reclaim-step side
-# effects — under ADT_GC_ENFORCE=1 that SEPARATE component can kill
-# registry-dead-lane residue, authorized by ITS OWN decision table, not
-# by this gate; see the honest-contract-scope comment in dispatch-local.sh
-# itself). This grep-pin proves the gate's OWN code never issues a kill/
-# pkill/signal to reach its defer-vs-proceed verdict.
+# effects — P8's Linux enforcement candidate remains blocked from production
+# rollout on #384's soak gate; if enforcement is explicitly active, that
+# SEPARATE component can kill registry-dead-lane residue, authorized by ITS
+# OWN decision table, not by this gate; see the honest-contract-scope comment
+# in dispatch-local.sh itself). This grep-pin proves the gate's OWN code never
+# issues a kill/pkill/signal to reach its defer-vs-proceed verdict.
 GATE_CODE=$(grep -v '^\s*#' <<<"$GATE_BLOCK")
 if grep -qE '\bkill\b|\bpkill\b|SIGTERM|SIGKILL' <<<"$GATE_CODE"; then
   assert_fail "TC-LGC6-060: gate's OWN admission-decision code contains a kill/pkill/signal reference (should be pure admission control)"

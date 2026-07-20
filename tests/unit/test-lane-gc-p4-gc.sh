@@ -202,6 +202,7 @@ bash -c '
   lane_set "$LANE_DIR" STATE reaping
   # A real, alive "guardian" for this test.
   sleep 30 & disown
+  lane_set "$LANE_DIR" GUARDIAN_IDENTITY "$(proc_identity "$!")"
   lane_set "$LANE_DIR" GUARDIAN_PID "$!"
 '
 run_gc_dry "$ST2" >/dev/null
@@ -224,6 +225,7 @@ bash -c '
   lane_set "$LANE_DIR" WRAPPER_PID 999999
   lane_set "$LANE_DIR" STATE reaping
   sleep 30 & disown
+  lane_set "$LANE_DIR" GUARDIAN_IDENTITY "$(proc_identity "$!")"
   lane_set "$LANE_DIR" GUARDIAN_PID "$!"
   touch -d "@$(( $(date +%s) - 301 ))" "$LANE_DIR/lane"
 '
@@ -373,6 +375,7 @@ bash -c '
   LANE_DIR=$(lane_install p1 "$LANE_ID")
   lane_set "$LANE_DIR" WRAPPER_PID 999999
   lane_set "$LANE_DIR" STATE clean-exit
+  lane_set "$LANE_DIR" GUARDIAN_IDENTITY "$(proc_identity "'"$GUARDIAN13_PID"'")"
   lane_set "$LANE_DIR" GUARDIAN_PID "'"$GUARDIAN13_PID"'"
   touch -d "@$(( $(date +%s) - 90000 ))" "$LANE_DIR/lane" 2>/dev/null || true
 '
@@ -1361,6 +1364,7 @@ echo "=== TC-LGC4-100..105: install-gc-timer.sh ==="
 # ===========================================================================
 TIMERBIN=$(mktemp -d)
 CRONSTORE=$(mktemp)
+TIMERHOME=$(mktemp -d)
 cat > "$TIMERBIN/crontab" <<'EOF'
 #!/bin/bash
 STORE="${CRONTAB_STUB_STORE:?}"
@@ -1376,20 +1380,20 @@ EOF
 chmod +x "$TIMERBIN/crontab"
 echo "unrelated-existing-line" > "$CRONSTORE"
 
-PATH="$TIMERBIN:$PATH" CRONTAB_STUB_STORE="$CRONSTORE" ADT_STATE_ROOT="$(mktemp -d)" bash "$INSTALL_GC_TIMER" >/dev/null 2>&1
+PATH="$TIMERBIN:$PATH" CRONTAB_STUB_STORE="$CRONSTORE" HOME="$TIMERHOME" ADT_STATE_ROOT="$(mktemp -d)" bash "$INSTALL_GC_TIMER" >/dev/null 2>&1
 MARKER_COUNT_1=$(grep -c 'adt-gc-timer' "$CRONSTORE")
 assert_eq "TC-LGC4-100: fresh install adds exactly one marked line" "1" "$MARKER_COUNT_1"
 assert_contains "TC-LGC4-100b: unrelated existing crontab content preserved" "unrelated-existing-line" "$(cat "$CRONSTORE")"
 
-PATH="$TIMERBIN:$PATH" CRONTAB_STUB_STORE="$CRONSTORE" ADT_STATE_ROOT="$(mktemp -d)" bash "$INSTALL_GC_TIMER" >/dev/null 2>&1
+PATH="$TIMERBIN:$PATH" CRONTAB_STUB_STORE="$CRONSTORE" HOME="$TIMERHOME" ADT_STATE_ROOT="$(mktemp -d)" bash "$INSTALL_GC_TIMER" >/dev/null 2>&1
 MARKER_COUNT_2=$(grep -c 'adt-gc-timer' "$CRONSTORE")
 assert_eq "TC-LGC4-101: re-run stays idempotent (still exactly one marked line)" "1" "$MARKER_COUNT_2"
 
-PATH="$TIMERBIN:$PATH" CRONTAB_STUB_STORE="$CRONSTORE" bash "$INSTALL_GC_TIMER" --uninstall >/dev/null 2>&1
+PATH="$TIMERBIN:$PATH" CRONTAB_STUB_STORE="$CRONSTORE" HOME="$TIMERHOME" bash "$INSTALL_GC_TIMER" --uninstall >/dev/null 2>&1
 MARKER_COUNT_3=$(grep -c 'adt-gc-timer' "$CRONSTORE" || true)
 assert_eq "TC-LGC4-102: --uninstall removes the marked line" "0" "$MARKER_COUNT_3"
 assert_contains "TC-LGC4-102b: unrelated content still preserved after uninstall" "unrelated-existing-line" "$(cat "$CRONSTORE")"
-rm -rf "$TIMERBIN" "$CRONSTORE"
+rm -rf "$TIMERBIN" "$CRONSTORE" "$TIMERHOME"
 
 # macOS branch — stubbed launchctl + isolated HOME.
 LAUNCHDBIN=$(mktemp -d)
@@ -1552,7 +1556,7 @@ export "_GC_ENV_UNREADABLE_OVERRIDE_${PID201}=1"
 run_gc_dry_full "$ST201" >/dev/null
 unset "_GC_PROC_AGE_OVERRIDE_${PID201}" "_GC_ENV_UNREADABLE_OVERRIDE_${PID201}"
 CATLOG201=$(cat "$ST201/adt-gc.log" 2>/dev/null || true)
-assert_not_contains "TC-LGC4-201a (P1-2): env-unknowable candidate is never would-killed, even with every other rule-2.1 condition satisfied" "would-kill" "$CATLOG201"
+assert_not_contains "TC-LGC4-201a (P1-2): env-unknowable candidate is never would-killed, even with every other rule-2.1 condition satisfied" "would-kill rule=2 pid=$PID201 " "$CATLOG201"
 assert_contains "TC-LGC4-201b (P1-2): env-unknowable skip is logged with its own reason (fail-toward-leak, not a silent drop)" "reason=env-unknowable-fail-toward-leak" "$CATLOG201"
 kill -9 -- "-$PID201" 2>/dev/null || true
 rm -rf "$ST201"
@@ -1683,6 +1687,9 @@ if [[ -n "$PID206" ]] && [[ "$(bash -c 'source "'"$LIB_LANE"'"; proc_ppid "'"$PI
   unset "_GC_PROC_AGE_OVERRIDE_${PID206}"
   CATLOG206=$(cat "$ST206/adt-gc.log" 2>/dev/null || true)
   assert_not_contains "TC-LGC4-206 (P1-4): rule 3.2 skips a candidate whose profile dir has a LIVE sharer" "pid=$PID206" "$CATLOG206"
+  for child in $(pgrep -P "$SHARER206_PID" 2>/dev/null || true); do
+    kill -9 "$child" 2>/dev/null || true
+  done
   kill -9 "$SHARER206_PID" 2>/dev/null || true
   kill -9 -- "-$PID206" 2>/dev/null || true
   kill -9 "$PID206" 2>/dev/null || true
@@ -1759,6 +1766,7 @@ rm -f "$SLOWGC_209"
 # substring containment.
 TIMERBIN210=$(mktemp -d)
 CRONSTORE210=$(mktemp)
+TIMERHOME210=$(mktemp -d)
 cat > "$TIMERBIN210/crontab" <<'EOF'
 #!/bin/bash
 STORE="${CRONTAB_STUB_STORE:?}"
@@ -1774,15 +1782,15 @@ EOF
 chmod +x "$TIMERBIN210/crontab"
 DECOY_LINE_210="# note to self: do not remove the line matching adt-gc-timer (autonomous-dev-team Lane-GC series, do not edit — managed by install-gc-timer.sh) by hand"
 echo "$DECOY_LINE_210" > "$CRONSTORE210"
-PATH="$TIMERBIN210:$PATH" CRONTAB_STUB_STORE="$CRONSTORE210" ADT_STATE_ROOT="$(mktemp -d)" bash "$INSTALL_GC_TIMER" >/dev/null 2>&1
+PATH="$TIMERBIN210:$PATH" CRONTAB_STUB_STORE="$CRONSTORE210" HOME="$TIMERHOME210" ADT_STATE_ROOT="$(mktemp -d)" bash "$INSTALL_GC_TIMER" >/dev/null 2>&1
 assert_contains "TC-LGC4-210a (P2-3): a decoy line mentioning the marker text mid-line survives install" "$DECOY_LINE_210" "$(cat "$CRONSTORE210")"
 MARKER_COUNT_210=$(grep -c 'adt-gc-timer' "$CRONSTORE210")
 assert_eq "TC-LGC4-210b (P2-3): install still adds exactly one REAL managed line alongside the surviving decoy" "2" "$MARKER_COUNT_210"
-PATH="$TIMERBIN210:$PATH" CRONTAB_STUB_STORE="$CRONSTORE210" bash "$INSTALL_GC_TIMER" --uninstall >/dev/null 2>&1
+PATH="$TIMERBIN210:$PATH" CRONTAB_STUB_STORE="$CRONSTORE210" HOME="$TIMERHOME210" bash "$INSTALL_GC_TIMER" --uninstall >/dev/null 2>&1
 assert_contains "TC-LGC4-210c (P2-3): the decoy line ALSO survives --uninstall" "$DECOY_LINE_210" "$(cat "$CRONSTORE210")"
 MARKER_COUNT_210B=$(grep -c 'adt-gc-timer' "$CRONSTORE210")
 assert_eq "TC-LGC4-210d (P2-3): --uninstall removes only the REAL managed line, leaving just the decoy's mention" "1" "$MARKER_COUNT_210B"
-rm -rf "$TIMERBIN210" "$CRONSTORE210"
+rm -rf "$TIMERBIN210" "$CRONSTORE210" "$TIMERHOME210"
 
 # TC-LGC4-211 (P2-4 proof): a path containing '%' is rejected (fail loud),
 # both for adt-gc.sh's own resolved path (via ADT_STATE_ROOT — the
@@ -1800,6 +1808,7 @@ rm -rf "$BADROOT_211" 2>/dev/null || true
 # quotes both the adt-gc.sh path and the logfile path.
 TIMERBIN212=$(mktemp -d)
 CRONSTORE212=$(mktemp)
+TIMERHOME212=$(mktemp -d)
 cp "$TIMERBIN210/crontab" "$TIMERBIN212/crontab" 2>/dev/null || cat > "$TIMERBIN212/crontab" <<'EOF'
 #!/bin/bash
 STORE="${CRONTAB_STUB_STORE:?}"
@@ -1813,11 +1822,11 @@ fi
 exit 1
 EOF
 chmod +x "$TIMERBIN212/crontab"
-PATH="$TIMERBIN212:$PATH" CRONTAB_STUB_STORE="$CRONSTORE212" ADT_STATE_ROOT="$(mktemp -d)" bash "$INSTALL_GC_TIMER" >/dev/null 2>&1
+PATH="$TIMERBIN212:$PATH" CRONTAB_STUB_STORE="$CRONSTORE212" HOME="$TIMERHOME212" ADT_STATE_ROOT="$(mktemp -d)" bash "$INSTALL_GC_TIMER" >/dev/null 2>&1
 INSTALLED_LINE_212=$(grep 'adt-gc-timer' "$CRONSTORE212" | head -1)
 assert_contains "TC-LGC4-212a (P2-4): installed cron entry single-quotes the adt-gc.sh path" "bash '${ADT_GC}'" "$INSTALLED_LINE_212"
 assert_contains "TC-LGC4-212b (P2-4): installed cron entry single-quotes the logfile redirect target" ">> '" "$INSTALLED_LINE_212"
-rm -rf "$TIMERBIN212" "$CRONSTORE212"
+rm -rf "$TIMERBIN212" "$CRONSTORE212" "$TIMERHOME212"
 
 # TC-LGC4-213 (P2-5 proof): grep-pin — the `_gc_rotate_log` call site
 # appears AFTER the singleton lock's `exec 9>`/`flock` acquisition, never
