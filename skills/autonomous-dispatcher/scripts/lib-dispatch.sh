@@ -139,6 +139,24 @@ if ! declare -F pid_dir_for_project >/dev/null 2>&1; then
   unset _ld_self _ld_dir
 fi
 
+# Lane-registry marker readers use the same host pointer as wrapper-side
+# lib-lane.sh. dispatcher-tick.sh does not otherwise source lib-lane.sh, and
+# standalone tests source this library directly, so initialize the lightweight
+# resolver here.
+if ! declare -F adt_resolve_state_root >/dev/null 2>&1; then
+  _ld_self="${BASH_SOURCE[0]:-$0}"
+  _ld_dir="$(cd "$(dirname "$(readlink -f "$_ld_self")")" && pwd 2>/dev/null)" || _ld_dir=""
+  if [ -n "$_ld_dir" ] && [ -r "${_ld_dir}/lib-state-root.sh" ]; then
+    # shellcheck source=lib-state-root.sh
+    source "${_ld_dir}/lib-state-root.sh"
+  fi
+  unset _ld_self _ld_dir
+fi
+if declare -F adt_resolve_state_root >/dev/null 2>&1; then
+  ADT_STATE_ROOT="$(adt_resolve_state_root)"
+  export ADT_STATE_ROOT
+fi
+
 # ---------------------------------------------------------------------------
 # Concurrency
 # ---------------------------------------------------------------------------

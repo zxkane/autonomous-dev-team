@@ -35,8 +35,9 @@ so this PR claims the slot after that:
    `lane_install()` now calls `_lane_backend()` once at mint and records
    `BACKEND`/`UNIT` instead of the PR-2-era hardcoded `BACKEND=pgid`/
    `UNIT=-` lines; `lane_spawn()` gains a backend-dispatching branch (scope
-   vs. plain `setsid`); `lane_kill()` calls `_lane_scope_kill()` before its
-   existing pgid escalation, unconditionally, every time.
+   vs. plain `setsid`); best-effort `lane_kill()` calls `_lane_scope_kill()`
+   before its existing pgid escalation. P8's delayed-GC strict policy is the
+   explicit exception and refuses scope pending #522.
 2. **`skills/autonomous-dispatcher/scripts/lib-guardian.sh`**: `do_reap()`
    gains the identical `_lane_scope_kill()` call, in the identical position
    (before the pgid escalation), for the identical reason.
@@ -44,10 +45,9 @@ so this PR claims the slot after that:
    user-bus-socket reachability check (independent of the existing linger
    check — a linger=yes host can still have no reachable bus) and a
    `backend_eligibility=<systemd-scope|pgid>` summary line that runs the
-   real probe live. **No GC decision-table code changes** — rule 1.3's
-   existing `lane_kill "$lane_dir" 10` call inherits the scope fast path
-   automatically, because the dispatch lives inside `lane_kill` itself, not
-   inside the caller.
+   real probe live. P7 originally required no GC decision-table change; P8's
+   later identity hardening now calls `lane_kill ... require-identity`, whose
+   scope refusal is the rollout backstop pending #522.
 4. **`skills/autonomous-dispatcher/scripts/autonomous.conf.example`**: two
    new knobs, `LANE_TASKS_MAX` (default 512) and `LANE_MEMORY_MAX` (unset
    default), documented with the same "only takes effect when eligible"
@@ -66,8 +66,7 @@ deleted or reordered; every existing PR-2..PR-5 unit test that greps for
 pgid-branch behavior stayed green unmodified (verified — see Test Results
 below).
 
-## Empirical findings (this PR's own dev/CI box: Ubuntu 24.04, systemd 249,
-kernel 6.8, Linger=no)
+## Empirical findings (Ubuntu 24.04, systemd 249, kernel 6.8)
 
 These are the load-bearing facts the design's own §4-C1/§4-C7 pseudocode
 assumes but does not itself prove; each was independently verified against
@@ -113,11 +112,15 @@ the real host before being relied on in code or tests.
    `run-*.scope` unit behind after it exits successfully; the design's own
    probe snippet (§4-C1) is safe to call repeatedly (e.g. once per
    `--doctor` invocation) without unit accumulation.
-8. **This host's actual eligibility is exactly what the design predicted**:
-   `loginctl show-user -p Linger --value` returns empty/`no`, so
-   `_lane_backend()` correctly and silently returns `pgid` with a WARN —
-   this is the REAL (non-shimmed) refusal-path test in the suite below, not
-   a simulated one.
+8. **The original real-host linger premise was incomplete.** The no-user
+   command used by P7, `loginctl show-user -p Linger --value`, returns an
+   empty value with rc 0 on this host, so `_lane_backend()` falls back to
+   `pgid` with a WARN. The authoritative explicit-user command,
+   `loginctl show-user "$USER" -p Linger --value`, reports `yes`. Real-host
+   refusal tests must therefore query an explicit user and skip when that
+   value is `yes`; the deterministic `Linger=no` refusal remains covered by
+   the PATH-shim case. Correcting the production probe is coupled to full
+   scope enrollment in #522 rather than landed alone in P8.
 
 ## Review-round-1 fixes (post-empirical-findings, before merge)
 
@@ -157,9 +160,9 @@ defects, all fixed in this same PR (no follow-up needed):
    to manufacture eligibility the real host doesn't have.
 3. **`_lane_unit_name` didn't sanitize or bound `PROJECT_ID`, and
    `lane_spawn`'s scope branch had no fallback when `systemd-run` itself
-   failed to register.** Empirically verified on this box: `@` inside a
-   unit name makes `systemd-run --unit` fail outright with "Invalid
-   argument" (registration failure, not a payload failure), and unit names
+   failed to register.** An earlier systemd version on this box rejected
+   `@` inside a unit name with "Invalid argument" (registration failure,
+   not a payload failure), while later versions accept it; unit names
    are capped at 255 bytes total INCLUDING the `.scope` suffix systemd
    appends (probed the exact boundary live: 249 raw chars => 255 total =>
    accepted; 250 => 256 => rejected). Worse: on a registration failure, the
@@ -175,9 +178,9 @@ defects, all fixed in this same PR (no follow-up needed):
    payload itself fails or writes noisy stderr) from a genuine PAYLOAD
    failure; only the former triggers a real pgid-spawn retry, so the payload
    is guaranteed to run at least once regardless of which backend actually
-   executes it. Proven with a genuine "would-have-failed" test
-   (TC-LGC7-023/024) that spawns via a deliberately invalid unit name and
-   asserts a marker file was created by the fallback-executed payload, plus
+   executes it. Proven with a deterministic registration-failure shim
+   (TC-LGC7-023/024) that exits before payload exec and asserts a marker
+   file was created by the fallback-executed payload, plus
    a companion test (TC-LGC7-025) proving a genuine payload failure does
    NOT trigger a spurious retry/double-run.
 
@@ -212,35 +215,51 @@ job) — not a one-line probe. Because:
   fully sufficient alone (i.e. an E2E job proving the scope path is a nice
   extra, not a completeness gate on this PR), and
 - the design's own §11 ("macOS ACs decision") already establishes the
-  precedent that a feasibility-gated AC may be **deferred to a follow-up PR
-  that must land before the series' final enforcement flip (PR-8)** rather
-  than blocking the PR that introduces the feature,
+  precedent that a feasibility-gated AC may be deferred without making the
+  optional backend load-bearing,
 
 this PR follows that exact precedent: the scope backend ships fully
 implemented and unit-tested (including one REAL, non-shimmed
 spawn-and-cgroup-kill test on THIS PR's own dev/CI box, which — unlike a
 GitHub-hosted runner — already has systemd + a live user bus by default),
 and a CI E2E job that actually exercises `systemd-run --user --scope` under
-the hosted runner's bootstrapped linger is deferred to a follow-up PR that
-must land before PR-8's dry-run→kill enforcement flip. That follow-up would
-add the `sudo loginctl enable-linger` + `XDG_RUNTIME_DIR` export bootstrap
-as its own CI step and is out of scope here.
+the hosted runner's bootstrapped linger is deferred to a follow-up. That
+follow-up would add the `sudo loginctl enable-linger` + `XDG_RUNTIME_DIR`
+export bootstrap as its own CI step and is out of scope here.
 
 This is a narrower deferral than PR-4's macOS-runner deferral (that one
 covers an entire platform's AC set; this one covers exactly one job on one
-already-supported platform), but the shape of the decision — and the
-requirement that it land before PR-8 — is identical.
+already-supported platform).
+
+**P8 rollout correction:** the #384 audit found a broader integration gap
+than this PR's `lane_spawn` tests cover. The production agent chokepoint is
+`lib-agent.sh::_run_with_timeout`, which still starts the main agent under a
+plain `setsid`; it does not call `lane_spawn`. Consequently a wrapper can
+record `BACKEND=systemd-scope` without proving that its main agent subtree
+entered that scope. P8 does not enable linger or claim full-wrapper scope
+coverage: the production host is already `Linger=yes`, while P7's no-user
+probe returns empty and therefore selects `pgid`. That accidental fallback
+does not prove a safe scope rollout. P8 prepares the portable-backend
+enforcement implementation, but production authorization still depends on
+#384's open soak gate. A follow-up must correct the probe with an explicit
+username, wire `_run_with_timeout` through the selected backend, and pass the
+full-wrapper SIGKILL/guardian `cgroup.procs` E2E described in
+`docs/designs/lane-gc-p8-enforcement.md`. This replaces the earlier "before
+P8" scheduling promise with a stricter "before scope enablement" rollout gate
+rather than pretending the missing E2E passed. P8 enforces the gate in code:
+`lane_kill ... require-identity` returns 3 before any scope or PGID signal
+when `BACKEND=systemd-scope`.
 
 ## Test coverage shape (design §9 PR-7's own AC list, mapped to TC-LGC7-\*)
 
 | Design AC | Test | Class |
 |---|---|---|
-| linger=no host refuses scope, `BACKEND=pgid` recorded, wrapper spawns fine | TC-LGC7-001..003 | REAL (this host) |
+| linger=no host refuses scope, `BACKEND=pgid` recorded, wrapper spawns fine | TC-LGC7-001..003, TC-LGC7-011 | REAL when host qualifies; deterministic PATH-shim otherwise |
 | probe-failure host falls back to pgid, `BACKEND=pgid` recorded | TC-LGC7-010..013 | PATH-shim (per-prerequisite isolation) |
 | unit-name collision (two lanes, same second) resolved via rand4 | TC-LGC7-020 | REAL (string assertion, no real collision needed) |
 | TasksMax visible in `systemctl --user show` | TC-LGC7-030..031 | PATH-shim argv capture |
-| setsid-escaping child inside a scope is reaped by `lane_kill` | TC-LGC7-040 | REAL (this host, override seam) |
-| mixed fleet: scope-lane + pgid-lane reaped by the same GC pass | TC-LGC7-050 | REAL |
+| setsid-escaping child launched through `lane_spawn` inside a scope is reaped by `lane_kill` | TC-LGC7-040 | REAL scope primitive; not a full-wrapper agent E2E |
+| mixed fleet: scope-lane + pgid-lane reaped by best-effort `lane_kill` (strict GC scope refusal added by P8) | TC-LGC7-050; TC-LGC8-018 | REAL |
 | guardian `do_reap` scope-branch ordering + argv | TC-LGC7-060..061 | grep-pin + PATH-shim |
 | lane file records BACKEND/UNIT correctly (both branches) | TC-LGC7-070..071 | REAL |
 | pgid-backend lanes fully unaffected by this PR (regression pin) | TC-LGC7-080 | REAL roundtrip |
@@ -258,11 +277,9 @@ specifies — `--unit`, `-p TasksMax=`, `--collect`, `-- setsid` ordering;
 It cannot and does not prove real cgroup/kernel semantics — that a
 `setsid`-escaping process genuinely stays visible in `cgroup.procs`, that
 `cgroup.kill` is genuinely atomic across fork races. Those claims are proven
-instead by this PR's own REAL (non-shimmed) scope-spawn-and-kill test
-(TC-LGC7-040), which runs directly against this host's real systemd/kernel
-using the `ADT_LANE_BACKEND_OVERRIDE` test-only seam to force scope
-selection without needing to mutate the host's actual linger setting (which
-needs root and is a durable host-wide change, not something a test suite
-should touch). A host where even `systemd-run`/`loginctl`/`systemctl` are
-entirely absent from `PATH` skips TC-LGC7-040 with an explicit
-`SKIP (reason: ...)` line rather than faking a pass.
+instead by this PR's own REAL (non-shimmed) `lane_spawn` scope primitive test
+(TC-LGC7-040), which runs directly against a real systemd/kernel where the
+host qualifies. It does not prove that `_run_with_timeout` enrolls a wrapper's
+main agent, and P8 does not use it as such proof. A host where the real scope
+primitive cannot run skips TC-LGC7-040 with an explicit `SKIP (reason: ...)`
+line rather than faking a pass.

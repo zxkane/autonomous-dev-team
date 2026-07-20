@@ -95,6 +95,41 @@ Per-task command shapes (passed through both backends identically):
 | Review task | `dispatch review ISSUE_NUM` |
 | Resume dev task | `dispatch dev-resume ISSUE_NUM SESSION_ID` |
 
+## Lane GC Enforcement
+
+`adt-gc.sh` periodically reclaims residue from dead lanes under INV-117's
+registry-driven safety predicate. The P8 implementation candidate makes Linux
+`--kill` the built-in mode, but production merge and rollout remain blocked on
+issue #384's at-least-two-week clean-soak gate. Do not install this candidate
+on a production host before that gate is closed. Inspect the effective mode and
+host prerequisites:
+
+```bash
+bash "$PROJECT_DIR/scripts/adt-gc.sh" --doctor
+```
+
+For an immediate box-wide rollback shared by the periodic timer and every
+project's opportunistic `--quick` invocation:
+
+```bash
+source "$PROJECT_DIR/scripts/lib-lane.sh"
+mkdir -p "$ADT_STATE_ROOT"
+printf 'ADT_GC_ENFORCE=0\n' > "$ADT_STATE_ROOT/adt-gc.conf"
+```
+
+Remove the file to restore the installed version's built-in default. A present
+rollback file vetoes `ADT_GC_ENFORCE=1` from the environment; explicit
+`--dry-run`/`--kill` overrides both without inspecting them. Precedence is CLI
+mode > persistent config veto > environment > built-in. Selected invalid values
+warn and fail toward dry-run. The config is parsed as data and must contain
+exactly one rollback assignment plus optional blank lines or comments.
+When `ADT_STATE_ROOT` is unset, `lib-lane.sh` resolves the mode-600 host
+pointer at `$HOME/.local/state/adt-state-root`, written atomically by
+`install-gc-timer.sh`; this keeps the rollback on the same custom root used by
+the timer and opportunistic collectors. The same `lib-state-root.sh` resolver
+is used by local dispatcher marker reads and embedded into remote SSM liveness
+checks.
+
 ## What the dispatcher MUST NOT do
 
 The dispatcher is a label-and-spawn coordinator, not a code-changer:

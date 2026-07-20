@@ -37,8 +37,11 @@ GitLab-transport invariant → re-claimed INV-117). This PR's own rebase onto
    the guardian-install block right after `lane_install` succeeds —
    `mkfifo` → `exec {ADT_GUARD_FD}<>` (write end, opened first) → `setsid`
    prereq check → guardian spawn (closing its own inherited fd copy) →
-   `lane_set GUARDIAN_PID`. The `cleanup()` handshake replaces the
-   feature-guarded no-op [INV-115] reserved for it.
+   `lane_set GUARDIAN_IDENTITY` → `lane_set GUARDIAN_PID`. The identity-first
+   publication order means concurrent delayed GC sees either the initial
+   `GUARDIAN_PID=-` or the complete pair, never a new PID with stale identity.
+   The `cleanup()` handshake replaces the feature-guarded no-op [INV-115]
+   reserved for it.
 3. **FD-hygiene closes** at every long-lived background spawn site this
    series already ships: `lib-agent.sh`'s `_run_with_timeout` (the agent CLI
    spawn) and heartbeat loop, both TERM-trap escalator sites, `lib-auth.sh`'s
@@ -51,6 +54,47 @@ GitLab-transport invariant → re-claimed INV-117). This PR's own rebase onto
 
 `adt-gc.sh` (P4, already merged), the back-pressure gate (P6), and the
 systemd-scope backend (P7) are separate PRs — not touched here.
+
+## P8 identity hardening applied to the P5 contract
+
+P8 widens each lane registry's sidecars to include `pgids.lock` and changes
+`pgids` records from the original three fields to:
+
+```
+<pgid> <role> <epoch> <identity>
+```
+
+`lane_record_pgid` serializes complete-line appends on `pgids.lock`. Identity
+is compact and whitespace-free: Linux records the kernel boot UUID plus
+`/proc/<pid>/stat` start ticks as
+`v2-linux:<boot-id>:<start-ticks>`; BSD/macOS records
+`v1-bsd:<spawn-time-ppid>:<sha256(comm+spawn-time-ppid+lstart)>`. The same
+primitive captures the guardian's identity immediately after spawn, before
+the wrapper publishes its PID.
+
+This additional identity is an authorization requirement for **delayed GC**,
+not for the P5 guardian's immediate ownership path. Before signaling a live
+recorded PGID leader or `GUARDIAN_PID`, delayed GC recomputes and compares the
+identity. Only the boot-bound Linux v2 form is durable signaling authority;
+pre-boot-ID `v1-linux` and BSD v1 identities remain diagnostic-only. A live
+legacy three-field PGID, a live `GUARDIAN_PID` without
+`GUARDIAN_IDENTITY`, `-`, malformed data, or an unreadable current identity
+is unverifiable and fails toward leak. A proven guardian mismatch is also
+never signaled, but it proves PID reuse, so stale metadata may be removed; an
+unverifiable guardian preserves both process and metadata.
+
+Strict delayed GC must own the lane's `reap.lock`; missing or contended lock
+state is a refusal, never permission to proceed. While holding that lock it
+takes `pgids.lock`, creates `pgids.closed`, and snapshots the complete live
+PGID set. Later `lane_record_pgid` calls observe the marker under the same lock
+and decline the append, so no process group can register behind the strict
+snapshot.
+
+The wrapper's immediate cleanup and the guardian's EOF-triggered `do_reap`
+continue to read the PGID field and reap best-effort. They intentionally
+remain compatible with pre-P8 lane records because they act while ownership
+is immediate; only the later periodic collector requires durable identity
+proof.
 
 ## The ordering-bug fix (found empirically, not merely a design residual)
 

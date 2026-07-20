@@ -284,6 +284,7 @@ jobs:
             skills/autonomous-dispatcher/scripts/adt-gc.sh \
             skills/autonomous-dispatcher/scripts/install-gc-timer.sh \
             skills/autonomous-dispatcher/scripts/lib-lane.sh \
+            skills/autonomous-dispatcher/scripts/lib-state-root.sh \
             tests/e2e/run-lane-gc-p5-guardian-e2e.sh \
             skills/autonomous-dispatcher/scripts/lib-guardian.sh \
             skills/autonomous-dispatcher/scripts/liveness-check-remote-aws-ssm.sh \
