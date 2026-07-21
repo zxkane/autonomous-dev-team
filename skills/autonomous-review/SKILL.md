@@ -260,6 +260,11 @@ Summary of the hard rule:
 
 Post the review result as a comment on the **issue** (NOT the PR), **only** via the deterministic helper `bash scripts/post-verdict.sh <issue> <pass|fail> <body-file> <agent-name> <session-id> [<model>]` — do NOT use a bare `gh issue comment` for the verdict ([INV-56](../../docs/pipeline/invariants.md)). The helper guarantees the "Review PASSED" / "Review findings:" first line the wrapper polls for and appends the `Review Session: \`<id>\`` + `Review Agent: <name>` trailer itself, so you never hand-write it. When the optional 6th `<model>` arg is supplied the helper folds it into the agent line as `Review Agent: <name> (model: <model>)` so the verdict comment records which model produced it ([INV-60](../../docs/pipeline/invariants.md)). Pass a body **file** (not an argv string) so a multi-line findings body with backticks/quotes can't be mangled; the wrapper supplies `<id>`, `<name>`, and `<model>` in your prompt — pass them exactly. **Your only output is the verdict comment** — the wrapper performs the GitHub-native PR action (see below).
 
+For Claude review members, the wrapper also checks at startup that at least one
+unattended verdict-reporting path is configured. See [Claude unattended
+verdict-path startup warning](../../docs/pipeline/review-agent-flow.md#claude-unattended-verdict-path-startup-warning)
+for the `#524` failure signature, remediation, and suppression contract.
+
 ### Who submits the GitHub-native PR action (INV-52)
 
 > **The review WRAPPER — not you — owns the GitHub-native PR review/merge action.** You post a verdict **comment** (via `post-verdict.sh`); the wrapper reads it and acts.

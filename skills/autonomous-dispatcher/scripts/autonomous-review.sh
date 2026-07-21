@@ -192,6 +192,12 @@ source "${LIB_DIR}/lib-review-artifact.sh"
 # per-run directories and deterministic helper scripts, plus the session-bound
 # stream-json final-text fallback. Inert for dev launches and non-Claude members.
 source "${LIB_DIR}/lib-review-claude.sh"
+# shellcheck source=lib-review-permmode.sh
+# Review-startup guard for Claude fleets that have no wrapper-provided
+# unattended verdict-reporting path. The decision/fingerprint helpers are pure;
+# config resolution and issue-comment I/O remain in this wrapper because the
+# effective fleet exists only after the AGENT_REVIEW_CMD rebind below.
+source "${LIB_DIR}/lib-review-permmode.sh"
 # shellcheck source=lib-review-classify.sh
 # INV-92 (#298): per-finding actionability classification — the deterministic
 # protected-paths matcher + token-scope probe + the aggregate dev-actionability
@@ -1070,6 +1076,71 @@ cleanup() {
   cleanup_github_auth
 }
 trap cleanup EXIT
+
+# BEGIN REVIEW PERMISSION-MODE WARNING
+# This check belongs here, not in lib-config.sh: AGENT_CMD has been rebound to
+# AGENT_REVIEW_CMD and REVIEW_AGENTS_LIST is the effective verdict fleet. It is
+# intentionally warning-only because settings files and launcher overlays can
+# grant the complete reporting sequence through surfaces this wrapper cannot
+# inspect. CONF_PERMMODE_WARN=false skips predicate evaluation and all comment
+# reads/writes. It runs after the cleanup trap is installed because marker
+# deduplication performs provider I/O.
+if [[ "${CONF_PERMMODE_WARN:-true}" != "false" ]]; then
+  _permmode_claude_extra_args="$(_resolve_review_agent_extra_args "claude")"
+  _permmode_decision="$(_review_permmode_warning_decision \
+    "${AGENT_PERMISSION_MODE:-auto}" \
+    "$_permmode_claude_extra_args" \
+    "${REVIEW_CLAUDE_PERMISSION_INJECTION:-true}" \
+    "${REVIEW_FINAL_TEXT_VERDICT_FALLBACK:-true}" \
+    "${REVIEW_AGENTS_LIST[@]}")"
+  if [[ "$_permmode_decision" == "warn" ]]; then
+    _permmode_fingerprint="$(_review_permmode_warning_fingerprint \
+      "${AGENT_PERMISSION_MODE:-auto}" \
+      "${REVIEW_CLAUDE_PERMISSION_INJECTION:-true}" \
+      "${REVIEW_FINAL_TEXT_VERDICT_FALLBACK:-true}" \
+      "${REVIEW_AGENTS_LIST[@]}")"
+    _permmode_marker="$(_review_permmode_warning_marker "$_permmode_fingerprint")"
+    _permmode_fleet="$(IFS=,; printf '%s' "${REVIEW_AGENTS_LIST[*]}")"
+    _permmode_warning="WARNING: Review fleet '${_permmode_fleet}' includes Claude with AGENT_PERMISSION_MODE='${AGENT_PERMISSION_MODE:-auto}' but has no wrapper-provided unattended verdict-reporting path. This is the #524 silent-loop class (reviewing -> pending-dev -> pending-review). Remediation: for auto enable REVIEW_CLAUDE_PERMISSION_INJECTION=true, enable REVIEW_FINAL_TEXT_VERDICT_FALLBACK=true for any non-plan mode, or move off plan; use bypassPermissions only in a trusted sandbox. If a settings file or AGENT_REVIEW_LAUNCHER_* overlay already grants the complete reporting sequence, set CONF_PERMMODE_WARN=false to suppress this warning."
+    log "$_permmode_warning"
+    _permmode_footer=""
+    if declare -F run_footer >/dev/null 2>&1; then
+      if ! _permmode_footer="$(run_footer)"; then
+        _permmode_footer=""
+      fi
+    fi
+
+    _permmode_comment=$(cat <<COMMENT
+## Review configuration warning (#524 class)
+
+${_permmode_warning}
+
+Resolved configuration: mode=\`${AGENT_PERMISSION_MODE:-auto}\`, fleet=\`${_permmode_fleet}\`, permission injection=\`${REVIEW_CLAUDE_PERMISSION_INJECTION:-true}\`, final-text fallback=\`${REVIEW_FINAL_TEXT_VERDICT_FALLBACK:-true}\`.
+
+Operator-provided \`--allowedTools\` values are not treated as an escape hatch because static grants cannot prove access to the complete per-run verdict-body, artifact, and helper sequence.
+
+Deduplication note: safe runs intentionally post no marker, so unsafe -> safe -> the same unsafe fingerprint is indistinguishable from a repeated unsafe run and will not post a second warning.
+
+${_permmode_marker}${_permmode_footer}
+COMMENT
+)
+    if ! _permmode_comments="$(ITP_REQUIRE_SELF_AUTHOR=1 \
+        itp_list_comments "$ISSUE_NUMBER" 2>/dev/null)"; then
+      log "WARNING: Could not read issue comments to deduplicate permission-mode warning fingerprint ${_permmode_fingerprint}; skipped the issue comment to avoid duplicate warning spam."
+    elif _review_permmode_warning_seen \
+        "$_permmode_comments" "$_permmode_fingerprint"; then
+      log "Permission-mode warning comment already exists for fingerprint ${_permmode_fingerprint}; no new issue comment posted."
+    else
+      _permmode_seen_rc=$?
+      if [[ "$_permmode_seen_rc" -eq 2 ]]; then
+        log "WARNING: Issue comments were not a normalized array while deduplicating permission-mode warning fingerprint ${_permmode_fingerprint}; skipped the issue comment to avoid duplicate warning spam."
+      elif ! itp_post_comment "$ISSUE_NUMBER" "$_permmode_comment" >/dev/null 2>&1; then
+        log "WARNING: Failed to post permission-mode warning comment for fingerprint ${_permmode_fingerprint}; review startup continues."
+      fi
+    fi
+  fi
+fi
+# END REVIEW PERMISSION-MODE WARNING
 
 # ---------------------------------------------------------------------------
 # Find PR linked to this issue
