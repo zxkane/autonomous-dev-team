@@ -245,6 +245,11 @@ AGENT_PERMISSION_MODE="auto"
 # Independently disable either review-lane compatibility path if required.
 REVIEW_CLAUDE_PERMISSION_INJECTION="true"
 REVIEW_FINAL_TEXT_VERDICT_FALLBACK="true"
+# Warn at review-wrapper startup when the resolved Claude review fleet has no
+# wrapper-provided unattended verdict-reporting path. Set false only when a
+# settings file or AGENT_REVIEW_LAUNCHER_* overlay already grants the complete
+# per-run reporting sequence and the operator accepts responsibility for it.
+CONF_PERMMODE_WARN="true"
 
 # Wall-clock cap for each agent invocation (run_agent / resume_agent).
 # Accepts coreutils `timeout` units: s, m, h, d. Default 4h.

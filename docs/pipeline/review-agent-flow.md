@@ -4,6 +4,45 @@ The review-agent wrapper is `skills/autonomous-dispatcher/scripts/autonomous-rev
 
 The wrapper is the **producer** for two of the five [handoffs](handoffs.md) (review → approved/merged, review → pending-dev) and the **consumer** for one (dispatcher → review).
 
+## Claude unattended verdict-path startup warning
+
+After rebinding `AGENT_REVIEW_CMD` and constructing the effective
+`REVIEW_AGENTS_LIST`, the review wrapper checks whether a resolved Claude
+member has a wrapper-provided unattended verdict-reporting path. This check
+cannot run during `lib-config.sh` loading because raw `AGENT_CMD` does not
+describe the effective review fleet.
+
+The wrapper logs a warning and posts one issue comment when all of these are
+true:
+
+- the resolved fleet contains `claude`;
+- `AGENT_PERMISSION_MODE` is not `bypassPermissions`;
+- final-text fallback is disabled; and
+- auto-only permission injection is either disabled or the mode is not `auto`.
+
+`plan` always warns, regardless of either reporting knob, because it cannot
+execute the verdict sequence. Operator-provided `--allowedTools` extra args do
+not suppress the warning: static grants cannot prove the complete sequence can
+write both random per-run directories and invoke `post-verdict.sh`.
+
+This configuration has the #524 signature: review agents can exit cleanly
+without a verdict, producing a quiet `reviewing -> pending-dev ->
+pending-review` loop. Remediate by enabling
+`REVIEW_CLAUDE_PERMISSION_INJECTION=true` under `auto`, enabling
+`REVIEW_FINAL_TEXT_VERDICT_FALLBACK=true` under a non-`plan` mode, or moving off
+`plan`. `bypassPermissions` is appropriate only in a trusted sandbox.
+
+Operators whose settings file or `AGENT_REVIEW_LAUNCHER_*` overlay already
+grants the complete reporting sequence can set `CONF_PERMMODE_WARN=false`.
+That setting disables predicate evaluation and all warning comment reads and
+writes.
+
+Issue-comment deduplication uses a marker containing a hash of mode, ordered
+resolved fleet, injection state, and fallback state. The same unsafe
+fingerprint posts once; a different unsafe fingerprint posts a new comment.
+Safe runs intentionally post no marker, so unsafe -> safe -> the same unsafe
+fingerprint is indistinguishable from a repeat and does not re-warn.
+
 > **Code-Host Provider seam ([INV-87](invariants.md#inv-87-provider-dispatch-is-spec-defined--callers-route-every-issuecode-host-op-through-itp_chp_-never-a-raw-gh-in-the-caller-layer), #282).** The wrapper's PR-lifecycle leaves now route through the CHP verbs ([`provider-spec.md`](provider-spec.md) §3.2): the mergeable poll is `chp_mergeable` (returns the raw token; the [INV-44]/[INV-54] `_classify_mergeable_gate`/`_pr_open_gate` classifiers in `lib-review-mergeable.sh` are **byte-unchanged** caller-side and consume it), `--approve` is `chp_approve`, `--request-changes` (in `submit_request_changes`) is `chp_request_changes` (gated by the `rest_request_changes` cap §4.2), `gh pr merge` is `chp_merge`, and CI status (`ci_is_green`) is `chp_ci_status`. The PR↔issue resolution (`resolve_pr_for_issue`/`verify_pr_closes_issue`) routes through `chp_find_pr_for_issue` — under W1c1 (#397) an ABSTRACT positional contract `chp_find_pr_for_issue ISSUE FIELDS-CSV → normalized JSON candidate array` driven by `gh api graphql` cursor pagination (§3.2.1/§3.5); no gh flags cross the seam, and the [INV-86] two-tier close-linkage + branch-name resolution is pure jq over the normalized array in `lib-pr-linkage.sh`. **The PR-lifecycle leaves are byte-identical leaf-only moves; the W1c1 linkage-read leaf is a deliberate SHAPE change with decision-level parity** (see W1a/W1c1 amendments in [INV-87]): the [INV-52]/[INV-79] wrapper-owns-approve/merge ownership, the INV-44/INV-54 gate decision logic, and the UNKNOWN-retry loop all stay caller-side. (The diagram's `gh pr review`/`gh pr merge` arrows are these verbs' GitHub leaves.)
 >
 > **Issue-Tracker Provider seam ([INV-87](invariants.md#inv-87-provider-dispatch-is-spec-defined--callers-route-every-issuecode-host-op-through-itp_chp_-never-a-raw-gh-in-the-caller-layer)/[INV-90](invariants.md#inv-90-the-normalized-issue-comment-shape-is-id-author-body-createdat-sorted-ascending-by-createdat-with-author-a-machine-handle-for-exact-equality), #321).** The verdict-comment READ in the per-agent poll loop — `_fetch_agent_verdict_body` (`lib-review-poll.sh`), the **verdict-authenticity choke-point** — now routes through `itp_list_comments` (the normalized array), NOT a raw `gh issue view --json comments -q`. The [INV-20] (actor + window) and [INV-40] (per-agent `Review Agent:` discriminator) binding stays caller-side, BUT moving the verdict-keyword `select` from gh's Go-**RE2** (ASCII-only case fold) to system jq's **Oniguruma** (Unicode fold) is a real engine boundary, so the keyword match is rewritten to preserve RE2 parity + fail-CLOSED: `ascii_downcase | test("<lowercased _VERDICT_RE>")` with the `"i"` flag dropped (Oniguruma `"i"` would widen the literal ASCII keywords to also match U+212A `K` / U+017F `ſ` at the authenticity gate); the shell-side lowercase is `LC_ALL=C tr` not bash `${,,}` (Turkish-locale dotless-`ı` on the `I` in "Review FAILED"); a `// empty` so a no-match yields EMPTY not the literal `"null"`; and an `[[ -z "$_vre_lc" ]] && return 0` so an empty `_VERDICT_RE` fails CLOSED instead of `test("")` matching every body. The three case-SENSITIVE predicates (`Review Session` / `Review Session.*<sid>` / `Review Agent: <name>`) are byte-unchanged (RE2 ≡ Oniguruma — no `"i"`/boundary). A caller-side `sort_by(.createdAt // "", .id // 0) | last` makes a same-second verdict tie resolve deterministically on the monotone REST comment id. The seam is self-sourced LAZILY in-function (the wrapper sources `lib-review-poll.sh` before `lib-issue-provider.sh`, so a top-level guard would change production source order). Behavior-equivalent for every matrix case — proven by `tests/unit/test-final2-marker-scanners.sh`.
