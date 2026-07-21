@@ -61,11 +61,11 @@ a label-write site without the matching transitions.json entry fails CI"* hold.
 
 | ID | Scenario | Expected |
 |---|---|---|
-| TC-SPEC-GATE-030 | Every label literal written by the four pipeline files (`label_swap` args + `--add/--remove-label` literals) appears as a `state` or in an `actions[]` of `transitions.json` | checker exit 0 (C.1) |
+| TC-SPEC-GATE-030 | Every label literal written by the six pipeline files (`label_swap` and direct `itp_transition_state` args plus `--add/--remove-label` literals) appears as a `state` or in an `actions[]` of `transitions.json` | checker exit 0 (C.1) |
 | TC-SPEC-GATE-031 | Simulate a new `label_swap "$n" "" "frobnicate"` write site in a scratch copy (brand-new label) with no matching transition | checker exit ≠ 0 with an actionable message naming `frobnicate` (C.1) |
 | TC-SPEC-GATE-032 | All 8 pipeline labels (`autonomous`, `in-progress`, `pending-review`, `reviewing`, `pending-dev`, `approved`, `no-auto-close`, `stalled`) appear in transitions.json as a state or action | present |
 | TC-SPEC-GATE-033 | A `gh issue edit … --add-label "splitlabel"` whose label literal sits on a *continuation* physical line (logical-line join, M2) is still scanned | checker exit ≠ 0 naming `splitlabel` |
-| TC-SPEC-GATE-034 | The two legitimate variable-valued writes (`label_swap` helper, `hygiene_strip_residual_labels` loop) are recognized as ALLOWLISTED | checker emits `allowlisted variable label write …` for both; real repo still passes (the P1.1 ban fires only on NON-allowlisted writes — see TC-045) |
+| TC-SPEC-GATE-034 | No variable-valued label write remains in the six pipeline files after `label_swap` and `hygiene_strip_residual_labels` delegated to `itp_transition_state` | `variable_write_allowlist.sites` is empty; checker emits neither allowlist INFO nor P1.1 failure; real repo passes |
 | TC-SPEC-GATE-035 | Simulate a new `label_swap "$n" "approved" "stalled"` write site reusing EXISTING labels but in an undeclared `(remove→add)` combination | checker exit ≠ 0 naming the `approved → stalled` movement (C.2) — passes C.1 vocabulary, fails C.2 movement |
 | TC-SPEC-GATE-036 | Every label movement in the committed code maps to a declared transition (real repo) | checker prints `all N label-write movements map to declared transitions` (C.2) |
 | TC-SPEC-GATE-037 | **Delete** the `dispatch-pending-dev-pr-exists` transition row (its `pending-dev→pending-review` movement is shared with `dispatch-review-aware-reroute-review`), regenerate the diagram, rerun | checker exit ≠ 0 naming the orphaned `dispatch-pending-dev-pr-exists` `spec-codesite-map.json` entry (C.3) — **the second reviewer-reproduced [P1]**: C.2 stays green (shared movement), C.3 catches the removed write site |

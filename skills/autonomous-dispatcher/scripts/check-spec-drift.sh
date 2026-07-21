@@ -18,9 +18,10 @@
 #      mapped anchor (function name OR greppable predicate) must still resolve
 #      in its cited file. A token with no mapping, or a mapped anchor that no
 #      longer resolves, fails LOUD naming the pair.
-#   C. Label-write-SITE completeness — FIVE sub-checks over the five pipeline
-#      files (label_swap args + --add-label/--remove-label literals), PLUS a hard
-#      ban on un-allowlisted variable-valued writes (P1.1):
+#   C. Label-write-SITE completeness — FIVE sub-checks over the six pipeline
+#      files (label_swap/direct itp_transition_state args plus
+#      --add-label/--remove-label literals), PLUS a hard ban on un-allowlisted
+#      variable-valued writes (P1.1):
 #        C.1 vocabulary — every label literal WRITTEN must appear in
 #            transitions.json as a state label or inside an actions[]
 #            (add-label:X / remove-label:X). A brand-new label (e.g. a typo) with
@@ -106,8 +107,8 @@ for f in "$TRANSITIONS" "$GUARD_MAP" "$CODESITE_MAP"; do
   [ -f "$f" ] || { echo "check-spec-drift.sh: not found: $f" >&2; exit 3; }
 done
 
-# The four pipeline files whose label writes must be declared.
-PIPELINE_FILES=(autonomous-dev.sh autonomous-review.sh dispatcher-tick.sh lib-dispatch.sh lib-terminal-control.sh)
+# The six pipeline files whose label writes must be declared.
+PIPELINE_FILES=(autonomous-dev.sh autonomous-review.sh dispatcher-tick.sh lib-dispatch.sh lib-review-unavailable-cap.sh lib-terminal-control.sh)
 
 FAILED=0
 fail() { echo "::error::$*" >&2; FAILED=1; }
@@ -254,14 +255,16 @@ is_declared() {
 }
 
 # Collect every label literal WRITTEN by the pipeline files, with its site.
-# Two literal write forms (the gate enforces these against the table):
+# Three literal write forms (the gate enforces these against the table):
 #   1. label_swap "$issue_num" "<remove>" "<add>"   (positional label literals)
 #   2. gh issue edit ... --add-label "X" / --remove-label "X"
+#   3. itp_transition_state "$issue_num" "<remove>" "<add>"
 # Emits "<label>\t<file>:<lineno>" lines. Variable-valued writes (e.g.
-# --add-label "$var", or the hygiene loop's dynamic args[]) cannot be resolved
-# to a literal here; they are handled separately by check_variable_writes, which
-# (under P1.1) FAILS any such write unless its enclosing function is allowlisted —
-# so the gap is never silent.
+# --add-label "$var") cannot be resolved to a literal here; they are handled
+# separately by check_variable_writes, which under P1.1 FAILS any such raw flag
+# unless its enclosing function is allowlisted. Variable itp_transition_state
+# operands are intentionally skipped because their literal callers or hard-coded
+# source set are validated separately.
 #
 # ONE awk pass per file (no per-line pipe fan-out): physical lines are joined
 # across trailing `\` continuations first, so a `gh issue edit \` whose
@@ -338,11 +341,10 @@ collect_writes() {
 # P1.1 — variable-valued label writes (`--add-label "$var"` / `--remove-label $x`)
 # are a hard FAIL, NOT a NOTE. A variable write can introduce an undeclared label
 # the literal-site checks (C.1–C.5) never see, so leaving it as a green "audit
-# this" pointer left the AC unmet. The ONLY legitimate variable writes are the two
-# allowlisted sites in spec-codesite-map.json.variable_write_allowlist (the
-# label_swap helper definition, whose $remove/$add come from validated literal
-# callers; and the hygiene_strip_residual_labels loop over a hard-coded declared
-# label list). A variable write whose enclosing function is NOT allowlisted (for
+# this" pointer left the AC unmet. The allowlist is currently empty: label_swap
+# and hygiene_strip_residual_labels delegate to itp_transition_state and no
+# longer contain variable-valued --add/--remove-label writes. Any future
+# variable write whose enclosing function is not explicitly allowlisted (for
 # its file) fails LOUD naming the site.
 #
 # Enclosing-function attribution: awk tracks brace DEPTH so `fn` is the function a
@@ -363,18 +365,15 @@ collect_writes() {
 # single-quoted `--add-label 'frobnicate'` (TC-054) are scanned too — every write
 # style is covered, none can bypass the gate.
 # Accepted scanner boundaries (NOT statically detectable without a real
-# bash parser, and none present in the five PIPELINE_FILES today):
+# bash parser, and none present in the six PIPELINE_FILES today):
 #   1. a flag whose text is itself held in a variable
 #      (`f=--add-label; gh issue edit "$n" $f "$lbl"`); and
-#   2. an UNBALANCED brace inside a string literal *inside an allowlisted
-#      function* — the line-by-line brace counter would keep that function's
-#      depth elevated past its real close and mis-attribute a LATER write to it.
-#      Stripping strings before counting was tried and REGRESSED real attribution
-#      (the files are brace-balanced file-wide only WITH their string braces; see
-#      the braces() note). This is latent: no allowlisted fn carries an unbalanced
-#      string brace today, and TC-034 pins that the real allowlisted writes stay
-#      correctly attributed. A robust fix needs a bash-aware tokenizer (out of
-#      scope for this CI-checker; the gated runtime reconciler would supersede it).
+#   2. an UNBALANCED brace inside a string literal in a future allowlisted
+#      function — the line-by-line brace counter could keep that function's
+#      depth elevated past its real close and mis-attribute a later write to it.
+#      The allowlist is currently empty, and TC-034 pins that no variable label
+#      writes survive in the scanned files. A robust future exception would need
+#      a bash-aware tokenizer (out of scope for this CI checker).
 check_variable_writes() {
   local f path fn lineno text allowlisted norm a
   # Precompute the allowlisted bare function names per file (exact-match set).
@@ -408,17 +407,14 @@ check_variable_writes() {
     done < <(awk '
       # Net brace delta on a line (crude but adequate for these brace-balanced,
       # well-indented bash files): +1 per "{", -1 per "}". NOTE: string/comment
-      # braces are counted raw. The four pipeline files are brace-balanced FILE-WIDE
+      # braces are counted raw. The six pipeline files are brace-balanced FILE-WIDE
       # *including* their ~100 brace-in-string lines (JSON jq patterns etc.), so the
       # running depth returns to 0 at each top-level boundary and function entry
-      # (depth == 0) fires correctly — verified by TC-034 (real label_swap/hygiene
-      # writes are attributed + allowlisted). Stripping strings was TRIED and
-      # REGRESSED this: the per-region string braces are NOT individually balanced,
-      # so blanking them drove depth negative at label_swap() and mis-attributed its
-      # legitimate writes to <top-level>. The brace-in-string fail-open the pr-review
-      # flagged is therefore LATENT only (no allowlisted fn carries an unbalanced
-      # string-brace today); TC-034 pins that the real allowlisted writes stay
-      # correctly attributed even though the file is full of brace-in-string lines.
+      # (depth == 0) fires correctly. TC-034 verifies the current repository has
+      # no variable label writes and an empty allowlist. Stripping strings was
+      # tried and regressed attribution because the per-region string braces are
+      # not individually balanced; any future allowlist exception must account
+      # for that parser bound explicitly.
       function braces(line,   n, i, c) { n = 0; for (i = 1; i <= length(line); i++) { c = substr(line, i, 1); if (c == "{") n++; else if (c == "}") n-- } return n }
       # Strip a trailing backslash-continuation so the join reads as one logical line.
       function decont(line) { sub(/\\[[:space:]]*$/, "", line); return line }
@@ -489,7 +485,7 @@ declared_movements() {
 
 # Collect the MOVEMENT signature of every literal label-write SITE, one record
 # per logical write site: "<sorted-removes-csv>|<sorted-adds-csv>\t<file>:<lineno>".
-# Two write forms, same as collect_writes:
+# Three write forms, same as collect_writes:
 #   1. label_swap "$issue_num" "<remove>" "<add>"  → operands 2 (remove) and 3
 #      (add); either may be "" (add-only / remove-only). Operand 1 ("$issue_num")
 #      is skipped by position — that is why this matches ALL quoted tokens
@@ -497,6 +493,8 @@ declared_movements() {
 #      variable operand. An empty operand contributes nothing to its side.
 #   2. gh issue edit … --remove-label "A" [--remove-label "B"] --add-label "C"
 #      on one logical line → removes={A,B}, adds={C}.
+#   3. itp_transition_state "$issue_num" "<remove>" "<add>" uses the same
+#      positional grammar as label_swap; variable operands are skipped.
 # Comment lines are skipped (a prose "→ label_swap → in-progress" in a doc-block
 # is not a write site). Continuation lines are joined first (M2), so a multi-flag
 # edit split across physical lines is read as one movement. The label sets are

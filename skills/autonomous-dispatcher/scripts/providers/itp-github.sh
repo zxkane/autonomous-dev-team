@@ -30,7 +30,7 @@
 #   itp_github_edit_comment        itp_github_mark_checkbox         [itp-writes]
 #   itp_github_provision_states                                     [itp-writes]
 #   itp_github_resolve_dep         itp_github_begin_tick            [#284 DEP]
-#   itp_github_label_event_ts                                       [#323 OBSERVE]
+#   itp_github_label_event_ts                     [#323 OBSERVE / #525 CONTROL]
 # (itp_caps reads the .caps manifest in the dispatcher, not a function here.)
 
 # TRANSPORT-LIB SELF-SOURCE: `gh_version_ok` (the `--slurp` capability check
@@ -619,17 +619,19 @@ itp_github_resolve_dep() {
 }
 
 # ===========================================================================
-# OBSERVE-ONLY METRICS leaf (#323, [INV-93]). The TTHW label-time read behind the
-# itp_label_event_ts verb. Best-effort / non-blocking: any failure returns empty
-# and the metrics aggregator falls back to the dispatch-instant event `ts`
-# (pre-#228 behavior) — it NEVER blocks dispatch. See the verb↔current-function
-# mapping appendix in docs/pipeline/provider-spec.md.
+# Label-event timestamp leaf. Its original two-argument mode remains the
+# observe-only TTHW metrics read from #323 / INV-93: any failure returns empty
+# and the aggregator falls back to the dispatch-instant `ts`. The optional
+# latest-removed mode is a fail-soft INV-144 re-arm observation: empty means no
+# removal cutoff, never an I/O abort. See docs/pipeline/provider-spec.md.
 # ===========================================================================
 
-# itp_github_label_event_ts ISSUE LABEL — first-`labeled`-event timestamp leaf.
+# itp_github_label_event_ts ISSUE LABEL [MODE] — label-event timestamp leaf.
 #
 # Spec §3.1 [m]: echo the ISO-8601 UTC `created_at` of the FIRST `labeled` event
 # for LABEL visible in the GitHub issue timeline, or empty if none / on failure.
+# Optional MODE=`latest-removed` instead returns the latest `unlabeled` event;
+# omitting MODE preserves the original first-labeled query byte-for-byte.
 # The `event` / `.label.name` / `.created_at` fields are GitHub-internal REST
 # timeline vocabulary with NO provider-neutral shape, so the leaf owns the query
 # and returns a neutral SCALAR (a timestamp string) — the documented #281
@@ -650,17 +652,39 @@ itp_github_resolve_dep() {
 # For LABEL=autonomous, `lbl_json` is exactly `"autonomous"` → the spliced program
 # is argv-equivalent to the inline selector dispatcher-tick.sh emitted pre-#323.
 #
-# BEST-EFFORT / no pagination (byte-identical to the pre-#323 read): the single
-# `gh api …/timeline` call carries NO `--paginate`, so a label event beyond the
-# default page returns empty (aggregator falls back to `ts`). The preserved
-# `2>/dev/null || true` swallows a malformed/non-array gh response (`map()` errors)
-# → empty, identical to the prior caller-side read.
+# BEST-EFFORT / no pagination in the default mode (byte-identical to the
+# pre-#323 read): the single `gh api …/timeline` call carries NO `--paginate`,
+# so a label event beyond the default page returns empty (aggregator falls back
+# to `ts`). The preserved `2>/dev/null || true` swallows a malformed/non-array
+# gh response (`map()` errors) → empty, identical to the prior caller-side read.
+# The latest-removed mode paginates because an older operator re-arm must remain
+# observable; transport or parse failure still degrades to empty.
 itp_github_label_event_ts() {
-  local issue="$1" label="$2" lbl_json
+  local issue="$1" label="$2" mode="${3:-first-added}" lbl_json removed_events
   # Pre-encode LABEL to a JSON string literal (injection-safe). On any jq error
   # here (should not happen for a normal label), fail soft → empty.
   lbl_json="$(jq -rn --arg lbl "$label" '$lbl | @json')" || { echo ""; return 0; }
-  gh api "repos/${REPO}/issues/${issue}/timeline" \
-    --jq "map(select(.event == \"labeled\" and .label.name == ${lbl_json})) | (.[0].created_at // empty)" \
-    2>/dev/null || true
+  case "$mode" in
+    first-added)
+      gh api "repos/${REPO}/issues/${issue}/timeline" \
+        --jq "map(select(.event == \"labeled\" and .label.name == ${lbl_json})) | (.[0].created_at // empty)" \
+        2>/dev/null || true
+      ;;
+    latest-removed)
+      removed_events=$(gh api \
+        "repos/${REPO}/issues/${issue}/timeline?per_page=100" --paginate \
+        --jq ".[] | select(.event == \"unlabeled\" and .label.name == ${lbl_json}) | .created_at" \
+        2>/dev/null) || {
+          printf ''
+          return 0
+        }
+      if [[ -n "$removed_events" ]]; then
+        printf '%s\n' "$removed_events" | LC_ALL=C sort | tail -n 1
+      fi
+      return 0
+      ;;
+    *)
+      printf ''
+      ;;
+  esac
 }

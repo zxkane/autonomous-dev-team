@@ -16,6 +16,7 @@ exact `--jq` program). The leaf is sourced from `providers/itp-github.sh`.
 |----|----------|-------|----------|
 | TC-LABELTS-001 | (a) one labeled event for LABEL | timeline with 1 `labeled`/`autonomous` event | its `created_at` |
 | TC-LABELTS-002 | (b) multiple labeled events for LABEL | 2 `labeled`/`autonomous` events | the FIRST (`.[0].created_at`) |
+| TC-LABELTS-002b/c/d | `MODE=latest-removed` | multiple or zero `unlabeled`/`stalled` events | latest timestamp with `--paginate`; no match is rc 0 + empty |
 | TC-LABELTS-003 | (c) labeled events for a DIFFERENT label | only `labeled`/`bug` | empty |
 | TC-LABELTS-004 | (d) no labeled event at all | timeline with no `labeled` | empty |
 | TC-LABELTS-005 | (e) `gh` non-zero exit | stub exits 1 | empty (fail-soft, `\|\| true`) |
@@ -30,6 +31,7 @@ exact `--jq` program). The leaf is sourced from `providers/itp-github.sh`.
 | ID | Scenario | Expected |
 |----|----------|----------|
 | TC-LABELTS-020 | `itp_label_event_ts` routes to `itp_github_label_event_ts` under default `ISSUE_PROVIDER` | issue + label forwarded verbatim |
+| TC-LABELTS-020b | optional `latest-removed` mode | third argument forwarded verbatim |
 | TC-LABELTS-021 | shim source-shape is the bare `itp_${ISSUE_PROVIDER}_label_event_ts "$@"` (matches the 13 existing shims) | present in `lib-issue-provider.sh` |
 
 ## Caller wiring + leaf-absent / guard

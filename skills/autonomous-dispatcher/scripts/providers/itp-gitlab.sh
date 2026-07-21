@@ -37,7 +37,7 @@
 #   itp_gitlab_edit_comment        itp_gitlab_mark_checkbox         [itp-writes]
 #   itp_gitlab_provision_states                                     [itp-writes]
 #   itp_gitlab_resolve_dep         itp_gitlab_begin_tick            [DEP]
-#   itp_gitlab_label_event_ts                                       [OBSERVE]
+#   itp_gitlab_label_event_ts                         [OBSERVE / CONTROL]
 # (itp_caps reads the .caps manifest in the dispatcher, not a function here.)
 #
 # Transport lib self-source. `lib-issue-provider.sh` sources ONLY
@@ -327,11 +327,13 @@ itp_gitlab_edit_comment() {
   _gl_api --method PUT --body "$req_body" "/projects/${GITLAB_PROJECT}/issues/${issue}/notes/${comment_id}"
 }
 
-# Resolve the active credential plus the operator-configured cross-role
-# identities for callers that opt into terminal-control authority checks.
+# Resolve the active provider credential plus the operator-configured cross-role
+# identities for callers that opt into strict authority checks. Strict mode
+# always asks GitLab `/user`: BOT_LOGIN may describe the code-host identity in a
+# mixed-provider deployment and is not authoritative for this provider.
 _itp_gitlab_comment_self_logins() {
   local login="${BOT_LOGIN:-}" raw
-  if [[ "${ITP_REQUIRE_SELF_AUTHOR:-0}" == "1" && -z "$login" ]]; then
+  if [[ "${ITP_REQUIRE_SELF_AUTHOR:-0}" == "1" ]]; then
     raw=$(_gl_api "/user") || return 1
     login="$(printf '%s' "$raw" | jq -er '.username | strings | select(length > 0)')" \
       || return 1
@@ -361,8 +363,9 @@ _itp_gitlab_comment_self_logins() {
 #     mirrors the itp-github.sh comment id choice).
 #   - `author` = `.author.username` (spec §3.3 [M5] pin).
 #   - `authorKind` derivation:
-#       - `self` iff `author == BOT_LOGIN` (raw match — GitLab bot logins
-#         don't carry a `[bot]` suffix like GitHub, so no stripped-form fold).
+#       - `self` iff `author` matches the resolved self-login set. Ordinary
+#         reads seed that set from BOT_LOGIN. Strict reads always resolve the
+#         active GitLab `/user` and may add configured cross-role identities.
 #       - `bot` iff username matches `^(project|group)_\d+_bot(_[a-z0-9]+)?$`
 #         (GitLab's Project / Group Access Token convention). This is the
 #         `distinct_bot_author=1` claim in caps — a personal-PAT deployment
@@ -530,10 +533,12 @@ itp_gitlab_provision_states() {
   echo "  [created] '$name'"
 }
 
-# itp_gitlab_label_event_ts <issue> <label>
+# itp_gitlab_label_event_ts <issue> <label> [mode]
 #
-# Spec §3.1 [m] / [INV-93] / #323. Emit the ISO-8601 UTC `created_at` of the
-# FIRST `labeled` event for LABEL, or empty if none / on failure.
+# Spec §3.1 [m] / [INV-93] / #323. The default observe-only mode emits the
+# ISO-8601 UTC `created_at` of the FIRST added event for LABEL, or empty if none
+# / on failure. Optional `latest-removed` mode is a fail-soft INV-144 control
+# observation and emits the latest matching remove event.
 # GitLab endpoint: `GET /projects/:id/issues/:iid/resource_label_events` —
 # paginated (the endpoint doesn't accept a label filter, so the label match
 # runs in-leaf via jq).
@@ -548,12 +553,26 @@ itp_gitlab_provision_states() {
 # Fail-SOFT per contract: any `_gl_api` failure or empty response → empty
 # stdout, leaf rc 0.
 itp_gitlab_label_event_ts() {
-  local issue="$1" label="$2"
+  local issue="$1" label="$2" mode="${3:-first-added}" action latest
+  case "$mode" in
+    first-added)
+      action="add"
+      latest=false
+      ;;
+    latest-removed)
+      action="remove"
+      latest=true
+      ;;
+    *)
+      printf ''
+      return 0
+      ;;
+  esac
   _gl_api --paginate "/projects/${GITLAB_PROJECT}/issues/${issue}/resource_label_events" 2>/dev/null \
-    | jq -r --arg lbl "$label" '
-        map(select(.action == "add" and .label.name == $lbl))
+    | jq -r --arg lbl "$label" --arg action "$action" --argjson latest "$latest" '
+        map(select(.action == $action and .label.name == $lbl))
         | sort_by(.created_at // "")
-        | (.[0].created_at // "")
+        | ((if $latest then .[-1] else .[0] end).created_at // "")
       ' 2>/dev/null || printf ''
 }
 

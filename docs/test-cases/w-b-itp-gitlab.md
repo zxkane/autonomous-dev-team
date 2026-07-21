@@ -197,7 +197,7 @@ true` in its `.meta`).
 - **TC-WB-104**: idempotency across two back-to-back invocations — the second
   call takes the `[skip]` branch.
 
-### `itp_gitlab_label_event_ts ISSUE LABEL`
+### `itp_gitlab_label_event_ts ISSUE LABEL [MODE]`
 
 - **TC-WB-110**: paginated read over `/projects/:id/issues/:iid/resource_label_events`;
   leaf's in-process jq filter selects `action == "add" AND label.name == LABEL`
@@ -205,6 +205,8 @@ true` in its `.meta`).
   order: "the ISO-8601 UTC `created_at` of the FIRST `labeled` event", matching
   `itp_github_label_event_ts`'s `.[0].created_at` on the reference side.
   `--arg` bind is used to keep the label-name injection-safe.
+- **TC-WB-110b**: `MODE=latest-removed` selects `action == "remove"` and
+  emits the latest matching `.created_at` for INV-144 operator re-arm.
 - **TC-WB-111**: no matching event → empty stdout, leaf rc 0 (fail-SOFT
   contract).
 - **TC-WB-112**: fail-SOFT on `_gl_api` rc≠0 → empty stdout, rc 0.

@@ -579,6 +579,19 @@ AGENT_REVIEW_EXTRA_ARGS=""
 #
 # CODEX_REVIEW_MAX_RERUNS=3
 
+# Consecutive all-unavailable review breaker (INV-144, #525) --------------
+# Every review round where all fan-out members resolve `unavailable` advances a
+# durable head-agnostic streak. At this threshold the review wrapper transitions
+# `reviewing` to `stalled` and posts one operator report instead of returning to
+# `pending-dev` for another unbounded fan-out. Decided PASS or FAIL aggregates
+# durably reset the streak. Smoke-driven all-unavailable rounds count and carry
+# their smoke evidence into the report.
+#
+# 0 disables unavailable-round increments and tripping; decided rounds still
+# persist reset markers so re-enabling cannot inherit a stale streak. 1 trips on
+# the first all-unavailable round. A malformed value warns and falls back to 3.
+REVIEW_UNAVAILABLE_CAP="3"
+
 # Pre-fan-out agent-smoke gate (INV-64, #224) ------------------------------
 # REVIEW_SMOKE_ENABLED: when "true", the review wrapper runs a cheap one-token
 # smoke against EVERY AGENT_REVIEW_AGENTS member BEFORE the review fan-out
@@ -607,8 +620,8 @@ AGENT_REVIEW_EXTRA_ARGS=""
 # Default OFF — opt in per project (rollout is per-project and individually
 # revertible). With it off, the wrapper behavior is byte-for-byte unchanged.
 # Single-agent projects benefit too: a smoke FAIL aborts (stays `reviewing`); a
-# smoke UNAVAILABLE falls to the all-unavailable path (same terminal state as a
-# review crash).
+# smoke UNAVAILABLE falls to the all-unavailable path, which retries below
+# REVIEW_UNAVAILABLE_CAP and transitions to `stalled` if the outage persists.
 #
 # REVIEW_SMOKE_ENABLED="false"
 #

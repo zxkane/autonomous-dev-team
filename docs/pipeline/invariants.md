@@ -2916,7 +2916,7 @@ _Triage (issue #236): [machine-checked: tests/unit/test-lib-review-smoke.sh, tes
 **Rule**: when `REVIEW_SMOKE_ENABLED=true`, `autonomous-review.sh` runs a pre-fan-out **agent-smoke gate (Phase A.5)** — positioned AFTER the [INV-46](#inv-46-e2e-runs-once-in-a-dedicated-lane-before-the-review-fan-out--gated-not-per-agent) E2E lane (Phase A) and BEFORE the [INV-40](#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback) review fan-out (Phase B) — that smokes EVERY `REVIEW_AGENTS_LIST` member via [INV-63](#inv-63-agent-smoke-is-a-three-state-probe-pass--unavailable--fail-run-through-the-production-run_agent-never-a-parallel-invocation-path)'s `lib-agent-smoke.sh::smoke_agent` and applies three-state semantics to decide whether — and with which members — the fan-out runs:
 
 - **PASS** (smoke rc 0) → the member proceeds to the fan-out.
-- **UNAVAILABLE** (smoke rc 2 — quota/capacity) → the member is dropped from the fan-out set with drop reason `smoke: <classified reason>`, exactly mirroring the [INV-40](#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback) `unavailable` tolerance; the remaining members fan out and vote. ALL members UNAVAILABLE → the existing all-unavailable fallback path (the list is left UNCHANGED and falls through — every member runs the fan-out, posts no verdict, resolves `unavailable`, and the INV-40 all-unavailable aggregate fires — the legacy review-crash terminal state, unchanged; a single-agent project whose one member is UNAVAILABLE reaches this same state).
+- **UNAVAILABLE** (smoke rc 2 — quota/capacity) → the member is dropped from the fan-out set with drop reason `smoke: <classified reason>`, exactly mirroring the [INV-40](#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback) `unavailable` tolerance; the remaining members fan out and vote. ALL members UNAVAILABLE → the list is left UNCHANGED and every member still runs the full fan-out. If every member remains unavailable, INV-40 aggregates `all-unavailable`; if capacity recovers, a real fan-out verdict wins. Smoke-driven `all-unavailable` rounds count toward INV-144: a transient outage still retries normally, while `REVIEW_UNAVAILABLE_CAP` consecutive unavailable rounds halt at `stalled` with the collected `_smoke_reasons` in the operator report.
 - **FAIL** (smoke rc 1 — config/launch error) → **ABORT the entire review loudly**: no fan-out, no verdict; the issue **stays `reviewing`** (NO `pending-dev` flip); the wrapper posts an issue comment naming the failed agent(s) + their `SMOKE …` evidence line(s) and exits **non-zero**.
 
 1. **Same launch path the fan-out uses — model, launcher, AND extra-args.** Each member's smoke resolves its model via `_resolve_review_agent_model` ([INV-41](#inv-41-per-agent-review-model--extra-args-resolution)), applies the [INV-38](#inv-38-per-side-agent_launcher-precedence) / [INV-42](#inv-42-per-agent-review-launcher-resolution) launcher treatment (a per-agent `AGENT_REVIEW_LAUNCHER_<AGENT>` opt-in else the INV-38 rule: non-claude → neutralized, claude → keeps the rebound `AGENT_LAUNCHER_ARGV`), AND resolves the per-agent review EXTRA-ARGS via `_resolve_review_agent_extra_args` ([INV-41](#inv-41-per-agent-review-model--extra-args-resolution)), assigning BOTH `AGENT_DEV_EXTRA_ARGS` (the var `smoke_agent`'s `run_agent` tokenizes) and the `AGENT_REVIEW_EXTRA_ARGS` alias — IDENTICAL to the fan-out's per-agent subshell — so the smoke exercises the exact launch chain the real review run would. The extra-args rebind is load-bearing (#224 review [P1]): without it the smoke's `run_agent` reads the STALE `AGENT_DEV_EXTRA_ARGS` (or the conf-default review args), not the resolved per-agent review args the fan-out uses — so the smoke could ABORT a healthy review agent (the dev args carry a flag the review CLI rejects) or PASS a member whose review-specific flags later fail the real review. A smoke PASS therefore certifies the same `(CLI, model, launcher, extra-args)` tuple the fan-out is about to run.
@@ -4394,13 +4394,13 @@ _Triage (issue #236): [machine-checked: tests/unit/test-spec-drift.sh]_
 
 1. **Generated diagram** — the mermaid block in [`state-machine.md`](state-machine.md) is generated FROM `transitions.json` by `scripts/gen-state-machine.sh` (marker-delimited region). Hand-editing inside the markers, or editing the table without regenerating, fails CI (`gen-state-machine.sh --check` diffs and exits non-zero).
 2. **Guard/action mapping** — every `guard`/`action` token in `transitions.json` maps (via [`spec-guard-map.json`](spec-guard-map.json)) to a named function or greppable predicate that MUST still resolve in `lib-dispatch.sh` / the wrappers. A token with no mapping, or a mapped anchor that no longer resolves, fails CI naming the pair. (The map keys on function names + grep-stable literals, NEVER line numbers.)
-3. **Label-write-site completeness** — five sub-checks (plus a variable-write ban) over every `label_swap` arg + every `--add/--remove-label` literal in the four pipeline files. **C.1 vocabulary**: each label literal written must appear in `transitions.json` as a state or `actions[]` entry (catches a brand-new label, e.g. a typo). **C.2 movement**: each write *site*'s `(removes→adds)` movement — the set it removes plus the set it adds, normalized as `<sorted-removes>|<sorted-adds>` — must equal the `(remove-label:…, add-label:…)` actions of some transition (catches a write that reuses *known* labels in an **undeclared combination**, e.g. `label_swap "$n" "approved" "stalled"`). **C.3 code-site coverage**: C.2 is movement-*set* membership, so two transitions sharing one movement make a row's deletion invisible. [`spec-codesite-map.json`](spec-codesite-map.json)'s `code_sites` pins every **code-bearing** transition (actor ∉ {maintainer, github}) to a grep-stable anchor, checked both ways — *forward* (anchor still greps) and *reverse* (every key is a live transition id); deleting `dispatch-pending-dev-pr-exists` (movement shared with `dispatch-review-aware-reroute-review`) orphans its entry → **CI red**. **C.4 discovered-site reconciliation**: a NEW site whose movement already exists elsewhere passes C.2/C.3, so C.4 requires the count of literal write sites per `(file, movement)` to equal the count of `spec-codesite-map.json`'s `sites[]` manifest entries — an added/removed/duplicate site drifts the count → **CI red**. **C.5 per-site anchor adjacency**: C.4 is a *count*, so RELOCATING a write within a file (same movement, count unchanged) is invisible; each `sites[]` entry's `anchor` must therefore grep **exactly once** AND have a write of its `movement` within ±8 lines — moving the `label_swap "$n" "pending-dev" "pending-review"` out of `handle_pending_dev_pr_exists()` leaves its anchor with no adjacent write → **CI red**. **P1.1 variable-write ban**: a variable-valued `--add/--remove-label "$x"` is a hard **CI red** (not a NOTE) unless its enclosing function is in `variable_write_allowlist` (the `label_swap` helper + the `hygiene_strip_residual_labels` loop) — a variable write could inject an undeclared label invisibly. (C.4/C.5 counts are over CODE SITES, not rows: one site can back several rows and one row can collapse several physical paths, so the count is the stable quantity.) Together C.1+C.2+C.3+C.4+C.5 + the ban make "a PR adding (even a duplicate / shared-movement / relocated / variable) or removing a label-write site without the matching transitions.json entry fails CI" actually hold. Each fails CI with an actionable message naming the orphan label / undeclared movement / orphaned-or-unmapped transition / stale-or-ambiguous anchor / unaccounted-or-count-mismatched site / relocated write / non-allowlisted variable write.
+3. **Label-write-site completeness** — five sub-checks (plus a variable-write ban) over every literal `label_swap` and direct `itp_transition_state` arg + every `--add/--remove-label` literal in the six pipeline files. **C.1 vocabulary**: each label literal written must appear in `transitions.json` as a state or `actions[]` entry (catches a brand-new label, e.g. a typo). **C.2 movement**: each write *site*'s `(removes→adds)` movement — the set it removes plus the set it adds, normalized as `<sorted-removes>|<sorted-adds>` — must equal the `(remove-label:…, add-label:…)` actions of some transition (catches a write that reuses *known* labels in an **undeclared combination**, e.g. `label_swap "$n" "approved" "stalled"`). **C.3 code-site coverage**: C.2 is movement-*set* membership, so two transitions sharing one movement make a row's deletion invisible. [`spec-codesite-map.json`](spec-codesite-map.json)'s `code_sites` pins every **code-bearing** transition (actor ∉ {maintainer, github}) to a grep-stable anchor, checked both ways — *forward* (anchor still greps) and *reverse* (every key is a live transition id); deleting `dispatch-pending-dev-pr-exists` (movement shared with `dispatch-review-aware-reroute-review`) orphans its entry → **CI red**. **C.4 discovered-site reconciliation**: a NEW site whose movement already exists elsewhere passes C.2/C.3, so C.4 requires the count of literal write sites per `(file, movement)` to equal the count of `spec-codesite-map.json`'s `sites[]` manifest entries — an added/removed/duplicate site drifts the count → **CI red**. **C.5 per-site anchor adjacency**: C.4 is a *count*, so RELOCATING a write within a file (same movement, count unchanged) is invisible; each `sites[]` entry's `anchor` must therefore grep **exactly once** AND have a write of its `movement` within ±8 lines — moving the `label_swap "$n" "pending-dev" "pending-review"` out of `handle_pending_dev_pr_exists()` leaves its anchor with no adjacent write → **CI red**. **P1.1 variable-write ban**: a variable-valued `--add/--remove-label "$x"` is a hard **CI red** (not a NOTE) unless its enclosing function is in `variable_write_allowlist`, which is currently empty because `label_swap` and `hygiene_strip_residual_labels` now delegate to `itp_transition_state` — a variable write could inject an undeclared label invisibly. (C.4/C.5 counts are over CODE SITES, not rows: one site can back several rows and one row can collapse several physical paths, so the count is the stable quantity.) Together C.1+C.2+C.3+C.4+C.5 + the ban make "a PR adding (even a duplicate / shared-movement / relocated / variable) or removing a label-write site without the matching transitions.json entry fails CI" actually hold. Each fails CI with an actionable message naming the orphan label / undeclared movement / orphaned-or-unmapped transition / stale-or-ambiguous anchor / unaccounted-or-count-mismatched site / relocated write / non-allowlisted variable write.
 
 The typed inputs the guards read are enumerated in [`observation-snapshot.md`](observation-snapshot.md) (schema: [`schemas/observation-snapshot.schema.json`](schemas/observation-snapshot.schema.json)), including the SSM-indeterminate third liveness state ([INV-30]).
 
 **Why**: "Docs are authoritative" had no enforcement — the hand-drawn diagram and the transition table drifted from ~11K lines of bash silently, and every drift is a future incident (issue #236). This is the **CI-checker half** of the executable-spec pillar; the runtime reconciler (single-writer enforcement that refuses undeclared transitions at dispatch time) is the gated/stop-ruled phase and would consume the same `transitions.json` unchanged. This invariant changes ZERO dispatch behavior — it documents and gates the existing machine.
 
-**Form 3 — `itp_transition_state` calls are scanned (spec-gate-itp, #296 prerequisite)**: as the #296 pluggable-providers migration moves label writes from raw `gh issue edit` (Form 2) to the [INV-87] `itp_transition_state` verb, those transitions would otherwise leave the gate's view (the `--add/--remove-label` literal moves into `providers/itp-github.sh`, outside the four `PIPELINE_FILES`) — a silent coverage loss. So the three movement/write scanners (`collect_movements`, `collect_writes`, `write_lines_for_file`) ALSO recognize a direct `itp_transition_state "$n" "remove" "add"` call as a **positional** label-write site (structurally identical to Form 1 `label_swap`: token #1 = issue number, ignored; #2 = remove; #3 = add). A `$`-variable operand is skipped (not a static label), so the `label_swap` body's own delegation `itp_transition_state "$issue_num" "$remove" "$add"` (lib-dispatch.sh) emits no movement — its labels come from `label_swap`'s LITERAL callers, which C.1–C.5 already validate. The **P1.1 variable-write ban is deliberately NOT extended** to `itp_transition_state`: a variable-arg call carries no `--add/--remove-label` flag, so it stays invisible to P1.1 — correct, because the variable labels flow into the byte-identical verb leaf (validated by `test-itp-write-leaves.sh`), and banning the legitimate `label_swap` delegation would break the gate. Net: a `gh issue edit` → `itp_transition_state` migration is **coverage-preserving** — the migrated call stays a scanned site, so the `sites[]` manifest entry is kept (only its anchor may move within ±8 lines) and the C.4 count is unchanged. The existing `merge_closes_issue=0` fallback `itp_transition_state "$ISSUE_NUMBER" "reviewing" "approved"` (autonomous-review.sh) is declared in `sites[]` (anchor `merge_closes_issue=0 — transitioning issue`).
+**Form 3 — `itp_transition_state` calls are scanned (spec-gate-itp, #296 prerequisite)**: as the #296 pluggable-providers migration moves label writes from raw `gh issue edit` (Form 2) to the [INV-87] `itp_transition_state` verb, those transitions would otherwise leave the gate's view (the `--add/--remove-label` literal moves into `providers/itp-github.sh`, outside the six `PIPELINE_FILES`) — a silent coverage loss. So the three movement/write scanners (`collect_movements`, `collect_writes`, `write_lines_for_file`) ALSO recognize a direct `itp_transition_state "$n" "remove" "add"` call as a **positional** label-write site (structurally identical to Form 1 `label_swap`: token #1 = issue number, ignored; #2 = remove; #3 = add). A `$`-variable operand is skipped (not a static label), so the `label_swap` body's own delegation `itp_transition_state "$issue_num" "$remove" "$add"` (lib-dispatch.sh) emits no movement — its labels come from `label_swap`'s LITERAL callers, which C.1–C.5 already validate. The **P1.1 variable-write ban is deliberately NOT extended** to `itp_transition_state`: a variable-arg call carries no `--add/--remove-label` flag, so it stays invisible to P1.1 — correct, because the variable labels flow into the byte-identical verb leaf (validated by `test-itp-write-leaves.sh`), and banning the legitimate `label_swap` delegation would break the gate. Net: a `gh issue edit` → `itp_transition_state` migration is **coverage-preserving** — the migrated call stays a scanned site, so the `sites[]` manifest entry is kept (only its anchor may move within ±8 lines) and the C.4 count is unchanged. The existing `merge_closes_issue=0` fallback `itp_transition_state "$ISSUE_NUMBER" "reviewing" "approved"` (autonomous-review.sh) is declared in `sites[]` (anchor `merge_closes_issue=0 — transitioning issue`).
 
 **Producer**: `transitions.json`, `spec-guard-map.json`, `spec-codesite-map.json`, `gen-state-machine.sh`, `check-spec-drift.sh` (all additive; no runtime lib is modified).
 **Consumer**: the `spec-drift` CI job (`.github/workflows/ci.yml`); `state-machine.md`'s generated region.
@@ -5000,10 +5000,10 @@ _Triage (issue #236): [machine-checked: tests/unit/test-handle-completed-session
 _Triage (issue #236): [machine-checked: tests/unit/test-label-event-ts.sh]_
 
 **Rule**: the dispatcher's Step-2 metrics emit fetches the real `autonomous`-label
-time (the [INV-70] `labeled_at`, #228 finding 4) through the ITP verb
-`itp_label_event_ts ISSUE LABEL` (GitHub leaf `itp_github_label_event_ts`), NOT a
-raw caller-side `gh api …/timeline`. The verb is **observe-only and strictly
-non-blocking**:
+time (the [INV-70] `labeled_at`, #228 finding 4) through the default two-argument
+ITP call `itp_label_event_ts ISSUE LABEL` (GitHub leaf
+`itp_github_label_event_ts`), NOT a raw caller-side `gh api …/timeline`. That
+default call is **observe-only and strictly non-blocking**:
 
 - It echoes the ISO-8601 UTC `created_at` of the FIRST `labeled` event for `LABEL`
   visible in the provider's existing timeline read, or **empty** on no match / a
@@ -5024,6 +5024,11 @@ non-blocking**:
   the label is pre-encoded, not bound. For `LABEL=autonomous` the spliced program is
   argv-equivalent to the pre-#323 inline selector. The leaf keeps today's single
   non-paginated `gh api …/timeline` read (best-effort; `--paginate` is out of scope).
+
+The later optional `MODE=latest-removed` extension belongs to INV-144, not this
+metrics invariant. It is also fail-soft, but its returned timestamp is a
+review-breaker re-arm cutoff. INV-70's metrics-only guarantee continues to apply
+unchanged to the default Step-2 caller.
 
 This is a **focused verb** ([`provider-spec.md`](provider-spec.md) §3.1): the
 GitHub-internal `event`/`.label.name`/`.created_at` timeline fields have no
@@ -9172,5 +9177,100 @@ Test plan: `docs/test-cases/review-verdict-path.md`.
 - [INV-56](#inv-56-review-verdict-is-posted-via-the-deterministic-post-verdict-helper-not-the-agents-bare-gh) - sole visible comment-posting helper.
 - [INV-62](#inv-62-the-codex-review-lane-runs-the-codex-review-subcommand-auto-scoped-prompt-carried-gate-with-a-stdout-verdict-fallback) - wrapper-captured output precedent.
 - [INV-78](#inv-78-review-verdicts-resolve-from-a-typed-artifact-file-first-comment-scraping-is-an-explicitly-logged-fallback-a-malformed-artifact-is-loud-never-a-silent-absent) - atomic artifact and malformed-refusal contract.
+
+---
+
+## INV-144: consecutive `all-unavailable` review aggregates are bounded by an independent durable breaker that transitions `reviewing -> stalled` and posts one `reason=review-unavailable-cap` report
+
+_Triage (issue #236): [machine-checked: tests/unit/test-review-unavailable-cap.sh, tests/e2e/run-verdict-artifact-fleet-e2e.sh]_
+
+**Rule**: every review-wrapper aggregate of `all-unavailable` advances a
+head-agnostic streak stored as:
+
+```text
+<!-- dispatcher-review-unavailable-breaker: issue=<N> head=<sha|unknown> round=<n> -->
+```
+
+`head` is forensic only. A new commit does not prove that review capacity,
+launching, or verdict delivery recovered because an unavailable result carries
+no deciding verdict proving whether review and reporting completed for either
+head. The wrapper posts the incremented marker on every unavailable round,
+including round 1. Every decided aggregate, both `pass` and `fail`, posts an
+explicit marker in the same grammar with `round=0`. This reset
+channel is independent from the best-effort verdict trailer and the
+`Reviewed HEAD` trailer, and works even when `PR_HEAD_SHA` is unresolved
+(`head=unknown`).
+
+`REVIEW_UNAVAILABLE_CAP` defaults to `3`. `0` disables unavailable-round
+increments and tripping, but decided rounds still post `round=0` so re-enabling
+cannot inherit a stale streak. `1` trips on the first unavailable round. Any
+value outside the canonical non-negative integer grammar warns and falls back
+to `3`; values above Bash's signed 64-bit arithmetic ceiling are likewise
+rejected rather than allowed to wrap during threshold comparison.
+
+At the threshold, the wrapper first checks whether a sibling breaker already
+placed the issue in `stalled`. If so, it marks the result handled and exits
+without any marker, report, or competing pending-state transition. Otherwise
+it performs `itp_transition_state reviewing stalled` first, then sets
+`RESULT_PARSED=true`, persists the threshold marker followed by an independent
+`round=0` re-arm marker, then posts one best-effort structured report. The
+report includes `_dropped_reasons`, explicitly says `no reason token recorded`
+when no classifier matched, includes `_smoke_reasons` separately, and resolves
+the human mention through `resolve_escalation_mention`. The ordinary `reviewing
+-> pending-dev` write is unreachable after a trip. If the sibling-state read is
+unavailable or malformed, the wrapper fails closed for that run: it marks the
+result handled and emits no marker, report, or label transition.
+
+**Re-arm**: the comment read sets `ITP_REQUIRE_SELF_AUTHOR=1`, and
+`_review_unavailable_prior_marker` accepts only `authorKind=self` comments whose
+marker `issue=` field equals the active issue. Human-authored, unrelated-bot,
+wrong-issue, and quoted marker text cannot advance, reset, or cut off the
+streak. The scan ignores standalone markers at or before the later of the latest
+authentic trip report and the provider-neutral latest `stalled` label-removal
+event (`itp_label_event_ts ... latest-removed`). The removal event is the
+authoritative operator re-arm channel and survives failure of every comment
+write after the prior stalled transition. The explicit `round=0` marker posted
+after the threshold marker remains a faster independent channel: if only the
+structured report post fails, the reset already makes the next unavailable
+round start at 1. Marker selection uses the provider's `(createdAt, id)`
+ordering, so same-second threshold and reset posts
+deterministically select the later reset. The trip cutoff uses the same ordering,
+so a marker posted later within the trip report's timestamp second still
+qualifies.
+
+**INV-64 interaction**: smoke-driven `all-unavailable` rounds deliberately
+count. A brief quota/capacity outage gets the existing retry behavior, while a
+persistent outage deserves the same bounded operator escalation as a
+post-fan-out reporting failure. Smoke evidence is carried in the shared
+in-memory `_smoke_reasons` collector, not inferred from `_dropped_reasons`.
+When the smoke gate drops only part of the fleet, each classified reason is
+appended to that collector before the survivor list shrinks, so a later
+all-unavailable aggregate still reports those pre-fan-out drops.
+
+**Distinct fingerprint**: INV-127 remains unchanged and counts only decided
+`failed-substantive` rounds whose P0/P1 floor still fails. INV-144 counts only
+zero-decision `all-unavailable` rounds. Neither counter reads or advances the
+other's marker.
+
+**Producer/consumer**: `lib-review-unavailable-cap.sh` owns marker parsing,
+threshold validation, cutoff scanning, durable resets, and the terminal route.
+`autonomous-review.sh` calls the reset helper for decided aggregates and the
+breaker handler only from the `all-unavailable` terminal path.
+
+**Status**: **ENFORCED** (closes #525).
+
+**Test**: `tests/unit/test-review-unavailable-cap.sh` covers marker
+parse/increment/reset/cutoff rules, `0`/malformed/`1` configuration, three-round
+trip behavior, PASS and FAIL resets including unresolved HEAD, sibling-stall
+short-circuiting, transition-before-report ordering, one-time reporting, and
+report-post-failure re-arming. Foreign-bot and wrong-issue fixtures pin the
+strict-self, active-issue authenticity boundary. A full post-transition comment
+outage fixture proves the subsequent `stalled` removal still resets the streak.
+It also evaluates the exact wrapper guard across three persisted rounds through
+the production terminal-route helper, pins the wrapper's handled `exit 0`, and
+covers full and partial-smoke evidence.
+`tests/e2e/run-verdict-artifact-fleet-e2e.sh` drives an
+exit-0/no-verdict stub fleet across repeated wrapper terminal routes and asserts
+the configured Nth round stalls.
 
 ---

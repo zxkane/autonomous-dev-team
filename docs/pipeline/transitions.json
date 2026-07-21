@@ -192,6 +192,19 @@
       "note": "INV-127 (#449): a NEW, independent breaker — halts re-dispatch once the severity-aware blocking ratchet's own floor (P0/P1, which always blocks at any round) is STILL failing after REVIEW_CONVERGENCE_CAP (default 5) consecutive failed-substantive rounds. Runs INSIDE the existing substantive-FAIL sub-path (AGGREGATE==\"fail\"), BEFORE the review-fail-substantive transition below — a trip short-circuits that transition entirely via label_swap reviewing→stalled FIRST (atomic, mirrors INV-105/INV-122's TOCTOU fix), then posts exactly ONE reason=review-round-cap report. Checks the issue is not already stalled (e.g. INV-105 or INV-122 tripped first) before running. Distinct fingerprint from both siblings: INV-105 measures dev-side zero-commit-inaction on a FROZEN head; INV-122 measures a fixed-point repetition on an UNCHANGED (head, rc) pair; INV-127 measures review-side divergent-findings non-convergence across PROGRESSIVELY NEW heads (the dev agent DID push commits, but the review keeps finding a new P0/P1 each round) — so its round counter is deliberately head-AGNOSTIC (accumulates across head changes), unlike INV-122's head-scoped fingerprint. Only failed-substantive rounds count; failed-non-substantive is out of scope (already governed by REVIEW_RETRY_LIMIT)."
     },
     {
+      "id": "review-unavailable-cap-breaker",
+      "from": "reviewing",
+      "to": "stalled",
+      "event": "review-unavailable-cap-reached",
+      "actor": "review-wrapper",
+      "guards": ["aggregate-all-unavailable", "review-unavailable-cap-threshold-reached", "review-unavailable-not-already-stalled"],
+      "actions": ["remove-label:reviewing", "add-label:stalled", "comment:review-unavailable-cap"],
+      "code_site": "lib-review-unavailable-cap.sh INV-144 terminal handler: itp_transition_state reviewing stalled",
+      "mermaid": "reviewing --> stalled: all reviewers unavailable for REVIEW_UNAVAILABLE_CAP consecutive rounds [INV-144]",
+      "inv_refs": ["INV-144", "INV-40", "INV-64", "INV-127"],
+      "note": "INV-144 (#525): a wrapper-side sibling breaker for consecutive all-unavailable aggregates. It persists a head-agnostic marker every unavailable round, resets through an explicit round=0 marker on every decided pass/fail aggregate, counts smoke-driven all-unavailable rounds, and transitions reviewing to stalled before posting one reason=review-unavailable-cap report. REVIEW_UNAVAILABLE_CAP defaults to 3; 0 disables and 1 trips immediately. A prior sibling stall short-circuits without a competing pending-dev write."
+    },
+    {
       "id": "review-fail-substantive",
       "from": "reviewing",
       "to": "pending_dev",

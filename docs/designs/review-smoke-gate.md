@@ -44,9 +44,9 @@ non-claude members) — the **same resolution the fan-out itself uses**.
  ABORT             drop UNAVAILABLE members          fan out all    │
  (loud)            via existing INV-40 machinery;    members        │
  post naming       remaining members fan out;                       │
- comment;          ALL unavailable → existing                       │
- stay reviewing;   all-unavailable fallback                         │
- exit non-zero     (UNCHANGED)                                      │
+ comment;          ALL unavailable → original list                  │
+ stay reviewing;   runs full fan-out; resulting                     │
+ exit non-zero     all-unavailable counts toward INV-144            │
 ```
 
 ### PASS (rc 0) — member proceeds to fan-out
@@ -63,14 +63,12 @@ normally. This reuses the existing [INV-40](../pipeline/invariants.md) `unavaila
 tolerance — a dropped member does not block.
 
 **Degenerate cases:**
-- **ALL members UNAVAILABLE** → the fan-out set is empty. We do **not** spawn an
-  empty fan-out; instead we drive the wrapper straight to the existing
-  **all-unavailable fallback** (the same terminal state as today's review-crash
-  fallback: `−reviewing +pending-dev`, `failed-substantive` trailer). This is
-  reached by leaving `REVIEW_AGENTS_LIST` collapsed and synthesizing the
-  all-unavailable aggregate — see "Implementation: empty-set handling" below.
-- **Single-agent project, that one member UNAVAILABLE** → identical to "all
-  UNAVAILABLE" (the set of one is empty after the drop).
+- **ALL members UNAVAILABLE** → keep the original fan-out list and run every
+  member. If capacity does not recover and the aggregate remains
+  `all-unavailable`, INV-144 records the round, retries below
+  `REVIEW_UNAVAILABLE_CAP`, and transitions to `stalled` at the threshold.
+- **Single-agent project, that one member UNAVAILABLE** → identical to the
+  all-unavailable route above.
 
 ### FAIL (rc 1) — abort the entire review loudly
 
