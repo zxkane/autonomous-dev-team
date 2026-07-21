@@ -23,7 +23,10 @@
 # This is the #233 E2E artifact: it sources the production libs
 # (lib-review-artifact.sh / lib-review-poll.sh / lib-review-aggregate.sh) and
 # reproduces the wrapper's resolution control flow against staged artifact files
-# and a stubbed comment fetcher, so CI runs it on bare ubuntu.
+# and a stubbed comment fetcher, so CI runs it on bare ubuntu. The issue #526
+# extension invokes lib-review-claude.sh's exact production fan-out mutation and
+# post-poll fallback functions; those two branches are not reproduced in the
+# fixture.
 #
 # Run: bash tests/e2e/run-verdict-artifact-fleet-e2e.sh
 
@@ -177,6 +180,233 @@ if grep -q '^agent-C$' "$COMMENT_FETCH_LOG" && ! grep -qE '^agent-(A|B|D)$' "$CO
   ok "the polled agent was agent-C only (valid A + malformed B + foreign-identity D never comment-polled)"
 else
   bad "wrong agent polled: $(tr '\n' ' ' < "$COMMENT_FETCH_LOG")"
+fi
+
+echo ""
+echo "=== TC-REVIEW-VERDICT-PATH-035..036: permission-honoring Claude stub ==="
+
+CLAUDE_LIB="$DISP/lib-review-claude.sh"
+if [[ -r "$CLAUDE_LIB" ]]; then
+  # shellcheck source=/dev/null
+  source "$CLAUDE_LIB"
+else
+  bad "Claude review helper library exists"
+fi
+
+STUB_PROJECT="$SANDBOX/stub-project"
+STUB_BIN="$SANDBOX/bin/claude"
+mkdir -p "$STUB_PROJECT/scripts" "$(dirname "$STUB_BIN")"
+ln -s "$DISP/write-verdict-artifact.sh" "$STUB_PROJECT/scripts/write-verdict-artifact.sh"
+ln -s "$DISP/write-verdict-body.sh" "$STUB_PROJECT/scripts/write-verdict-body.sh"
+cat > "$STUB_PROJECT/scripts/post-verdict.sh" <<'STUB_POST'
+#!/bin/bash
+set -euo pipefail
+[[ "${STUB_POST_FAIL:-false}" != "true" ]] || exit 1
+body="$(cat "$3")"
+case "$2" in
+  pass)
+    [[ "$body" == Review\ PASSED* ]] || body="Review PASSED - ${body}"
+    ;;
+  fail)
+    [[ "$body" == Review\ findings:* ]] || body="Review findings:
+${body}"
+    ;;
+  *)
+    exit 2
+    ;;
+esac
+printf '%s\n' "$body" > "$STUB_POST_CAPTURE"
+printf '%s\n' "$*" > "$STUB_POST_ARGS"
+STUB_POST
+chmod +x "$STUB_PROJECT/scripts/post-verdict.sh"
+
+cat > "$STUB_BIN" <<'STUB_CLAUDE'
+#!/bin/bash
+set -euo pipefail
+printf '%s\n' "$@" > "$STUB_ARGV_CAPTURE"
+if [[ "${STUB_EXPECT_INJECTION:-false}" == "true" ]]; then
+  grep -Fxq -- '--add-dir' "$STUB_ARGV_CAPTURE"
+  grep -Fxq -- "$(dirname "$VERDICT_ARTIFACT_PATH")" "$STUB_ARGV_CAPTURE"
+  grep -Fxq -- "$(dirname "$VERDICT_BODY_FILE")" "$STUB_ARGV_CAPTURE"
+  grep -Fxq -- 'Bash(bash scripts/write-verdict-artifact.sh:*)' "$STUB_ARGV_CAPTURE"
+  grep -Fxq -- 'Bash(bash scripts/write-verdict-body.sh:*)' "$STUB_ARGV_CAPTURE"
+  grep -Fxq -- 'Bash(bash scripts/post-verdict.sh:*)' "$STUB_ARGV_CAPTURE"
+
+  cd "$STUB_PROJECT"
+  printf '%s' 'All checklist items verified.' | bash scripts/write-verdict-body.sh
+  printf '%s\n' \
+    '{"schema_version":1,"verdict":"PASS","blockingFindings":[],"runId":"stub-sid","agent":"claude"}' \
+    | bash scripts/write-verdict-artifact.sh
+  bash scripts/post-verdict.sh 526 pass "$VERDICT_BODY_FILE" claude stub-sid sonnet
+fi
+jq -nc --arg result "${STUB_FINAL_RESULT:-Review PASSED - stub complete}" \
+  '{type:"result",is_error:false,result:$result}'
+exit "${STUB_EXIT_RC:-0}"
+STUB_CLAUDE
+chmod +x "$STUB_BIN"
+
+run_permission_stub() {
+  local mode="$1" expect="$2"
+  local case_dir="$SANDBOX/stub-$mode"
+  mkdir -p "$case_dir/artifact" "$case_dir/body"
+  export VERDICT_ARTIFACT_PATH="$case_dir/artifact/verdict-claude.json"
+  export VERDICT_BODY_FILE="$case_dir/body/verdict.md"
+  export STUB_ARGV_CAPTURE="$case_dir/argv"
+  export STUB_POST_CAPTURE="$case_dir/posted-body"
+  export STUB_POST_ARGS="$case_dir/posted-args"
+  export STUB_EXPECT_INJECTION="$expect"
+  export STUB_FINAL_RESULT="Review PASSED - stub complete"
+  export STUB_EXIT_RC=0
+  export STUB_POST_FAIL=false
+  export STUB_PROJECT
+  REVIEW_CLAUDE_PERMISSION_INJECTION=true
+  local dev_args="--operator-flag before-injection"
+  local review_args="$dev_args"
+  _claude_review_apply_permission_injection \
+    claude "$mode" "$VERDICT_ARTIFACT_PATH" \
+    "$(dirname "$VERDICT_BODY_FILE")" dev_args review_args
+  local -a stub_argv=()
+  eval "stub_argv=($dev_args)"
+  "$STUB_BIN" "${stub_argv[@]}" > "$case_dir/stream.jsonl"
+}
+
+if declare -F _claude_review_apply_permission_injection >/dev/null 2>&1 \
+    && run_permission_stub auto true; then
+  [[ -s "$SANDBOX/stub-auto/posted-body" ]] \
+    && ok "TC-REVIEW-VERDICT-PATH-035 auto stub executed body write + post-verdict" \
+    || bad "TC-REVIEW-VERDICT-PATH-035 body/post sequence did not execute"
+  [[ -s "$SANDBOX/stub-auto/artifact/verdict-claude.json" ]] \
+    && ok "TC-REVIEW-VERDICT-PATH-035 auto stub atomically wrote the artifact" \
+    || bad "TC-REVIEW-VERDICT-PATH-035 artifact sequence did not execute"
+  auto_artifact=$(_classify_verdict_artifact \
+    "$SANDBOX/stub-auto/artifact/verdict-claude.json" stub-sid claude)
+  [[ "${auto_artifact%%$'\n'*}" == "valid" \
+      && "$(_classify_verdict_body "$(cat "$SANDBOX/stub-auto/posted-body")")" == "pass" ]] \
+    && ok "TC-REVIEW-VERDICT-PATH-035 full sequence produced valid artifact and post-verdict channels" \
+    || bad "TC-REVIEW-VERDICT-PATH-035 full sequence did not produce valid verdict channels"
+  if _claude_final_text_fallback_eligible claude 0 "" pass \
+      "$(cat "$SANDBOX/stub-auto/posted-body")"; then
+    bad "TC-REVIEW-VERDICT-PATH-035 resolved report unexpectedly remained fallback-eligible"
+  else
+    ok "TC-REVIEW-VERDICT-PATH-035 full reporting sequence needs no final-text fallback"
+  fi
+else
+  bad "TC-REVIEW-VERDICT-PATH-035 auto stub accepted and executed injected grants"
+fi
+
+if declare -F _claude_review_apply_permission_injection >/dev/null 2>&1 \
+    && run_permission_stub bypassPermissions false; then
+  if ! grep -Fq -- '--add-dir' "$SANDBOX/stub-bypassPermissions/argv" \
+      && ! grep -Fq -- '--allowedTools' "$SANDBOX/stub-bypassPermissions/argv"; then
+    ok "TC-REVIEW-VERDICT-PATH-036 bypassPermissions stub received no injection"
+  else
+    bad "TC-REVIEW-VERDICT-PATH-036 bypassPermissions unexpectedly received injection"
+  fi
+else
+  bad "TC-REVIEW-VERDICT-PATH-036 bypassPermissions stub completed"
+fi
+
+echo ""
+echo "=== TC-REVIEW-VERDICT-PATH-033,037..041: final-text fallback fleet ==="
+
+run_finaltext_stub() {
+  local case_name="$1" result="$2" requested_rc="$3"
+  local case_dir="$SANDBOX/fallback-$case_name"
+  mkdir -p "$case_dir/artifact" "$case_dir/body"
+  export VERDICT_ARTIFACT_PATH="$case_dir/artifact/verdict-claude.json"
+  export VERDICT_BODY_FILE="$case_dir/body/verdict.md"
+  export STUB_ARGV_CAPTURE="$case_dir/argv"
+  export STUB_POST_CAPTURE="$case_dir/posted-body"
+  export STUB_POST_ARGS="$case_dir/posted-args"
+  export STUB_EXPECT_INJECTION=false
+  export STUB_FINAL_RESULT="$result"
+  export STUB_EXIT_RC="$requested_rc"
+  export STUB_POST_FAIL=false
+  local actual_rc=0
+  "$STUB_BIN" --permission-mode auto --output-format stream-json \
+    > "$case_dir/stream.jsonl" || actual_rc=$?
+  printf '%s\n' "$actual_rc"
+}
+
+fallback_stub_resolve() {
+  local case_name="$1" agent="$2" rc="$3" source="$4" log_file="$5"
+  local post_fail="${6:-false}"
+  local case_dir="$SANDBOX/fallback-$case_name"
+  export STUB_POST_CAPTURE="$case_dir/posted-body"
+  export STUB_POST_ARGS="$case_dir/posted-args"
+  export STUB_POST_FAIL="$post_fail"
+  SCRIPT_DIR="$STUB_PROJECT/scripts"
+  ISSUE_NUMBER=526
+  AGENT_NAMES=("$agent")
+  AGENT_SESSION_IDS=(stub-sid)
+  AGENT_CONTROLLER_LOGS=("$log_file")
+  AGENT_VERDICTS=("")
+  AGENT_VERDICT_BODIES=("")
+  AGENT_VERDICT_SOURCES=("$source")
+  AGENT_LAUNCH_RC=([stub-sid]="$rc")
+  log() { :; }
+  _append_run_footer_to_file() { :; }
+  _resolve_review_agent_model() { printf 'sonnet\n'; }
+  _fetch_agent_verdict_body() {
+    [[ -s "$STUB_POST_CAPTURE" ]] && cat "$STUB_POST_CAPTURE"
+  }
+
+  _claude_apply_final_text_fallback 0
+  FALLBACK_VERDICT="${AGENT_VERDICTS[0]:-}"
+  FALLBACK_SOURCE="${AGENT_VERDICT_SOURCES[0]:-}"
+  if [[ -z "$FALLBACK_VERDICT" ]]; then
+    FALLBACK_VERDICT="$(_classify_noverdict_agent "$rc")"
+  fi
+}
+
+if declare -F _claude_apply_final_text_fallback >/dev/null 2>&1; then
+  REVIEW_FINAL_TEXT_VERDICT_FALLBACK=true
+  pass_rc=$(run_finaltext_stub pass "Review PASSED - complete" 0)
+  fallback_stub_resolve pass claude "$pass_rc" "" "$SANDBOX/fallback-pass/stream.jsonl"
+  [[ "$FALLBACK_VERDICT:$FALLBACK_SOURCE" == "pass:claude-finaltext-fallback" ]] \
+      && [[ "$(_classify_verdict_body "$(cat "$SANDBOX/fallback-pass/posted-body")")" == "pass" ]] \
+    && ok "TC-REVIEW-VERDICT-PATH-037 rc0 stub PASS posts and resolves via final text" \
+    || bad "TC-REVIEW-VERDICT-PATH-037 got $FALLBACK_VERDICT:$FALLBACK_SOURCE"
+
+  fail_rc=$(run_finaltext_stub fail $'Review findings:\n1. [P1] defect' 0)
+  fallback_stub_resolve fail claude "$fail_rc" "" "$SANDBOX/fallback-fail/stream.jsonl"
+  [[ "$FALLBACK_VERDICT:$FALLBACK_SOURCE" == "fail:claude-finaltext-fallback" ]] \
+      && [[ "$(_classify_verdict_body "$(cat "$SANDBOX/fallback-fail/posted-body")")" == "fail" ]] \
+    && ok "TC-REVIEW-VERDICT-PATH-038 rc0 stub FAIL posts and resolves via final text" \
+    || bad "TC-REVIEW-VERDICT-PATH-038 got $FALLBACK_VERDICT:$FALLBACK_SOURCE"
+
+  none_rc=$(run_finaltext_stub none "The review is complete." 0)
+  fallback_stub_resolve none claude "$none_rc" "" "$SANDBOX/fallback-none/stream.jsonl"
+  [[ "$FALLBACK_VERDICT" == "unavailable" \
+      && ! -e "$SANDBOX/fallback-none/posted-body" ]] \
+    && ok "TC-REVIEW-VERDICT-PATH-039 ambiguous final text stays unavailable" \
+    || bad "TC-REVIEW-VERDICT-PATH-039 got $FALLBACK_VERDICT"
+
+  timeout_rc=$(run_finaltext_stub timeout "Review PASSED - partial" 124)
+  fallback_stub_resolve timeout claude "$timeout_rc" "" \
+    "$SANDBOX/fallback-timeout/stream.jsonl"
+  [[ "$timeout_rc" == "124" && "$FALLBACK_VERDICT" == "timed-out" \
+      && ! -e "$SANDBOX/fallback-timeout/posted-body" ]] \
+    && ok "TC-REVIEW-VERDICT-PATH-040 rc124 anchored text stays timed-out" \
+    || bad "TC-REVIEW-VERDICT-PATH-040 got $FALLBACK_VERDICT"
+
+  malformed_rc=$(run_finaltext_stub malformed "Review PASSED - ignored" 0)
+  fallback_stub_resolve malformed claude "$malformed_rc" artifact-malformed \
+    "$SANDBOX/fallback-malformed/stream.jsonl"
+  [[ "$FALLBACK_VERDICT:$FALLBACK_SOURCE" == "unavailable:artifact-malformed" \
+      && ! -e "$SANDBOX/fallback-malformed/posted-body" ]] \
+    && ok "TC-REVIEW-VERDICT-PATH-041 malformed artifact refuses final-text rescue" \
+    || bad "TC-REVIEW-VERDICT-PATH-041 got $FALLBACK_VERDICT:$FALLBACK_SOURCE"
+
+  post_fail_rc=$(run_finaltext_stub post-fail "Review PASSED - cannot post" 0)
+  fallback_stub_resolve post-fail claude "$post_fail_rc" "" \
+    "$SANDBOX/fallback-post-fail/stream.jsonl" true
+  [[ "$FALLBACK_VERDICT:$FALLBACK_SOURCE" == "unavailable:" \
+      && ! -e "$SANDBOX/fallback-post-fail/posted-body" ]] \
+    && ok "TC-REVIEW-VERDICT-PATH-033 failed wrapper post leaves member unavailable" \
+    || bad "TC-REVIEW-VERDICT-PATH-033 got $FALLBACK_VERDICT:$FALLBACK_SOURCE"
+else
+  bad "Claude production final-text fallback seam is defined"
 fi
 
 echo ""

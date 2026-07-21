@@ -225,10 +225,26 @@ AGENT_CMD="claude"
 # AGENT_CMD=opencode).
 AGENT_DEV_MODEL=""
 AGENT_REVIEW_MODEL="sonnet"
-# WARNING: 'bypassPermissions' grants the agent unrestricted shell access.
-# Only use in trusted, sandboxed environments (containers, dedicated VMs).
-# For production on shared hosts, use 'auto' or 'plan'.
+# Claude permission-mode matrix (verified with Claude Code 2.1.216):
+#   auto              Recommended on shared hosts. For CLAUDE REVIEW members
+#                     only, the wrapper appends --add-dir for the per-run
+#                     verdict-artifact and verdict-body directories plus
+#                     --allowedTools grants for write-verdict-artifact.sh,
+#                     write-verdict-body.sh, and post-verdict.sh. Operator
+#                     AGENT_REVIEW_EXTRA_ARGS[_CLAUDE] stay first.
+#   bypassPermissions No injection is needed or added. Existing trusted,
+#                     sandboxed deployments remain unchanged; this mode grants
+#                     the agent unrestricted shell access.
+#   plan              Unsupported for the review lane because it cannot execute
+#                     the verdict-reporting sequence. The wrapper logs a loud
+#                     warning and does not claim to grant it.
+# The adapter passes this value verbatim. `default` is NOT a supported alias.
+# Claude Code 2.1.216 accepts --permission-mode auto|bypassPermissions|plan,
+# repeatable --add-dir, and --allowedTools tool patterns.
 AGENT_PERMISSION_MODE="auto"
+# Independently disable either review-lane compatibility path if required.
+REVIEW_CLAUDE_PERMISSION_INJECTION="true"
+REVIEW_FINAL_TEXT_VERDICT_FALLBACK="true"
 
 # Wall-clock cap for each agent invocation (run_agent / resume_agent).
 # Accepts coreutils `timeout` units: s, m, h, d. Default 4h.

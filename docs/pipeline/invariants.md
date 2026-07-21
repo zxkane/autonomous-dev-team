@@ -9091,4 +9091,86 @@ wiring).
 - [INV-141](#inv-141-token-budgets-use-strict-accounting-for-post-run-wrapper-gates-and-pre-dispatch-admission-with-durable-terminal-routing) - accounting identities and usage commit path.
 - [`adapter-spec.md`](adapter-spec.md#36-turn-limit-capability-inv-142) - published production capability matrix.
 
+## INV-143: Claude review verdict reporting under auto is unattended and its final-result fallback is session-bound, clean-exit-only, and none-capable
+
+_Triage (issue #236): [machine-checked: tests/unit/test-review-verdict-path.sh, tests/e2e/run-verdict-artifact-fleet-e2e.sh]_
+
+**Rule**: a Claude review fan-out member under `AGENT_PERMISSION_MODE=auto`
+receives only the per-run access needed to execute the complete verdict
+sequence its prompt instructs. After operator
+`AGENT_REVIEW_EXTRA_ARGS[_CLAUDE]`, the wrapper appends `--add-dir` for the
+artifact run directory and body lane directory, then `--allowedTools` entries
+for exactly:
+
+- `Bash(bash scripts/write-verdict-artifact.sh:*)`;
+- `Bash(bash scripts/write-verdict-body.sh:*)`;
+- `Bash(bash scripts/post-verdict.sh:*)`.
+
+The two writer helpers read stdin and publish only to the corresponding
+wrapper-exported path. The artifact writer uses a mode-0600 same-directory temp
+file plus atomic rename, preserving INV-78's no-torn-read contract. The body
+writer uses the same publication discipline. Injection is Claude-review-only,
+default-enabled by `REVIEW_CLAUDE_PERMISSION_INJECTION=true`, absent under
+`bypassPermissions`, and absent with a loud warning under unsupported `plan`.
+Both directories must exist, and the body lane's `/tmp` allocation-failure
+sentinel is explicitly refused rather than widened into an `--add-dir /tmp`
+grant. No adapter or dev-side argv is changed.
+
+If artifact and comment resolution both leave a Claude member unresolved, the
+wrapper MAY use its own captured final result when
+`REVIEW_FINAL_TEXT_VERDICT_FALLBACK=true` (default). Every Claude review capture
+is session-suffixed regardless of token/turn-control settings; the reused
+append-only prior-round log is never read. The extractor considers only the last
+valid stream-json `type=result` record with `is_error != true` and a string
+`result`. Malformed lines, error records, and missing/non-string results are
+ineligible. The recognizer returns `pass|fail|none` and matches only
+byte-zero, first-line canonical `Review PASSED` or `Review findings:` grammar.
+It never delegates decision-making to `_classify_verdict_body`, whose
+intentional fail-first default has no `none` state.
+
+Fallback eligibility additionally requires launch rc `0`. Rc 124/137 remains
+the INV-48 deciding timeout veto; every other nonzero rc remains unavailable.
+A malformed artifact refuses the fallback under INV-78 Clause V1. Therefore
+the strict precedence is **artifact > authenticated comment > Claude final
+result**, with malformed artifact as a terminal refusal, not an "absent"
+artifact. On recognition, the wrapper posts through `post-verdict.sh`; only a
+successful post records `AGENT_VERDICT_SOURCES[i]=claude-finaltext-fallback`.
+That tag and its log line are internal provenance, not a visible comment
+marker.
+
+**Trust argument**: this fallback follows INV-62's wrapper-captured stdout
+precedent but is narrower. Its source is the wrapper's own process capture,
+bound to this member's run by filename, never agent-authored GitHub-visible
+free text. It changes no INV-20/INV-40 comment authenticity predicate.
+
+**Producer**: `autonomous-review.sh` (per-run paths, production-seam calls,
+session-bound log); `lib-review-claude.sh` (pure assembly, extraction,
+recognition and eligibility helpers, plus the exact fan-out mutation and
+post-poll fallback orchestration functions);
+`write-verdict-{artifact,body}.sh`.
+**Consumer**: the Claude Code review member, then the existing INV-40
+aggregation and H5 handoff.
+**Status**: **ENFORCED** for permission-mode isolation, deterministic atomic
+writes, current-run binding, result hygiene, precedence, clean-exit gating, and
+independent knobs.
+**Test**: `tests/unit/test-review-verdict-path.sh`
+(`TC-REVIEW-VERDICT-PATH-001..034,042`: exact argv/mode matrix and ordering,
+dev argv isolation, allocation-failure refusal, writer behavior,
+recognizer/result hygiene, stale-log binding, rc/malformed/knob gates,
+prompt/wrapper wiring, production fallback success and post failure);
+`tests/e2e/run-verdict-artifact-fleet-e2e.sh`
+(`TC-REVIEW-VERDICT-PATH-033,035..041`: permission-honoring Claude stub executes
+the full body/artifact/post sequence, bypass receives no grants, anchored
+pass/fail fallback, ambiguous prose, timeout veto, malformed refusal, failed
+wrapper post). Both fixtures call the production orchestration functions used
+by `autonomous-review.sh`; they do not duplicate those decision branches.
+Test plan: `docs/test-cases/review-verdict-path.md`.
+
+**Cross-references**:
+- [INV-20](#inv-20-verdict-authenticity-binding-actor--window--trailer-presence) / [INV-40](#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback) - authenticated comment channel and aggregation.
+- [INV-48](#inv-48-per-side-review-wall-clock-timeout-agent_review_timeout-1h-default-with-browser-e2e-exclusion-and-timeout-veto) - nonzero timeout veto this fallback cannot override.
+- [INV-56](#inv-56-review-verdict-is-posted-via-the-deterministic-post-verdict-helper-not-the-agents-bare-gh) - sole visible comment-posting helper.
+- [INV-62](#inv-62-the-codex-review-lane-runs-the-codex-review-subcommand-auto-scoped-prompt-carried-gate-with-a-stdout-verdict-fallback) - wrapper-captured output precedent.
+- [INV-78](#inv-78-review-verdicts-resolve-from-a-typed-artifact-file-first-comment-scraping-is-an-explicitly-logged-fallback-a-malformed-artifact-is-loud-never-a-silent-absent) - atomic artifact and malformed-refusal contract.
+
 ---

@@ -451,7 +451,17 @@ For each agent the wrapper provisioned (in the fan-out loop) a path
 `${XDG_STATE_HOME:-$HOME/.local/state}/autonomous-<project>/runs/<run-id>/verdict-<agent>.json`
 (run-id = the agent's session UUID), exported it as `VERDICT_ARTIFACT_PATH`, and
 told the agent (in the prompt) to write its verdict JSON there atomically
-(tmp + `mv`). The fan-out join is a **bounded observe loop** (INV-78 [P1] #2): it
+(tmp + `mv`). Claude review members use
+`bash scripts/write-verdict-artifact.sh`, which performs that same-directory
+private-temp write and rename itself; verdict bodies similarly use
+`write-verdict-body.sh`. Under `AGENT_PERMISSION_MODE=auto`, the wrapper appends
+the two per-run directories via `--add-dir` and allowlists only those two
+writers plus `post-verdict.sh`, after operator review extra-args. The injection
+is Claude-review-only: `bypassPermissions` receives nothing, `plan` receives
+nothing and logs an unsupported-lane warning, and the dev adapter path is
+unchanged. Both directories must exist; the lane allocator's bare `/tmp`
+failure sentinel is refused, never granted. The fan-out join is a **bounded
+observe loop** (INV-78 [P1] #2): it
 breaks as soon as EITHER all `_fanout_pids` exited (`kill -0`) OR **every agent
 slot has a resolved first verdict** (`_all_first_verdicts_resolved` —
 [INV-84](invariants.md#inv-84-the-fan-out-observe-loop-early-exit-fires-once-every-agent-slot-has-a-resolved-first-verdict-artifact-frozen-or-comment-observed--not-when-every-artifact-file-exists), #271:
@@ -506,8 +516,10 @@ ONCE and classifies the §4.3 `verdict.state`:
   per-CLI fallback rate — the signal that gates eventual fallback removal).
 
 The artifact moves the verdict **CHANNEL**, not the absence model: an absent
-verdict keeps the bounded-retry/drop semantics (INV-43/INV-48). `post-verdict.sh`
-stays the sole comment poster ([INV-56](invariants.md#inv-56-review-verdict-is-posted-via-the-deterministic-post-verdict-helper-not-the-agents-bare-gh)),
+verdict normally keeps the bounded-retry/drop semantics (INV-43/INV-48). A
+cleanly-exited Claude member has the additional narrow INV-143 fallback
+described below. `post-verdict.sh` stays the sole comment poster
+([INV-56](invariants.md#inv-56-review-verdict-is-posted-via-the-deterministic-post-verdict-helper-not-the-agents-bare-gh)),
 and the wrapper's rendered aggregate comment + the INV-35 trailer are
 format-unchanged, so the dispatcher (INV-03/06/07) and dev-resume `Review findings:`
 machine consumers keep working.
@@ -516,11 +528,46 @@ machine consumers keep working.
 
 For each agent **the artifact-first pass did NOT already resolve**, the wrapper runs ONE verdict jq query with the [INV-20](invariants.md#inv-20-verdict-authenticity-binding-actor--window--trailer-presence) authenticity binding PLUS a per-agent `Review Agent: <name>` discriminator predicate, taking `last` per agent. Each matched comment is classified with the existing two-step FAIL-first rule (`_classify_verdict_body`, in `lib-review-poll.sh`). An agent whose artifact was `artifact-malformed` is NOT comment-polled (INV-78 Clause V1 — its machine output is untrustworthy; the loud envelope + terminal sweep is the contract). A no-verdict agent is resolved at window-expiry by `lib-review-aggregate.sh::_classify_noverdict_agent <rc>` ([INV-48](invariants.md#inv-48-per-side-review-wall-clock-timeout-agent_review_timeout-1h-default-with-browser-e2e-exclusion-and-timeout-veto)): CLI exit `124`/`137` (killed by the review wall-clock cap) → **`timed-out`** (a deciding FAIL veto), any other rc → **`unavailable`** (dropped). The window is the full (INV-43-scaled) poll window — a non-zero exit does **not** drop it early (see [Verdict polling](#verdict-polling), #180), and a verdict (PASS or FAIL) it *did* post always counts, even if the CLI also exited non-zero.
 
+### Claude final-result fallback (INV-143)
+
+After artifact resolution and the full comment poll window, an unresolved
+Claude member may be resolved from the wrapper's own stream-json capture. This
+is a third-priority channel only: **artifact > comment > Claude final result**.
+Every Claude review capture is always session-suffixed
+(`/tmp/agent-<project>-review-<issue>-claude-<session>.log`), even when token
+and turn controls are disabled, so an append-only prior-round log can never
+supply the "last" result record.
+
+`lib-review-claude.sh::_claude_final_result_text` ignores malformed JSON lines,
+non-result records, `is_error:true`, and missing/non-string `result` values; the
+last valid result record wins. `_claude_final_text_verdict` returns
+`pass|fail|none` and recognizes only an exact first-line start of
+`Review PASSED` or `Review findings:`. Quoted, mid-line, later-line, or
+ambiguous prose returns `none`; the legacy fail-first
+`_classify_verdict_body` is not used as the decision function.
+
+The fallback is gated on all of the following:
+
+- `REVIEW_FINAL_TEXT_VERDICT_FALLBACK=true` (default);
+- member is Claude and launch rc is exactly `0`;
+- no artifact/comment verdict already resolved;
+- artifact source is not `artifact-malformed` (INV-78 Clause V1).
+
+On a recognized verdict, the wrapper writes the captured result to a private
+body file, posts it through `post-verdict.sh`, and only after a successful post
+sets `AGENT_VERDICT_SOURCES[i]=claude-finaltext-fallback`. The source is an
+in-memory tag plus a log line, not a visible comment marker, matching the codex
+stdout-fallback convention. A failed post, `none`, nonzero rc (including
+124/137), or malformed artifact leaves the member unresolved for the existing
+terminal `unavailable`/`timed-out` sweep. The trust boundary is the wrapper's
+own process capture, never GitHub-visible free text, so INV-20/INV-40 comment
+authenticity remains unchanged.
+
 ### Pre-aggregation severity filter (issue #449, R1)
 
 Runs AFTER the terminal no-verdict sweep (which resolves `unavailable`/`timed-out` for any agent still without a verdict) and BEFORE `_aggregate_review_verdicts` below — the exact hook point the issue specifies. For each agent classified `fail`, `lib-review-severity.sh::_review_apply_severity_filter` extracts the highest severity tag from its findings text and demotes to `pass` — non-blocking for THIS round only — when `shouldBlockFinding "$REVIEW_ROUND" "$sev"` says the round's floor doesn't reach it. `unavailable`/`timed-out` agents pass through unchanged (no findings text to score).
 
-**Scored-text source, per resolution path ([INV-132], issue #481)**: the call site branches on `AGENT_VERDICT_SOURCES[i]` — a real, per-agent flag, not agent identity and not body-emptiness. `AGENT_VERDICT_SOURCES[i] == "codex-stdout-fallback"` (a value the wrapper assigns at the exact call site where [INV-62]'s legacy `_codex_review_classify_stdout` route supplies the verdict) is the ONLY branch that scores the raw `AGENT_CODEX_LOGS[i]` capture — and even then, only after stripping the echoed prompt (`_codex_review_strip_prompt_echo`, `adapters/codex.sh`). Every other value (`artifact`, `comment-fallback`, or a codex agent resolved through the ordinary self-post poll loop) scores `AGENT_VERDICT_BODIES[i]`, identical to the non-codex path. Pre-#481, the codex branch was selected unconditionally by agent name, so an artifact-resolved codex verdict was ALWAYS scored from its raw stdout — which always echoes the prompt's own numbered checklist ahead of the agent's real output — collapsing the per-finding fail-safe scan (below) to `none` regardless of the agent's actual findings, which in turn falsely advanced [INV-127]'s round-cap counter on P2-only rounds.
+**Scored-text source, per resolution path ([INV-132], issue #481)**: the call site branches on `AGENT_VERDICT_SOURCES[i]` — a real, per-agent flag, not agent identity and not body-emptiness. `AGENT_VERDICT_SOURCES[i] == "codex-stdout-fallback"` (a value the wrapper assigns at the exact call site where [INV-62]'s legacy `_codex_review_classify_stdout` route supplies the verdict) is the ONLY branch that scores the raw `AGENT_CODEX_LOGS[i]` capture — and even then, only after stripping the echoed prompt (`_codex_review_strip_prompt_echo`, `adapters/codex.sh`). Every other value (`artifact`, `comment-fallback`, `claude-finaltext-fallback`, or a codex agent resolved through the ordinary self-post poll loop) scores `AGENT_VERDICT_BODIES[i]`, identical to the non-codex path. Pre-#481, the codex branch was selected unconditionally by agent name, so an artifact-resolved codex verdict was ALWAYS scored from its raw stdout — which always echoes the prompt's own numbered checklist ahead of the agent's real output — collapsing the per-finding fail-safe scan (below) to `none` regardless of the agent's actual findings, which in turn falsely advanced [INV-127]'s round-cap counter on P2-only rounds.
 
 `_codex_review_strip_prompt_echo` locates a STRUCTURAL boundary in the combined `codex review` stdout/stderr capture — `<CLI header> → <user turn marker> → <echoed prompt> → <reasoning/tool trace> → <codex turn marker(s)> → <final response>` — validating a leading CLI header, then the FIRST standalone `user` marker after it, then the LAST standalone `codex` marker after THAT; only text strictly after the last `codex` marker is scored, minus the CLI's own trailing `tokens used: <N>` footer line. Markers are column-0, exact-word, lines outside EITHER a backtick or a tilde (`~~~`) fenced block AND immediately preceded by a blank line, so a reviewed-file snippet or tool-output line that happens to quote the literal words `user`/`codex` — whether fenced or flowing inline out of the preceding prose with no blank line before it — is never mistaken for a genuine boundary. Any missing piece of that structure is fail-safe: the whole capture is returned unchanged. `_codex_review_compose_body` (the human-facing comment composer) is deliberately UNMODIFIED — stripping is scoped to severity scoring only, and because R1's branch keys on the resolution-channel flag rather than body content, the composed (still-raw) body is never consulted for severity on this route regardless. See [INV-132](invariants.md#inv-132-the-pre-aggregation-severity-filter-selects-its-scored-text-by-resolution-channel--a-real-branchable-agent_verdict_sources-value-never-agent-identity-or-a-parsed-log-line--and-the-codex-stdout-classify-fallback-route-scores-a-structurally-located-final-response-turn-never-the-raw-echoed-prompt) for the full incident writeup.
 

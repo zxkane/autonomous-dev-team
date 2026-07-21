@@ -116,6 +116,12 @@ flowchart LR
 - Review wrapper must run PR discovery via authoritative close linkage ([INV-86](invariants.md#inv-86-prissue-binding-is-authoritative-via-closingissuesreferences-never-a-bare-n-body-mention-and-no-pr-is-mutated-without-verified-linkage)) — bind the PR whose `closingIssuesReferences` contains this issue (branch-name `issue-<N>` fallback for close-keyword-less partial-fix PRs), then assert the same linkage with `verify_pr_closes_issue` before any PR mutation. If discovery yields no PR (or the guard fails) it exits with `−reviewing +pending-dev` and a clear comment — never reviewing or mutating a foreign PR.
 - Review wrapper must filter verdict comments by session-id ([anti-spoofing defense](review-agent-flow.md#verdict-polling)): another commenter could write "Review PASSED" verbatim.
 - The wrapper MAY fan out to multiple verdict-reaching agents internally ([INV-40](invariants.md#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback)) when `AGENT_REVIEW_AGENTS` lists more than one CLI. This does NOT change the handoff carrier: the dispatcher still sets one `+reviewing` label and hands off one issue; the wrapper aggregates the N verdicts under the unanimous-PASS rule and emits exactly one carrier label transition (H5) plus one verdict trailer. The fan-out is invisible to the dispatcher.
+- Verdict resolution is ordered per member: typed artifact, authenticated
+  comment, then the Claude-only session-bound final-result fallback
+  ([INV-143](invariants.md#inv-143-claude-review-verdict-reporting-under-auto-is-unattended-and-its-final-result-fallback-is-session-bound-clean-exit-only-and-none-capable)).
+  A malformed artifact blocks both later channels; rc 124/137 remains the
+  INV-48 timeout veto. A wrapper-posted final-result verdict is the same H5
+  carrier comment, not a new dispatcher handoff type.
 
 **Race window**: Step 5b's DEAD-reviewing path can race with the wrapper's trap. Wrapper trap clears `reviewing`; if dispatcher's probe ran before that, dispatcher also clears `reviewing` and adds `pending-dev`. Both writes converge.
 

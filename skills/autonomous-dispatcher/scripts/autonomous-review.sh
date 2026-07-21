@@ -187,6 +187,11 @@ source "${LIB_DIR}/lib-review-postfail.sh"
 # today's bounded-retry/drop semantics via the comment fallback + post-window
 # sweep. [INV-65] sourced from the real skill tree via LIB_DIR (no project symlink).
 source "${LIB_DIR}/lib-review-artifact.sh"
+# shellcheck source=lib-review-claude.sh
+# Claude review-lane verdict delivery: narrow auto-mode grants for the wrapper's
+# per-run directories and deterministic helper scripts, plus the session-bound
+# stream-json final-text fallback. Inert for dev launches and non-Claude members.
+source "${LIB_DIR}/lib-review-claude.sh"
 # shellcheck source=lib-review-classify.sh
 # INV-92 (#298): per-finding actionability classification — the deterministic
 # protected-paths matcher + token-scope probe + the aggregate dev-actionability
@@ -1574,11 +1579,12 @@ schema-validated verdict artifact (conforming to
 
   ${_verdict_artifact_path}
 
-Write it ATOMICALLY — write to a temp file in the same directory, then
-\`mv\` (rename) it into place so the wrapper never sees a torn half-written file:
+Write it through the deterministic artifact helper. The helper reads stdin,
+writes a private temp file in the same directory, and atomically renames it to
+\`\$VERDICT_ARTIFACT_PATH\`, so the wrapper never sees a torn half-written file:
 
 \`\`\`bash
-cat > "${_verdict_artifact_path}.tmp.\$\$" <<VERDICT_JSON
+bash scripts/write-verdict-artifact.sh <<'VERDICT_JSON'
   {
     "schema_version": 1,
     "verdict": "<PASS|FAIL>",
@@ -1602,7 +1608,6 @@ cat > "${_verdict_artifact_path}.tmp.\$\$" <<VERDICT_JSON
     "model": "${_agent_model}"
   }
 VERDICT_JSON
-mv -f "${_verdict_artifact_path}.tmp.\$\$" "${_verdict_artifact_path}"
 \`\`\`
 
 Schema rules the wrapper ENFORCES (a malformed artifact is surfaced LOUDLY on the
@@ -1680,7 +1685,7 @@ Helper usage (verdict comment ONLY — keep using bare \`gh\` for reads like
 $(provider_prompt_fragment review.gh_pr_view_checks_parenthetical)
 \`\`\`bash
 # Write your verdict body to a file (a FILE avoids shell-quoting mangling):
-cat > ${_verdict_body_path} <<'VERDICT'
+bash scripts/write-verdict-body.sh <<'VERDICT'
 <your one-line PASS summary, or the numbered findings list>
 VERDICT
 # Then post it (the helper prepends the canonical first line + appends the trailer):
@@ -1694,7 +1699,9 @@ bash scripts/post-verdict.sh ${ISSUE_NUMBER} <pass|fail> ${_verdict_body_path} $
   (a body that doesn't already start with \`Review PASSED\` gets that exact
   prefix prepended by the helper). Concretely:
   \`\`\`bash
-  printf '%s' "All checklist items verified, code quality good. No requirement drift." > ${_verdict_body_path}
+  bash scripts/write-verdict-body.sh <<'VERDICT'
+  All checklist items verified, code quality good. No requirement drift.
+  VERDICT
   bash scripts/post-verdict.sh ${ISSUE_NUMBER} pass ${_verdict_body_path} ${_agent_name} ${_agent_session_id} '${_agent_model}'
   \`\`\`
   Then exit.
@@ -1707,7 +1714,7 @@ bash scripts/post-verdict.sh ${ISSUE_NUMBER} <pass|fail> ${_verdict_body_path} $
   gets that exact prefix prepended by the helper).$(if [[ "${E2E_ACTIVE:-false}" == "true" ]]; then echo "
   For any E2E gap, quote the relevant row of the posted evidence comment (the wrapper ran E2E once — do NOT re-run it)."; fi) Concretely:
   \`\`\`bash
-  cat > ${_verdict_body_path} <<'VERDICT'
+  bash scripts/write-verdict-body.sh <<'VERDICT'
   1. [P1] <first finding + remediation>
   2. [P3] <second finding + remediation>
   VERDICT
@@ -2634,8 +2641,13 @@ for _agent in "${REVIEW_AGENTS_LIST[@]}"; do
   # [P1] #2: the frozen-at-first-land snapshot path (same dir → same fs + 0700
   # parent). The agent NEVER writes here; only the observe loop copies into it.
   AGENT_ARTIFACT_SNAPSHOTS+=("${_agent_artifact_path}.landed")
-  _agent_log="/tmp/agent-${PROJECT_ID}-review-${ISSUE_NUMBER}-${_agent}.log"
-  if token_budget_enabled || [[ "$TURN_REVIEW_ENABLED" == "true" ]]; then
+  # Claude always gets a session-bound stream-json capture. Its final-text
+  # fallback must never inspect the append-only reusable log from a prior round.
+  # Other agents retain the reusable path unless token/turn control already
+  # requires a session suffix.
+  _agent_log=$(_claude_review_log_path "/tmp" "$PROJECT_ID" "$ISSUE_NUMBER" "$_agent" "$_agent_session_id")
+  if [[ "$_agent" != "claude" ]] \
+      && { token_budget_enabled || [[ "$TURN_REVIEW_ENABLED" == "true" ]]; }; then
     _agent_log="/tmp/agent-${PROJECT_ID}-review-${ISSUE_NUMBER}-${_agent}-${_agent_session_id}.log"
   fi
   AGENT_CONTROLLER_LOGS+=("$_agent_log")
@@ -2802,6 +2814,14 @@ for _agent in "${REVIEW_AGENTS_LIST[@]}"; do
     _resolved_review_extra_args=$(_resolve_review_agent_extra_args "$_agent")
     AGENT_DEV_EXTRA_ARGS="$_resolved_review_extra_args"
     AGENT_REVIEW_EXTRA_ARGS="$_resolved_review_extra_args"
+    # Issue #526: only the Claude REVIEW member in permission mode `auto`
+    # receives per-run filesystem roots and the three deterministic verdict
+    # helper grants. Append after operator args so configuration composes
+    # predictably; both aliases stay identical for any future resume path.
+    _claude_review_apply_permission_injection \
+      "$_agent" "${AGENT_PERMISSION_MODE:-auto}" \
+      "$_agent_artifact_path" "$_agent_verdict_lane_dir" \
+      AGENT_DEV_EXTRA_ARGS AGENT_REVIEW_EXTRA_ARGS
     _agent_session_name="review-pr-${PR_NUMBER}-issue-${ISSUE_NUMBER}-${_agent}"
     # Capture the rc explicitly: the subshell inherits `set -e`, so a non-zero
     # run_agent (the exact case the sidecar records — a CLI launch failure)
@@ -3396,6 +3416,17 @@ for _i in "${!AGENT_NAMES[@]}"; do
     log "WARNING: INV-62 codex stdout-fallback post failed (post-verdict.sh non-zero); codex remains unresolved → unavailable."
   fi
   rm -f "$_cx_body_file" 2>/dev/null || true
+done
+
+# INV-143 (#526): Claude final-text verdict fallback. Artifact and comment
+# resolution have already run, so this loop only sees a truly unresolved Claude
+# member. The source is the wrapper's own session-bound stream-json capture,
+# never GitHub-visible prose. Eligibility is deliberately narrow: rc 0, feature
+# knob enabled, and no malformed artifact (INV-78 Clause V1). The recognizer has
+# a `none` state and accepts only canonical first-line grammar from the last
+# valid, non-error result record.
+for _i in "${!AGENT_NAMES[@]}"; do
+  _claude_apply_final_text_fallback "$_i"
 done
 
 # INV-78 (#233): tag the verdict SOURCE for every agent the artifact-first pass
