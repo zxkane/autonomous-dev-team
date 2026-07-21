@@ -224,7 +224,7 @@ else
   fail "TC-REVIEW-VERDICT-PATH-008 artifact helper succeeds"
 fi
 assert_rc "TC-REVIEW-VERDICT-PATH-009 artifact helper rejects unset target" 2 \
-  bash "$DISP/write-verdict-artifact.sh"
+  env -u VERDICT_ARTIFACT_PATH bash "$DISP/write-verdict-artifact.sh"
 
 body_text=$'First line\nSecond `line` with $shell text'
 if printf '%s' "$body_text" | VERDICT_BODY_FILE="$body" \
@@ -235,7 +235,7 @@ else
   fail "TC-REVIEW-VERDICT-PATH-010 body helper succeeds"
 fi
 assert_rc "TC-REVIEW-VERDICT-PATH-011 body helper rejects unset target" 2 \
-  bash "$DISP/write-verdict-body.sh"
+  env -u VERDICT_BODY_FILE bash "$DISP/write-verdict-body.sh"
 
 echo ""
 echo "=== Final-result recognition ==="
