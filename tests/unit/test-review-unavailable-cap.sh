@@ -487,6 +487,55 @@ assert_contains "TC-RUC-030e full smoke-unavailable path uses production evidenc
 assert_contains "TC-RUC-030f smoke advisory documents bounded retry behavior" \
   "$smoke_all_unavailable_block" 'Retries remain automatic below \`REVIEW_UNAVAILABLE_CAP\`'
 
+# TC-RUC-031: partial smoke drop followed by all surviving members dropping —
+# BEHAVIORAL, through the PRODUCTION pass) branch. The wrapper's smoke-gate
+# pass) block is awk-extracted (same boundaries TC-RUC-030c uses) and EXECUTED
+# here with the smoke-state fixtures a real partial drop produces: kiro smoked
+# unavailable (evidence carries a reason token), claude survived. The block
+# itself must append kiro's classified reason to _smoke_reasons BEFORE
+# shrinking REVIEW_AGENTS_LIST — a regression that clears _smoke_reasons after
+# the shrink (or stops appending on this path) fails TC-RUC-031b/d, not just a
+# source grep. The surviving member then drops during the fan-out and the
+# all-unavailable trip report must name BOTH members' evidence.
+reset_harness
+REVIEW_UNAVAILABLE_CAP=1
+_smoke_pass_body=$(awk '
+  /case "\$_SMOKE_GATE" in/ { in_gate=1 }
+  in_gate && /^    pass\)/ { capture=1; next }
+  capture && /^      ;;/ { exit }
+  capture { print }
+' "$WRAPPER")
+if [[ -z "$_smoke_pass_body" ]]; then
+  bad "TC-RUC-031 setup: failed to extract the wrapper smoke pass) block"
+else
+  _smoke_reasons=""
+  REVIEW_AGENTS_LIST=(kiro claude)
+  _smoke_states=(unavailable pass)
+  _smoke_evidence=("SMOKE kiro unavailable reason=quota-exhausted" "")
+  _smoke_evidence_reason() {
+    local capture="${1:-}"
+    case "$capture" in
+      *reason=*) printf '%s' "${capture#*reason=}" ;;
+      *)         printf '' ;;
+    esac
+  }
+  ISSUE_NUMBER=525 PR_NUMBER=530 RUN_ID=test-run
+  eval "$_smoke_pass_body"
+  assert_eq "TC-RUC-031a production pass) block shrinks the fleet to survivors" \
+    "claude" "${REVIEW_AGENTS_LIST[*]}"
+  assert_contains "TC-RUC-031b production pass) block appends smoke evidence before the shrink" \
+    "$_smoke_reasons" "kiro: smoke: quota-exhausted"
+  run_unavailable_round aaa \
+    "claude: stream-error: reconnect exhausted; " "$_smoke_reasons"
+  assert_eq "TC-RUC-031c partial-smoke then all-surviving-drop reaches stalled" \
+    "stalled" "$ISSUE_STATE"
+  report=$(grep 'reason=review-unavailable-cap' "$COMMENTS")
+  assert_contains "TC-RUC-031d trip report names the pre-fan-out smoke-dropped member" \
+    "$report" "kiro: smoke: quota-exhausted"
+  assert_contains "TC-RUC-031e trip report retains the surviving member's fan-out drop reason" \
+    "$report" "claude: stream-error: reconnect exhausted"
+fi
+
 reset_harness
 REVIEW_UNAVAILABLE_CAP=1
 run_unavailable_round aaa "claude: no reason token recorded; " \
