@@ -486,17 +486,19 @@ assert_contains "TC-RUC-030e full smoke-unavailable path uses production evidenc
   "$smoke_all_unavailable_block" '_review_unavailable_add_smoke_reason'
 assert_contains "TC-RUC-030f smoke advisory documents bounded retry behavior" \
   "$smoke_all_unavailable_block" 'Retries remain automatic below \`REVIEW_UNAVAILABLE_CAP\`'
+all_unavailable_block=$(awk '/^  all-unavailable\)/,/^    ;;$/' "$WRAPPER")
 
-# TC-RUC-031: partial smoke drop followed by all surviving members dropping —
-# BEHAVIORAL, through the PRODUCTION pass) branch. The wrapper's smoke-gate
-# pass) block is awk-extracted (same boundaries TC-RUC-030c uses) and EXECUTED
-# here with the smoke-state fixtures a real partial drop produces: kiro smoked
-# unavailable (evidence carries a reason token), claude survived. The block
-# itself must append kiro's classified reason to _smoke_reasons BEFORE
-# shrinking REVIEW_AGENTS_LIST — a regression that clears _smoke_reasons after
-# the shrink (or stops appending on this path) fails TC-RUC-031b/d, not just a
-# source grep. The surviving member then drops during the fan-out and the
-# all-unavailable trip report must name BOTH members' evidence.
+# TC-RUC-031: partial smoke drop followed by all surviving members dropping -
+# BEHAVIORAL, through the PRODUCTION pass) branch AND the production terminal
+# handoff in all-unavailable). The wrapper's smoke-gate pass) block is
+# awk-extracted (same boundaries TC-RUC-030c uses) and EXECUTED here with the
+# smoke-state fixtures a real partial drop produces: kiro smoked unavailable
+# (evidence carries a reason token), claude survived. The block itself must
+# append kiro's classified reason to _smoke_reasons BEFORE shrinking
+# REVIEW_AGENTS_LIST. The surviving member then drops during the fan-out, and
+# the extracted terminal call must carry BOTH evidence channels into the trip
+# report. Removing collection OR the handoff wiring therefore fails behavior,
+# not just a source grep.
 reset_harness
 REVIEW_UNAVAILABLE_CAP=1
 _smoke_pass_body=$(awk '
@@ -525,15 +527,26 @@ else
     "claude" "${REVIEW_AGENTS_LIST[*]}"
   assert_contains "TC-RUC-031b production pass) block appends smoke evidence before the shrink" \
     "$_smoke_reasons" "kiro: smoke: quota-exhausted"
-  run_unavailable_round aaa \
-    "claude: stream-error: reconnect exhausted; " "$_smoke_reasons"
-  assert_eq "TC-RUC-031c partial-smoke then all-surviving-drop reaches stalled" \
-    "stalled" "$ISSUE_STATE"
-  report=$(grep 'reason=review-unavailable-cap' "$COMMENTS")
-  assert_contains "TC-RUC-031d trip report names the pre-fan-out smoke-dropped member" \
-    "$report" "kiro: smoke: quota-exhausted"
-  assert_contains "TC-RUC-031e trip report retains the surviving member's fan-out drop reason" \
-    "$report" "claude: stream-error: reconnect exhausted"
+  _terminal_handoff_body=$(printf '%s\n' "$all_unavailable_block" | awk '
+    /^    _review_unavailable_terminal_route/ { capture=1 }
+    capture { print }
+    capture && $0 !~ /\\$/ { exit }
+  ')
+  if [[ -z "$_terminal_handoff_body" ]]; then
+    bad "TC-RUC-031 setup: failed to extract the production terminal handoff"
+  else
+    ISSUE_STATE="reviewing"
+    PR_HEAD_SHA=aaa
+    _dropped_reasons="claude: stream-error: reconnect exhausted; "
+    eval "$_terminal_handoff_body"
+    assert_eq "TC-RUC-031c production partial-smoke terminal handoff reaches stalled" \
+      "stalled" "$ISSUE_STATE"
+    report=$(grep 'reason=review-unavailable-cap' "$COMMENTS")
+    assert_contains "TC-RUC-031d trip report names the pre-fan-out smoke-dropped member" \
+      "$report" "kiro: smoke: quota-exhausted"
+    assert_contains "TC-RUC-031e trip report retains the surviving member's fan-out drop reason" \
+      "$report" "claude: stream-error: reconnect exhausted"
+  fi
 fi
 
 reset_harness
@@ -582,7 +595,6 @@ assert_contains "TC-RUC-027 signal-free drop degrades explicitly" "$report" \
 
 echo
 echo "=== TC-RUC-033..036 production terminal route ==="
-all_unavailable_block=$(awk '/^  all-unavailable\)/,/^    ;;$/' "$WRAPPER")
 assert_contains "TC-RUC-033 wrapper calls the production terminal route" \
   "$all_unavailable_block" '_review_unavailable_terminal_route'
 assert_contains "TC-RUC-034 handled terminal route exits before fallback" \
