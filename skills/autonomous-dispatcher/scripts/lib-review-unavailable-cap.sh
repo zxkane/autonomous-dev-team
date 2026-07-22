@@ -102,6 +102,7 @@ _review_unavailable_prior_marker() {
               and ((.id // 0) > ($rearm_cutoff.id // 0))
             )
           )
+        | select(.body | type == "string")
         | select(.body | test(
             "^<!--[[:space:]]*dispatcher-review-unavailable-breaker:[[:space:]]*issue="
             + $issue
