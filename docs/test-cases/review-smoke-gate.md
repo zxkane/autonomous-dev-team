@@ -76,7 +76,7 @@ The wrapper's parallel loop calls `_classify_smoke_state`, which invokes
 | TC-REVIEW-SMOKE-045 | FAIL-abort path: posts an issue comment naming the failed agent(s) + the SMOKE evidence, sets `RESULT_PARSED=true`, does NOT add `pending-dev`, emits a verdict trailer, and exits non-zero |
 | TC-REVIEW-SMOKE-046 | FAIL-abort does NOT spawn the fan-out (the `for _agent` loop is downstream of the abort `exit`) |
 | TC-REVIEW-SMOKE-047 | UNAVAILABLE-drop path: a dropped member is removed from `REVIEW_AGENTS_LIST` before the fan-out and the drop reason carries the `smoke:` prefix |
-| TC-REVIEW-SMOKE-048 | all-UNAVAILABLE: the surviving set is empty → the wrapper drives the existing all-unavailable fallback (no empty fan-out spawned) |
+| TC-REVIEW-SMOKE-048 | all-UNAVAILABLE: the wrapper keeps the original list, runs the full fan-out, and a resulting all-unavailable aggregate counts toward INV-144 |
 | TC-REVIEW-SMOKE-049 | `bash -n` parses the wrapper + lib clean; shellcheck clean |
 | TC-REVIEW-SMOKE-050 | default-off regression: with `REVIEW_SMOKE_ENABLED` unset/false, `smoke_agent` is NOT invoked and the fan-out set equals `REVIEW_AGENTS_LIST` unchanged (grep that the smoke block is guarded) |
 | TC-REVIEW-SMOKE-051 | the smoke runs strictly before the fan-out clock — assert no `post-verdict`/verdict-comment call inside the smoke block (the smoke must not pollute the INV-40 attribution window) |

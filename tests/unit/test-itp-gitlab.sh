@@ -827,6 +827,21 @@ assert_contains "TC-WB-110 endpoint issues/:iid/resource_label_events" \
 assert_eq "TC-WB-110 emits the FIRST (earliest) matching created_at" \
   "2026-04-03T00:00:00.000Z" "$out"
 
+removal_fixture=$(mktemp)
+cat > "$removal_fixture" <<'JSON'
+[
+  {"id":9101,"action":"remove","label":{"name":"stalled"},"created_at":"2026-04-06T00:00:00.000Z"},
+  {"id":9102,"action":"remove","label":{"name":"stalled"},"created_at":"2026-04-08T00:00:00.000Z"},
+  {"id":9103,"action":"remove","label":{"name":"other"},"created_at":"2026-04-09T00:00:00.000Z"}
+]
+JSON
+_gl_stub_reset
+_GL_STUB_PAYLOAD="$removal_fixture"
+out=$(itp_gitlab_label_event_ts 42 "stalled" latest-removed) || true
+assert_eq "TC-WB-110b latest-removed emits newest matching removal" \
+  "2026-04-08T00:00:00.000Z" "$out"
+rm -f "$removal_fixture"
+
 # TC-WB-111 no matching event → empty stdout, rc 0.
 _gl_stub_reset
 _GL_STUB_PAYLOAD="$PAYLOADS/gitlab-resource-label-events.json"

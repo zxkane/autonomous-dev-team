@@ -24,7 +24,7 @@ can never lie again.
 | `docs/pipeline/schemas/transitions.schema.json` | Draft-07 schema for `transitions.json`. |
 | `docs/pipeline/schemas/examples/transitions.{golden,negative}.*.json` | Golden (validates) + negatives (rejected). |
 | `docs/pipeline/spec-guard-map.json` | In-repo mapping: every `guard`/`action` token in `transitions.json` → a named function or greppable predicate string in `lib-dispatch.sh` / the wrappers. Maintained by hand; the checker fails when a token has no mapping or a mapped predicate is no longer greppable. |
-| `docs/pipeline/spec-codesite-map.json` | Three sections: `code_sites` (every **code-bearing** transition id → `{file, anchor}`) for C.3; a `sites[]` per-physical-site manifest (`{file, movement, anchor}`, one per literal write site, anchor grep-unique + write-adjacent) for C.4 (count) and C.5 (anchor adjacency); and `variable_write_allowlist` (the two legitimate variable-write functions) for the P1.1 ban. Maintained by hand alongside `transitions.json`; an orphaned `code_sites` entry, a stale/ambiguous anchor, a `sites[]` count drift, a relocated write (anchor no longer adjacent), or a non-allowlisted variable write fails the checker. |
+| `docs/pipeline/spec-codesite-map.json` | Three sections: `code_sites` (every **code-bearing** transition id → `{file, anchor}`) for C.3; a `sites[]` per-physical-site manifest (`{file, movement, anchor}`, one per literal write site, anchor grep-unique + write-adjacent) for C.4 (count) and C.5 (anchor adjacency); and `variable_write_allowlist` (currently empty) for any future P1.1 exception. Maintained by hand alongside `transitions.json`; an orphaned `code_sites` entry, a stale/ambiguous anchor, a `sites[]` count drift, a relocated write (anchor no longer adjacent), or a non-allowlisted variable write fails the checker. |
 | `scripts/gen-state-machine.sh` | `transitions.json` → mermaid block in `state-machine.md` (idempotent; marker-delimited region). |
 | `scripts/check-spec-drift.sh` | The drift checker: (a) regenerate-and-diff; (b) guard-mapping + label-write-site completeness. Reused by CI and the unit test. |
 | `.github/workflows/ci.yml` → `spec-drift` job | Runs the checker on plain GitHub-hosted CI (no credentials). |
@@ -80,8 +80,9 @@ not declare.
 
 ### Check C — label-write-site completeness (`check-spec-drift.sh`)
 FIVE sub-checks (plus a hard ban on un-allowlisted variable-valued writes) over
-every `label_swap …` call + every `gh issue edit … --add-label/--remove-label`
-literal across the four pipeline files:
+every `label_swap …` call, direct `itp_transition_state …` call, and
+`gh issue edit … --add-label/--remove-label` literal across the six pipeline
+files:
 - **C.1 vocabulary**: every label literal written appears as a `state` or
   inside an `actions[]` (add-label:X / remove-label:X) of some transition. A
   brand-new label (e.g. a typo) with no transitions.json entry → **CI red**.
@@ -136,11 +137,10 @@ literal across the four pipeline files:
   checks are complementary: C.4 counts, C.5 locates.)
 - **P1.1 variable-write ban**: a variable-valued `--add/--remove-label "$x"` is a
   hard **CI red** (not a green NOTE) — it can inject an undeclared label the
-  literal-site checks never see. The only exceptions are the two sites in
-  `variable_write_allowlist` (the `label_swap` helper definition, whose
-  `$remove`/`$add` come from validated literal callers; and the
-  `hygiene_strip_residual_labels` loop over a hard-coded declared-label list). The
-  ban keys on the variable write's enclosing function, grep-stable.
+  literal-site checks never see. `variable_write_allowlist` is currently empty:
+  the former `label_swap` and `hygiene_strip_residual_labels` sites now delegate
+  to `itp_transition_state` and contain no variable-valued label flags. The ban
+  keys on the variable write's enclosing function, grep-stable.
 
 C.1+C.2+C.3+C.4+C.5 + the variable-write ban together make the AC *"a PR adding
 (even a duplicate / shared-movement / relocated / variable) or removing a

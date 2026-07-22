@@ -448,6 +448,28 @@ assert_eq "TC-TERMCTRL-017 configured GitLab cross-role actor resolves as self" 
 assert_eq "TC-TERMCTRL-018 unrelated GitLab access-token bot remains bot" bot \
   "$(jq -r '.[] | select(.author == "project_2_bot") | .authorKind' <<<"$gitlab_pat_comments")"
 
+gitlab_mixed_comments="$(
+  (
+    _gl_api() {
+      if [[ "${*: -1}" == "/user" ]]; then
+        printf '%s\n' '{"username":"gitlab-pipeline-user"}'
+      else
+        printf '%s\n' '[{"id":1,"system":false,"author":{"username":"gitlab-pipeline-user"},"body":"own","created_at":"2026-07-18T04:01:00Z"},{"id":2,"system":false,"author":{"username":"github-pipeline-user"},"body":"foreign","created_at":"2026-07-18T04:01:01Z"}]'
+      fi
+    }
+    BOT_LOGIN="github-pipeline-user" GITLAB_PROJECT=group%2Frepo \
+      ITP_REQUIRE_SELF_AUTHOR=1 TERMINAL_CONTROL_TRUSTED_AUTHORS=""
+    export BOT_LOGIN GITLAB_PROJECT ITP_REQUIRE_SELF_AUTHOR TERMINAL_CONTROL_TRUSTED_AUTHORS
+    # shellcheck disable=SC1090
+    source "$GITLAB_PROVIDER"
+    itp_gitlab_list_comments 515
+  )
+)"
+assert_eq "TC-TERMCTRL-017c GitLab strict mode resolves provider-local actor despite foreign BOT_LOGIN" self \
+  "$(jq -r '.[] | select(.author == "gitlab-pipeline-user") | .authorKind' <<<"$gitlab_mixed_comments")"
+assert_eq "TC-TERMCTRL-017c inherited GitHub BOT_LOGIN is not trusted by GitLab strict mode" human \
+  "$(jq -r '.[] | select(.author == "github-pipeline-user") | .authorKind' <<<"$gitlab_mixed_comments")"
+
 echo ""
 echo "== TC-TERMCTRL-020..030: owner-aware transitions =="
 reset_store

@@ -109,6 +109,9 @@ source "${LIB_DIR}/lib-review-round.sh"
 # shellcheck source=lib-review-cap.sh
 # Issue #449 (R2): INV-127 review-round-cap escalation breaker.
 source "${LIB_DIR}/lib-review-cap.sh"
+# shellcheck source=lib-review-unavailable-cap.sh
+# INV-144 (#525): independent consecutive all-unavailable review breaker.
+source "${LIB_DIR}/lib-review-unavailable-cap.sh"
 # shellcheck source=lib-review-codex.sh
 # INV-62 (#218): codex-specific review path. The codex review member runs the
 # purpose-built `codex review "<prompt>"` subcommand (_run_codex_review) — natively
@@ -2185,10 +2188,9 @@ fi
 #   PASS        → the member proceeds to the fan-out.
 #   UNAVAILABLE → the member is removed from REVIEW_AGENTS_LIST (the surviving set
 #                 fans out and votes); the drop is surfaced with a `smoke: <reason>`
-#                 breadcrumb. ALL members unavailable → the surviving set is empty,
-#                 so we DO NOT spawn an empty fan-out — we leave a 1-element
-#                 sentinel list and let the existing all-unavailable fallback fire
-#                 (same terminal state as a review crash).
+#                 breadcrumb. ALL members unavailable → leave the original list
+#                 unchanged and run the full fan-out; a resulting all-unavailable
+#                 aggregate counts toward the INV-144 retry/stall breaker.
 #   FAIL        → ABORT the whole review loudly: no fan-out, no verdict, issue
 #                 stays `reviewing`; post a comment naming the failed agent(s) +
 #                 the SMOKE evidence; emit a heartbeat-consistent verdict trailer;
@@ -2200,6 +2202,7 @@ fi
 # The smoke runs strictly before the fan-out clock and posts NO verdict comment,
 # so it counts toward neither the INV-40 verdict-attribution window nor the poll
 # window.
+_smoke_reasons=""
 if [[ "${REVIEW_SMOKE_ENABLED:-false}" == "true" ]]; then
   _SMOKE_TIMEOUT="${REVIEW_SMOKE_TIMEOUT_SECONDS:-120}"
   log "INV-64: smoking ${#REVIEW_AGENTS_LIST[@]} review agent(s) before the fan-out (timeout=${_SMOKE_TIMEOUT}/member): ${REVIEW_AGENTS_LIST[*]}"
@@ -2357,15 +2360,16 @@ The review was NOT run and the PR was NOT evaluated. The issue stays \`reviewing
       # Every member smoked UNAVAILABLE (quota/capacity). Rather than shrinking
       # REVIEW_AGENTS_LIST to empty (which would skip the fan-out entirely and
       # leave the downstream all-unavailable path's parallel arrays unpopulated),
-      # leave the list UNCHANGED and fall through: each member runs the fan-out,
-      # posts no verdict (it is genuinely unavailable), the poller resolves every
-      # one `unavailable`, and the existing INV-40 all-unavailable aggregate fires
-      # — the legacy review-crash terminal state, unchanged. Surface the smoke
+      # leave the list UNCHANGED and fall through so each member runs the full
+      # fan-out. If capacity remains unavailable, the poller resolves every
+      # member `unavailable` and INV-40 aggregates all-unavailable; if capacity
+      # recovers, a real fan-out verdict remains authoritative. Surface the smoke
       # reasons in the log + a single issue comment so the cause isn't opaque.
       _smoke_reasons=""
       for _si in "${!REVIEW_AGENTS_LIST[@]}"; do
         _sm_reason=$(_smoke_evidence_reason "${_smoke_evidence[$_si]:-}")
-        [[ -n "$_sm_reason" ]] && _smoke_reasons+="${REVIEW_AGENTS_LIST[$_si]}: smoke: ${_sm_reason}; "
+        _review_unavailable_add_smoke_reason \
+          "${REVIEW_AGENTS_LIST[$_si]}" "$_sm_reason"
       done
       log "INV-64: ALL ${#REVIEW_AGENTS_LIST[@]} review agent(s) smoked UNAVAILABLE — driving the existing all-unavailable fallback (no fan-out shrink needed).${_smoke_reasons:+ Reason(s): ${_smoke_reasons%; }}"
       # This comment is ADVISORY: it reflects the smoke outcome, not the final
@@ -2376,12 +2380,11 @@ The review was NOT run and the PR was NOT evaluated. The issue stays \`reviewing
       # over-blocks (it changes no label and casts no verdict); it only narrates
       # why the round looked unavailable at smoke time.
       itp_post_comment "$ISSUE_NUMBER" \
-        "Multi-agent review: all review agent(s) \`${REVIEW_AGENTS_LIST[*]}\` were UNAVAILABLE at the pre-fan-out smoke (INV-64) — quota/capacity, not a config error. The PR was not evaluated this round; it will be re-reviewed on the next dispatch tick once capacity recovers.${_smoke_reasons:+ Reason(s): ${_smoke_reasons%; }}$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
-      # Fall through to the fan-out with the list unchanged; every member will
-      # smoke-free run and post no verdict (already known unavailable), so the
-      # aggregate is all-unavailable. (We keep the list rather than emptying it so
-      # the downstream all-unavailable path — which reads AGENT_LAUNCH_RC etc. —
-      # has its parallel arrays populated exactly as today.)
+        "Multi-agent review: all review agent(s) \`${REVIEW_AGENTS_LIST[*]}\` were UNAVAILABLE at the pre-fan-out smoke (INV-64) — quota/capacity, not a config error. The smoke did not evaluate the PR; the full fan-out still runs. Retries remain automatic below \`REVIEW_UNAVAILABLE_CAP\`; a persistent outage transitions the issue to \`stalled\` for operator intervention.${_smoke_reasons:+ Reason(s): ${_smoke_reasons%; }}$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
+      # Fall through to the fan-out with the list unchanged. We keep the list
+      # rather than emptying it so the downstream aggregate path, which reads
+      # AGENT_LAUNCH_RC and related arrays, remains populated even if every
+      # member is still unavailable.
       ;;
     pass)
       # At least one PASS; drop any UNAVAILABLE members from the fan-out set so a
@@ -2390,21 +2393,24 @@ The review was NOT run and the PR was NOT evaluated. The issue stays \`reviewing
       # `smoke:` breadcrumb (consistent with the INV-58/61/62 drop-reason wording).
       _smoke_survivors=()
       _smoke_dropped=""
-      _smoke_drop_reasons=""
       for _si in "${!REVIEW_AGENTS_LIST[@]}"; do
         if [[ "${_smoke_states[$_si]}" == "unavailable" ]]; then
           _smoke_dropped+="${REVIEW_AGENTS_LIST[$_si]} "
           _sm_reason=$(_smoke_evidence_reason "${_smoke_evidence[$_si]:-}")
           [[ -n "$_sm_reason" ]] || _sm_reason="unavailable"
-          _smoke_drop_reasons+="${REVIEW_AGENTS_LIST[$_si]}: smoke: ${_sm_reason}; "
+          _review_unavailable_add_smoke_reason \
+            "${REVIEW_AGENTS_LIST[$_si]}" "$_sm_reason"
         else
           _smoke_survivors+=("${REVIEW_AGENTS_LIST[$_si]}")
         fi
       done
       if [[ -n "$_smoke_dropped" ]]; then
-        log "INV-64: dropping smoke-UNAVAILABLE review agent(s) before the fan-out: ${_smoke_dropped%% } — reason(s): ${_smoke_drop_reasons%; }; fanning out: ${_smoke_survivors[*]}"
+        # Preserve partial-smoke evidence for INV-144. If every surviving
+        # fan-out member later drops, the aggregate is all-unavailable and the
+        # breaker report must still name the members removed before fan-out.
+        log "INV-64: dropping smoke-UNAVAILABLE review agent(s) before the fan-out: ${_smoke_dropped%% } — reason(s): ${_smoke_reasons%; }; fanning out: ${_smoke_survivors[*]}"
         itp_post_comment "$ISSUE_NUMBER" \
-          "Multi-agent review: dropped (unavailable) at the pre-fan-out smoke (INV-64): \`${_smoke_dropped%% }\`. Fanning out the rest: \`${_smoke_survivors[*]}\`. (UNAVAILABLE = quota/capacity, not a config error — the dropped agent does not block the vote.) Drop reason(s): ${_smoke_drop_reasons%; }.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
+          "Multi-agent review: dropped (unavailable) at the pre-fan-out smoke (INV-64): \`${_smoke_dropped%% }\`. Fanning out the rest: \`${_smoke_survivors[*]}\`. (UNAVAILABLE = quota/capacity, not a config error — the dropped agent does not block the vote.) Drop reason(s): ${_smoke_reasons%; }.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
         # [INV-70] Metrics: a smoke-dropped member is removed from REVIEW_AGENTS_LIST
         # BELOW, so the post-fan-out review_agent_run/agent_drop loop (which iterates
         # AGENT_NAMES = the SURVIVING set) never records it — its quota/auth drop
@@ -3944,6 +3950,13 @@ elif [[ "$AGGREGATE" == "fail" ]] && [[ "$_AGGREGATE_SUBSTANTIVE_FAIL" == "true"
   itp_post_comment "$ISSUE_NUMBER" "$(_review_round_marker "$ISSUE_NUMBER" "$PR_HEAD_SHA" "$REVIEW_ROUND")" 2>/dev/null || true
 fi
 
+# INV-144 uses an independent durable reset channel. Every DECIDED aggregate
+# resets the all-unavailable streak, including a FAIL and a decided round whose
+# PR head could not be resolved (`head=unknown`). Verdict / Reviewed-HEAD posts
+# are not reset evidence because they are best-effort or absent on relevant
+# routes.
+_review_unavailable_reset_if_decided "$AGGREGATE" "$ISSUE_NUMBER" "$PR_HEAD_SHA"
+
 # [INV-70] Metrics: aggregated verdict. Best-effort, observe-only — emitted
 # AFTER the decision is made, never gating it.
 if declare -F metrics_emit >/dev/null 2>&1; then
@@ -4418,10 +4431,9 @@ case "$AGGREGATE" in
     AGENT_EXIT=0  # the agent(s) ran and produced a verdict — not a crash
     ;;
   all-unavailable)
-    # No deciding agent. Fall back to today's single-agent FAIL path verbatim.
-    # The legacy single-agent wrapper distinguished two no-verdict cases by
-    # AGENT_EXIT, and we preserve that distinction so the N=1 path stays
-    # byte-for-byte (the downstream FAIL branch reads `$AGENT_EXIT -ne 0`):
+    # No deciding agent. Preserve the legacy single-agent FAIL classification
+    # for sub-threshold rounds. INV-144 may instead stall and exit below.
+    # The legacy wrapper distinguished two no-verdict cases by AGENT_EXIT:
     #   - any agent's CLI actually crashed (rc != 0) → AGENT_EXIT=1 → the
     #     crash-fallback comment + `failed-non-substantive other` trailer
     #     (genuine transport/mid-stream crash).
@@ -4451,11 +4463,21 @@ case "$AGGREGATE" in
     # only emits a token for a genuine infra drop; a substantive no-verdict drop is
     # EMPTY). A non-zero-rc drop is already caught by the rc scan just above.
     [[ "$_any_nonsubstantive_drop" == true ]] && AGENT_EXIT=1
-    log "All ${#REVIEW_AGENTS_LIST[@]} review agent(s) unavailable — falling back to single-agent FAIL path (AGENT_EXIT=${AGENT_EXIT})."
+    log "All ${#REVIEW_AGENTS_LIST[@]} review agent(s) unavailable — evaluating INV-144 before the sub-threshold single-agent FAIL fallback (AGENT_EXIT=${AGENT_EXIT})."
     # INV-58 (#205): surface any agy quota/auth drop reason even on the
     # all-unavailable path, so a single-agy fleet that hit the quota wall is
     # diagnosable from the wrapper log alone (not just agy's separate --log-file).
     [[ -n "$_dropped_reasons" ]] && log "Drop reason(s): ${_dropped_reasons%; }"
+    # INV-144: every all-unavailable aggregate advances its own head-agnostic
+    # streak, including smoke-driven capacity failures. A trip handles the run
+    # completely and exits before the ordinary failed/inconclusive route can
+    # flip the issue to pending-dev. Sibling stalls are respected the same way.
+    _review_unavailable_terminal_route \
+      "$ISSUE_NUMBER" "$PR_HEAD_SHA" "$PR_NUMBER" \
+      "$_dropped_reasons" "$_smoke_reasons"
+    if [[ "$REVIEW_UNAVAILABLE_BREAKER_ACTION" != "continue" ]]; then
+      exit 0
+    fi
     ;;
 esac
 

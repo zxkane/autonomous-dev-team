@@ -104,6 +104,11 @@ TL_MULTI='[
   {"event":"labeled","label":{"name":"bug"},"created_at":"2026-06-01T01:00:00Z"},
   {"event":"labeled","label":{"name":"autonomous"},"created_at":"2026-06-01T02:00:00Z"}
 ]'
+TL_REMOVED='[
+  {"event":"unlabeled","label":{"name":"stalled"},"created_at":"2026-06-01T03:00:00Z"},
+  {"event":"unlabeled","label":{"name":"stalled"},"created_at":"2026-06-01T05:00:00Z"},
+  {"event":"unlabeled","label":{"name":"other"},"created_at":"2026-06-01T06:00:00Z"}
+]'
 TL_BUG_ONLY='[ {"event":"labeled","label":{"name":"bug"},"created_at":"2026-06-01T01:00:00Z"} ]'
 TL_NONE='[ {"event":"commented","created_at":"2026-06-01T00:30:00Z"} ]'
 
@@ -117,6 +122,15 @@ echo "=== Leaf golden — itp_github_label_event_ts (gh BINARY stubbed) ==="
 out="$(leaf_run "$TL_MULTI" 'itp_github_label_event_ts 7 autonomous')"
 assert_eq "TC-LABELTS-001/002 (a)+(b) labeled events → the FIRST created_at" \
   "2026-06-01T00:00:00Z" "$out"
+
+out="$(leaf_run "$TL_REMOVED" 'itp_github_label_event_ts 7 stalled latest-removed')"
+assert_eq "TC-LABELTS-002b latest-removed mode emits newest unlabeled event" \
+  "2026-06-01T05:00:00Z" "$out"
+removed_argv="$(cat "$_ARGV_LOG")"
+assert_contains "TC-LABELTS-002c latest-removed mode paginates the timeline" \
+  "--paginate" "$removed_argv"
+out="$(leaf_run "$TL_NONE" 'itp_github_label_event_ts 7 stalled latest-removed; printf "rc=%s" "$?"')"
+assert_eq "TC-LABELTS-002d latest-removed no-match remains fail-soft" "rc=0" "$out"
 
 # (c) labeled events only for a DIFFERENT label → empty.
 out="$(leaf_run "$TL_BUG_ONLY" 'itp_github_label_event_ts 7 autonomous')"
@@ -180,6 +194,17 @@ routed="$(
 )"
 assert_contains "TC-LABELTS-020 itp_label_event_ts routes to itp_github_label_event_ts (issue+label forwarded)" \
   "TS-ROUTED:[7][autonomous]" "$routed"
+routed="$(
+  env -u ISSUE_PROVIDER -u AUTONOMOUS_CONF -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR \
+      REPO="$REPO" \
+  bash -c '
+    source "'"$PROVIDER_LIB"'" 2>/dev/null
+    itp_github_label_event_ts() { echo "TS-ROUTED:[$1][$2][$3]"; }
+    itp_label_event_ts 7 stalled latest-removed
+  '
+)"
+assert_contains "TC-LABELTS-020b optional latest-removed mode forwards byte-identically" \
+  "TS-ROUTED:[7][stalled][latest-removed]" "$routed"
 
 # Shim source-shape: the bare itp_${ISSUE_PROVIDER}_label_event_ts "$@" form,
 # matching all 13 existing shims (no :-github default).

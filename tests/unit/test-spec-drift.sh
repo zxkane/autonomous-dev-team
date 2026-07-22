@@ -544,7 +544,7 @@ cp "$SCRIPTS/dispatcher-tick.sh" "$SCRATCH/dispatcher-tick.sh"  # restore
 echo "=== TC-SPEC-GATE-034: NO variable label write survives in the pipeline files (real repo passes P1.1) ==="
 # #283: label_swap() delegated its variable label write to itp_transition_state
 # (the [INV-87] ITP verb), whose leaf lives in providers/itp-github.sh, OUTSIDE the
-# five scanned PIPELINE_FILES. #331 ([INV-97]): hygiene_strip_residual_labels() did
+# six scanned PIPELINE_FILES. #331 ([INV-97]): hygiene_strip_residual_labels() did
 # the SAME — its `--remove-label "$t"` loop is gone; it now builds a CSV ($remove_csv)
 # from its hard-coded transitional-label set and delegates to
 # `itp_transition_state "$issue_num" "$remove_csv" ""` (the CSV-extended leaf). So

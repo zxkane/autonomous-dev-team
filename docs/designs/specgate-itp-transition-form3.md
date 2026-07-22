@@ -1,29 +1,29 @@
 # spec-gate: teach check-spec-drift.sh to recognize `itp_transition_state` calls (Form 3)
 
 ```
-status: DESIGN — implementing this session
+status: IMPLEMENTED
 issue: prerequisite for #311 (B8 label-write migration) — the C→B path operator chose
 scope: check-spec-drift.sh scanner enhancement + manifest + tests. ZERO wrapper edits, ZERO label-write migration.
-out-of-scope: migrating any gh issue edit site (that is #311 itself, unblocked AFTER this lands)
+out-of-scope: migrating any gh issue edit site (that was #311 itself)
 ```
 
 ## 1. Problem & motivation
 
-`check-spec-drift.sh` (INV-80) is the executable-spec gate: it scans the four `PIPELINE_FILES` (`autonomous-dev.sh`, `autonomous-review.sh`, `dispatcher-tick.sh`, `lib-dispatch.sh`) for label-write sites and reconciles them (C.1–C.5 + the P1.1 variable-write ban) against `docs/pipeline/spec-codesite-map.json` + `transitions.json`.
+`check-spec-drift.sh` (INV-80) is the executable-spec gate: it scans the six `PIPELINE_FILES` (`autonomous-dev.sh`, `autonomous-review.sh`, `dispatcher-tick.sh`, `lib-dispatch.sh`, `lib-review-unavailable-cap.sh`, `lib-terminal-control.sh`) for label-write sites and reconciles them (C.1–C.5 + the P1.1 variable-write ban) against `docs/pipeline/spec-codesite-map.json` + `transitions.json`.
 
-It recognizes only TWO write forms:
+Before this Form-3 change, the checker recognized only TWO write forms:
 - **Form 1** — `label_swap "$n" "remove" "add"` (positional: token #2=remove, #3=add).
 - **Form 2** — `gh issue edit … --remove-label "X" --add-label "Y"` (literal flags).
 
-It does **not** recognize **`itp_transition_state "$n" "remove" "add"`** — the [INV-87] ITP transition verb. As the #296 pluggable-providers migration moves label writes from raw `gh issue edit` to `itp_transition_state` (#311 B8 and beyond), those state transitions would **leave the spec-gate's view** (the literal `--add/--remove-label` moves into `providers/itp-github.sh`, outside `PIPELINE_FILES`). That is a silent coverage regression: the gate that guarantees "every label transition is declared in the spec" would stop seeing migrated transitions.
+It did **not** recognize **`itp_transition_state "$n" "remove" "add"`** — the [INV-87] ITP transition verb. As the #296 pluggable-providers migration moved label writes from raw `gh issue edit` to `itp_transition_state` (#311 B8 and beyond), those state transitions would have **left the spec-gate's view** (the literal `--add/--remove-label` moved into `providers/itp-github.sh`, outside `PIPELINE_FILES`). That was a silent coverage risk: the gate that guarantees "every label transition is declared in the spec" would have stopped seeing migrated transitions.
 
-This issue closes that gap **before** #311 migrates any site: it adds **Form 3** so a direct `itp_transition_state` call in a `PIPELINE_FILE` is a first-class, scanned label-write site — keeping spec-gate coverage intact as #296 proceeds. This is the operator-chosen **C→B** path: upgrade the scanner first (C), so the later migration (B) is a pure mechanical, coverage-preserving change.
+This work closed that gap **before** #311 migrated any site: it added **Form 3** so a direct `itp_transition_state` call in a `PIPELINE_FILE` is a first-class, scanned label-write site — keeping spec-gate coverage intact as #296 proceeded. This was the operator-chosen **C→B** path: upgrade the scanner first (C), so the later migration (B) was a pure mechanical, coverage-preserving change.
 
 ## 2. The load-bearing constraint (discovered during design)
 
-**Two `itp_transition_state` calls already exist in scanned files and are currently invisible.** Adding Form 3 makes them visible immediately — so this PR MUST account for both in the same change or the gate self-trips:
+**Two `itp_transition_state` calls already existed in scanned files and were invisible.** Adding Form 3 made them visible immediately, so the implementation accounted for both in the same change to avoid self-tripping the gate:
 
-1. **`autonomous-review.sh:3518`** — `itp_transition_state "$ISSUE_NUMBER" "reviewing" "approved"` (the `merge_closes_issue=0` terminal-transition fallback). Movement `reviewing|approved`. The manifest currently declares **2** `reviewing|approved` sites for review.sh (the raw `gh issue edit` at 3431, 3450). Once Form 3 sees line 3518, the discovered count becomes **3** → C.4 FAIL ("discovered 3, manifest declares 2") unless we **add a manifest `sites[]` entry** for 3518. (This is exactly the coverage gap the upgrade is meant to fix — 3518 SHOULD have been declared.)
+1. **`autonomous-review.sh:3518`** — `itp_transition_state "$ISSUE_NUMBER" "reviewing" "approved"` (the `merge_closes_issue=0` terminal-transition fallback). Movement `reviewing|approved`. Before Form 3, the manifest declared **2** `reviewing|approved` sites for review.sh (the raw `gh issue edit` sites at 3431 and 3450). Form 3 raised the discovered count to **3**, so the same change added the third manifest entry for line 3518. (This is exactly the coverage gap the upgrade was meant to fix.)
 2. **`lib-dispatch.sh:2118`** — `itp_transition_state "$issue_num" "$remove" "$add"`, inside the `label_swap()` body. This is a **variable-argument** call (`$remove`/`$add`, not literals). Form 3's movement scanner must **only read literal label operands and skip variable ones** (same as Form 2's bare/quoted-literal regex), so this call emits NO movement (its labels are unknowable statically — they come from label_swap's literal callers, which Form 1 already scans). It must also NOT trip the P1.1 variable-write ban (see §3.3).
 
 ## 3. Design
@@ -45,13 +45,13 @@ The P1.1 guard (`check_variable_writes`) bans `--add/--remove-label "$var"` in P
 Form 1 (`label_swap`) and Form 3 (`itp_transition_state`) both put the issue-number as positional token #1, remove as #2, add as #3. The existing Form-1 loop counts quoted tokens and uses #2/#3 — `label_swap "$issue_num" "reviewing" "pending-dev"` has `"$issue_num"` as token #1 (a `$`-token, but it IS quoted so `match(/"[^"]*"/)` catches it as token #1, correctly skipped since only #2/#3 are read). Form 3 is identical: `itp_transition_state "$ISSUE_NUMBER" "reviewing" "approved"` → token #1=`$ISSUE_NUMBER` (skipped), #2=`reviewing`, #3=`approved`. **The existing #2/#3 positional logic already handles this** — but we add a guard: if token #2 or #3 starts with `$` (variable), treat as empty (no literal) so a fully-variable call like the lib-dispatch.sh:2118 delegation emits nothing.
 
 ### 3.5 Documented limitation — double-quoted positionals only (reviewed, intentional)
-Form 3's positional scanner matches DOUBLE-quoted operands (`/"[^"]*"/`), mirroring Form 1. It does NOT cover single-quoted (`'reviewing'`), bare (`reviewing`), verb-via-variable, or variadic multi-remove `itp_transition_state` shapes. This is **intentional and sufficient** (verified by both reviews): an enumeration of all 38 `--add/--remove-label` operands across the four PIPELINE_FILES found **38 double-quoted, 0 single-quoted, 0 bare** — the codebase is uniformly double-quoted, and #311 mechanically transforms `gh issue edit --remove-label "X" --add-label "Y"` → `itp_transition_state "$N" "X" "Y"` (double-quoted). Multi-remove sites (e.g. `--remove-label "in-progress" --remove-label "pending-dev"`) cannot map to a 3-positional verb call, so #311 leaves them as Form-2 `gh issue edit` (still scanned) — no gap. Extending Form 3 to single-quote/bare now would be speculative gold-plating against shapes the convention does not produce. A future migration that DID introduce a single-quoted/bare `itp_transition_state` would silently escape movement coverage — if that convention ever changes, extend the `/"[^"]*"/` token regex to a quoted-or-bare alternative (mirroring Form 2's `(["'][a-z]…|[a-z]…)`) and add the matching tests. (Recorded as a known boundary, not a bug — codex review P2.)
+Form 3's positional scanner matches DOUBLE-quoted operands (`/"[^"]*"/`), mirroring Form 1. It does NOT cover single-quoted (`'reviewing'`), bare (`reviewing`), verb-via-variable, or variadic multi-remove `itp_transition_state` shapes. This is **intentional and sufficient** (verified by both reviews): at design time, an enumeration of all 38 `--add/--remove-label` operands across the then-four `PIPELINE_FILES` found **38 double-quoted, 0 single-quoted, 0 bare** — the codebase was uniformly double-quoted, and #311 mechanically transformed `gh issue edit --remove-label "X" --add-label "Y"` → `itp_transition_state "$N" "X" "Y"` (double-quoted). Multi-remove sites (e.g. `--remove-label "in-progress" --remove-label "pending-dev"`) could not map to a 3-positional verb call, so #311 left them as Form-2 `gh issue edit` (still scanned) — no gap. Extending Form 3 to single-quote/bare would be speculative against shapes the convention does not produce. A future migration that introduces a single-quoted/bare `itp_transition_state` would silently escape movement coverage — if that convention changes, extend the `/"[^"]*"/` token regex to a quoted-or-bare alternative (mirroring Form 2's `(["'][a-z]…|[a-z]…)`) and add matching tests. (Recorded as a known boundary, not a bug — codex review P2.)
 
 ## 4. Zero-behavior-regression argument
 - The scanner change is **purely additive**: a new trigger alternative + a `$`-operand skip guard. Form 1 and Form 2 recognition is byte-unchanged (the regexes and positional logic for `label_swap`/`gh issue edit` are untouched).
-- No `PIPELINE_FILE` wrapper is edited. No label-write is migrated. The dispatcher's runtime behavior is identical.
+- The Form-3 scanner change itself edited no `PIPELINE_FILE` wrapper and migrated no label write. The dispatcher's runtime behavior was identical.
 - The ONLY new gate output: review.sh:3518 + lib-dispatch.sh:2118 become visible. 3518 gets a manifest entry (now declared); the 2118 delegation emits no movement (variable args) and trips no P1.1 (no flag) → both reconcile cleanly.
-- After this lands, #311 (and B5+B7's siblings, future label-write batches) can migrate `gh issue edit`→`itp_transition_state` as a **coverage-preserving** change: the migrated call is still a scanned Form-3 site, so the manifest entry stays (only the anchor literal may need re-pointing within ±8 lines), C.4 count is unchanged, no silent coverage loss.
+- This unblocked #311 (and B5+B7's sibling label-write batches) to migrate `gh issue edit`→`itp_transition_state` as a **coverage-preserving** change: each migrated call remains a scanned Form-3 site, so the manifest entry stays (only the anchor literal may need re-pointing within ±8 lines), C.4 count is unchanged, and there is no silent coverage loss.
 
 ## 5. Files touched
 | File | Change |

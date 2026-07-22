@@ -16,8 +16,9 @@
 #   PASS        (rc 0)  → member proceeds to the fan-out.
 #   UNAVAILABLE (rc 2)  → member dropped pre-fan-out via the existing INV-40
 #                         `unavailable` machinery (drop reason `smoke: <reason>`);
-#                         remaining members vote normally; ALL unavailable → the
-#                         existing all-unavailable fallback path, unchanged.
+#                         remaining members vote normally; ALL unavailable →
+#                         full fan-out still runs, then a resulting
+#                         all-unavailable round counts toward INV-144.
 #   FAIL        (rc 1)  → ABORT the whole review loudly: no fan-out, no verdict,
 #                         issue stays `reviewing`; post a comment naming the
 #                         failed agent(s) + the SMOKE evidence; wrapper exits
@@ -137,10 +138,9 @@ _classify_smoke_state() {
 # state (`pass` | `unavailable` | `fail`). Echoes the gate verdict on stdout:
 #
 #   fail            — ANY member FAILed (operator-side config breakage → abort).
-#   all-unavailable — no FAIL, and EVERY member is UNAVAILABLE (the surviving
-#                     fan-out set is empty → drive the existing INV-40
-#                     all-unavailable fallback; this also covers a single-agent
-#                     project whose one member is UNAVAILABLE).
+#   all-unavailable — no FAIL, and EVERY member is UNAVAILABLE (the caller keeps
+#                     the original list for full fan-out; a resulting
+#                     all-unavailable aggregate counts toward INV-144).
 #   pass            — no FAIL and at least one member PASSed (fan out the
 #                     survivors; any UNAVAILABLE members are dropped by the caller).
 #

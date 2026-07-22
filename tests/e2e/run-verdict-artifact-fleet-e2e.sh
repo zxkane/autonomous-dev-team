@@ -1,12 +1,12 @@
 #!/bin/bash
 # run-verdict-artifact-fleet-e2e.sh — E2E for the verdict-artifact channel
-# (issue #233, INV-78). TC-VERDICT-ARTIFACT-037.
+# (issue #233, INV-78) and unavailable-cap breaker (issue #525, INV-144).
 #
 # WHAT IT DOES
 # ------------
-# Drives a 3-stub review fleet through the REAL verdict-artifact resolution +
+# Drives stub review fleets through the REAL verdict-artifact resolution +
 # comment-fallback + INV-40 aggregation libs — end to end, hermetically (no
-# network, no agent CLIs). The three stubs cover the issue's mandated matrix:
+# network, no agent CLIs). The first fleet covers the artifact-channel matrix:
 #
 #   agent-A: writes a VALID PASS artifact   → resolved from the artifact
 #   agent-B: writes a MALFORMED artifact    → loud envelope + treated absent (drop)
@@ -20,7 +20,12 @@
 #   4. the comment fallback was consulted ONLY for the no-artifact agent (the
 #      valid-artifact agent did ZERO comment polls — the AC).
 #
-# This is the #233 E2E artifact: it sources the production libs
+# The second fleet exits 0 without any verdict artifact or comment for three
+# consecutive rounds. It drives the same resolution and aggregation path plus
+# the production INV-144 breaker, proving rounds 1..N-1 retain pending-dev and
+# round N transitions reviewing -> stalled with one operator report.
+#
+# This harness sources the production libs
 # (lib-review-artifact.sh / lib-review-poll.sh / lib-review-aggregate.sh) and
 # reproduces the wrapper's resolution control flow against staged artifact files
 # and a stubbed comment fetcher, so CI runs it on bare ubuntu. The issue #526
@@ -42,7 +47,8 @@ PASS=0; FAIL=0
 ok()  { echo -e "  ${GREEN}PASS${NC}: $1"; PASS=$((PASS + 1)); }
 bad() { echo -e "  ${RED}FAIL${NC}: $1"; FAIL=$((FAIL + 1)); }
 
-for f in lib-review-artifact.sh lib-review-aggregate.sh lib-review-poll.sh; do
+for f in lib-review-artifact.sh lib-review-aggregate.sh lib-review-poll.sh \
+  lib-review-unavailable-cap.sh; do
   [[ -f "$DISP/$f" ]] || { echo -e "${RED}FATAL${NC}: $f missing"; exit 1; }
 done
 
@@ -53,6 +59,10 @@ source "$DISP/lib-review-artifact.sh"
 source "$DISP/lib-review-aggregate.sh"
 # shellcheck source=/dev/null
 source "$DISP/lib-review-poll.sh"
+# shellcheck source=/dev/null
+source "$DISP/lib-issue-provider.sh"
+# shellcheck source=/dev/null
+source "$DISP/lib-review-unavailable-cap.sh"
 
 SANDBOX=$(mktemp -d)
 trap 'rm -rf "$SANDBOX"' EXIT
@@ -408,6 +418,124 @@ if declare -F _claude_apply_final_text_fallback >/dev/null 2>&1; then
 else
   bad "Claude production final-text fallback seam is defined"
 fi
+
+echo ""
+echo "=== TC-REVIEW-UNAVAILABLE-CAP-E2E-001: repeated exit-0/no-verdict fleet ==="
+
+COMMENTS="$SANDBOX/unavailable-comments.jsonl"
+TRANSITIONS="$SANDBOX/unavailable-transitions.log"
+: > "$COMMENTS"
+: > "$TRANSITIONS"
+ISSUE_STATE="reviewing"
+RESULT_PARSED=false
+POST_SEQ=0
+
+itp_read_task() {
+  jq -cn --arg state "$ISSUE_STATE" '{labels:["autonomous",$state]}'
+}
+
+itp_list_comments() {
+  if [[ -s "$COMMENTS" ]]; then
+    jq -s '.' "$COMMENTS"
+  else
+    printf '[]\n'
+  fi
+}
+
+itp_label_event_ts() {
+  printf ''
+}
+
+itp_post_comment() {
+  local issue="$1" body="$2"
+  POST_SEQ=$((POST_SEQ + 1))
+  jq -cn \
+    --arg createdAt "2026-07-21T12:00:$(printf '%02d' "$POST_SEQ")Z" \
+    --argjson id "$POST_SEQ" \
+    --arg body "$body" \
+    '{id:$id,authorKind:"self",createdAt:$createdAt,body:$body}' >> "$COMMENTS"
+}
+
+itp_transition_state() {
+  local issue="$1" from="$2" to="$3"
+  printf '%s:%s:%s\n' "$issue" "$from" "$to" >> "$TRANSITIONS"
+  [[ "$ISSUE_STATE" == "$from" ]] || return 1
+  ISSUE_STATE="$to"
+}
+
+resolve_escalation_mention() {
+  printf '@operator'
+}
+
+REVIEW_UNAVAILABLE_CAP=3
+ROUND_AGGREGATES=()
+ROUND_STATES=()
+for round in 1 2 3; do
+  ISSUE_STATE="reviewing"
+  RESULT_PARSED=false
+  AGENT_NAMES=(no-verdict-A no-verdict-B)
+  AGENT_SESSION_IDS=("no-verdict-${round}-A" "no-verdict-${round}-B")
+  AGENT_ARTIFACT_PATHS=(
+    "$SANDBOX/no-verdict-${round}-A.json"
+    "$SANDBOX/no-verdict-${round}-B.json"
+  )
+  AGENT_VERDICTS=("" "")
+  AGENT_VERDICT_BODIES=("" "")
+  AGENT_VERDICT_SOURCES=("" "")
+  declare -A AGENT_LAUNCH_RC=(
+    ["no-verdict-${round}-A"]=0
+    ["no-verdict-${round}-B"]=0
+  )
+
+  # Artifact-first classification: both files are absent. The production poll
+  # loop then finds no fallback comments, and clean rc=0 resolves both members
+  # to unavailable.
+  for i in "${!AGENT_NAMES[@]}"; do
+    out=$(_classify_verdict_artifact \
+      "${AGENT_ARTIFACT_PATHS[$i]}" \
+      "${AGENT_SESSION_IDS[$i]}" \
+      "${AGENT_NAMES[$i]}")
+    [[ "${out%%$'\n'*}" == "absent" ]] || bad "round $round no-verdict artifact is absent"
+  done
+  _VERDICT_POLL_ATTEMPTS=1
+  _VERDICT_POLL_INTERVAL_SECONDS=0
+  _run_verdict_poll_loop
+  for i in "${!AGENT_NAMES[@]}"; do
+    AGENT_VERDICTS[$i]=$(_classify_noverdict_agent \
+      "${AGENT_LAUNCH_RC[${AGENT_SESSION_IDS[$i]}]}")
+  done
+
+  aggregate=$(_aggregate_review_verdicts "${AGENT_VERDICTS[@]}")
+  ROUND_AGGREGATES+=("$aggregate")
+  if [[ "$aggregate" == "all-unavailable" ]]; then
+    _review_unavailable_terminal_route 525 "head-${round}" 900 "" ""
+    if [[ "$REVIEW_UNAVAILABLE_BREAKER_ACTION" == "continue" ]]; then
+      itp_transition_state 525 reviewing pending-dev
+    fi
+  fi
+  ROUND_STATES+=("$ISSUE_STATE")
+done
+unset REVIEW_UNAVAILABLE_CAP
+
+[[ "${ROUND_AGGREGATES[*]}" == "all-unavailable all-unavailable all-unavailable" ]] \
+  && ok "all three clean no-verdict rounds aggregate all-unavailable" \
+  || bad "unexpected aggregate sequence: ${ROUND_AGGREGATES[*]}"
+[[ "${ROUND_STATES[*]}" == "pending-dev pending-dev stalled" ]] \
+  && ok "rounds 1..N-1 route pending-dev and round N stalls" \
+  || bad "unexpected state sequence: ${ROUND_STATES[*]}"
+[[ "$(grep -c 'reason=review-unavailable-cap' "$COMMENTS")" -eq 1 ]] \
+  && ok "threshold round posts exactly one review-unavailable-cap report" \
+  || bad "expected exactly one review-unavailable-cap report"
+[[ "$(tail -n 1 "$TRANSITIONS")" == "525:reviewing:stalled" ]] \
+  && ok "threshold transition is reviewing -> stalled (no pending-dev flip)" \
+  || bad "unexpected threshold transition: $(tail -n 1 "$TRANSITIONS")"
+for round in 1 2 3; do
+  jq -e --arg marker "round=${round}" \
+    'any(.body | contains("dispatcher-review-unavailable-breaker:") and contains($marker))' \
+    < <(jq -s '.' "$COMMENTS") >/dev/null \
+    && ok "unavailable round $round persists its durable marker" \
+    || bad "unavailable round $round marker missing"
+done
 
 echo ""
 echo "=== Summary ==="
