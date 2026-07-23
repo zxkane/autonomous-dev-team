@@ -17,6 +17,9 @@ CODEX="$SCRIPTS/adapters/codex.sh"
 CONF="$SCRIPTS/autonomous.conf.example"
 ADAPTER_DOC="$PROJECT_ROOT/docs/pipeline/adapter-spec.md"
 INVARIANTS="$PROJECT_ROOT/docs/pipeline/invariants.md"
+DISPATCHER_DOC="$PROJECT_ROOT/docs/pipeline/dispatcher-flow.md"
+HANDOFFS_DOC="$PROJECT_ROOT/docs/pipeline/handoffs.md"
+STATE_DOC="$PROJECT_ROOT/docs/pipeline/state-machine.md"
 TRANSITIONS="$PROJECT_ROOT/docs/pipeline/transitions.json"
 
 pass() { printf 'PASS: %s\n' "$1"; PASS=$((PASS + 1)); }
@@ -208,6 +211,11 @@ assert_grep "TC-TURNLIMIT-113 dispatcher finalizes recovered turn lifecycle" \
 
 echo "== TC-TURNLIMIT-069..070: docs and config =="
 assert_grep "TC-TURNLIMIT-069 INV-142 exists" '^## INV-142:' "$INVARIANTS"
+assert_grep "TC-TURNLIMIT-123 INV-145 exists" '^## INV-145:' "$INVARIANTS"
+for doc in "$DISPATCHER_DOC" "$HANDOFFS_DOC" "$STATE_DOC"; do
+  assert_grep "TC-TURNLIMIT-123 $(basename "$doc") references INV-145" \
+    'INV-145' "$doc"
+done
 assert_grep "TC-TURNLIMIT-069 turn-cap stalled cause exists" \
   '"event"[[:space:]]*:[[:space:]]*"turn-cap"' "$TRANSITIONS"
 for var in AGENT_TURN_LIMIT AGENT_DEV_TURN_LIMIT AGENT_REVIEW_TURN_LIMIT TURN_LIMIT_MODE; do

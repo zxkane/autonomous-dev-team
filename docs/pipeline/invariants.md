@@ -9274,3 +9274,51 @@ exit-0/no-verdict stub fleet across repeated wrapper terminal routes and asserts
 the configured Nth round stalls.
 
 ---
+
+## INV-145: Step 5 turn-cap pending-intent recovery distinguishes normal absence from a real read/parse/write failure
+
+_Triage (issue #236): [machine-checked: tests/unit/test-lib-turn-limit.sh]_
+
+**Rule**: `turn_control_recover_pending_intent <issue> <owner>` has an exact
+three-way return contract:
+
+- `0` means no pending `reason=turn-cap` candidate exists. An empty `[]`
+  recovery pointer and a non-empty pointer with no matching reason are both
+  this normal case. The dispatcher MUST continue into ordinary Step 5 stale
+  detection; absence is never reported as unavailable.
+- `10` means a valid turn-cap candidate was found, its pinned INV-140 terminal
+  intent was written, and the live intent readback matched the issue,
+  invocation, reason, and owner. The dispatcher performs the terminal
+  transition and recovery finalization instead of ordinary stale routing.
+- `20` is reserved for a genuine pointer read or JSON parse failure, terminal
+  intent write/read failure, or mismatched readback. The dispatcher preserves
+  the active owner label, logs the unavailable diagnostic, and retries on a
+  later tick.
+
+Candidate selection therefore uses `jq -c`, not `jq -ce`: compact `null`
+output is the expected representation of "no match" and must exit zero, while
+invalid JSON still exits nonzero and reaches `20`. The subsequent
+`jq -er '.invocation'` and `jq -er '.reason'` validations retain `-e` because
+null fields on an already-selected candidate are genuine errors.
+
+**Producer**: `lib-turn-limit.sh::turn_control_recover_pending_intent`.
+
+**Consumer**: `dispatcher-tick.sh` Step 5, before token-budget recovery and
+ordinary dead-wrapper routing.
+
+**Status**: **ENFORCED**.
+
+**Test**: `tests/unit/test-lib-turn-limit.sh`
+(`TC-TURNLIMIT-118..122`) covers empty and non-matching pointers returning
+`0`, a genuine candidate reaching the intent-write path and returning `10`,
+invalid JSON retaining the `20` failure guard, and the real Step 5 caller
+falling through without the unavailable diagnostic. The
+`tests/unit/test-turn-limit-wiring.sh` `TC-TURNLIMIT-123` pins this invariant
+across the three Step 5 pipeline narratives.
+
+**Cross-references**:
+- [INV-140](#inv-140-resource-terminal-intent-comments-are-the-durable-authoritative-terminal-control-record-and-wrapper-cleanup-must-resolve-a-live-intent-before-any-pending-state-write) - terminal intent authority and transition ordering.
+- [INV-142](#inv-142-turn-limits-are-capability-gated-per-adapter-and-lane-with-durable-first-reason-stop-arbitration-and-one-live-pgid-signaller) - turn-cap recovery pointer production.
+- [`dispatcher-flow.md` Step 5](dispatcher-flow.md#step-5-stale-detection) - caller control flow for the three return values.
+
+---
