@@ -207,6 +207,17 @@ Whenever the dispatcher's Step 5 acts on the same issue as a still-running wrapp
 
 **Step 5a case (ALIVE+PR ready ⇒ SIGTERM)**: a genuine race with non-deterministic outcome — see [INV-15](invariants.md#inv-15-step-5a-sigterm-race-is-non-deterministic). The dispatcher and trap target **different** final states (`pending-review` vs `pending-dev`). The race is non-fatal — the PR is preserved either way and the next dispatcher tick recovers — but review can be delayed by one tick. This is a known imperfection captured in the invariant; fix is out of scope for the docs PR.
 
+### Turn-cap pending-intent preflight (H3 / H4)
+
+Before Step 5 reconciles a dead dev or review wrapper, it checks the wrapper's
+durable turn-cap recovery pointer
+([INV-145](invariants.md#inv-145-step-5-turn-cap-pending-intent-recovery-distinguishes-normal-absence-from-a-real-readparsewrite-failure)).
+No candidate (`[]` or no `reason=turn-cap` match) returns `0` and falls through
+to the normal H3/H4 stale-detection safety net. A recovered candidate returns
+`10` and follows the terminal-intent transition. Only a genuine read, parse,
+write, or readback failure returns `20`; that branch preserves `in-progress` or
+`reviewing` and retries on a later tick.
+
 ### Trailer empty fallthrough (H3 / H5b)
 
 [INV-07](invariants.md#inv-07-empty-reviewed-head-trailer-routes-to-pending-review) routes empty `Reviewed HEAD` to `pending-review`. Two distinct causes converge here: review-never-ran-yet (the safe first-review case) and trailer-post-failed (a transient bug). Operationally indistinguishable from the dispatcher's view; only the review log can tell them apart.

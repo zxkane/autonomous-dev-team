@@ -1122,7 +1122,7 @@ turn_control_recover_pending_intent() {
   local issue="$1" owner="$2" candidates candidate invocation reason live_intent
   declare -F token_budget_recovery_pointer_read >/dev/null 2>&1 || return 1
   candidates="$(token_budget_recovery_pointer_read "$issue" "$owner")" || return 20
-  candidate="$(jq -ce '
+  candidate="$(jq -c '
     [ .[] | select(.reason == "turn-cap") ] | first // null
   ' <<<"$candidates")" || return 20
   [[ "$candidate" != "null" ]] || return 0

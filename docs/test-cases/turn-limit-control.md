@@ -149,3 +149,9 @@ Test ID format: `TC-TURNLIMIT-NNN`
 | TC-TURNLIMIT-115 | Warn-mode winner or completion state cannot be read or persisted | Observation remains fail-open: dev cleanup and review aggregation continue without a turn-control refusal |
 | TC-TURNLIMIT-116 | Hard turn-accounting initialization fails after deriving or starting its canonical invocation | The wrapper retains the canonical ID and attempts terminal accounting cleanup instead of leaking an anonymous `started` record |
 | TC-TURNLIMIT-117 | Final timeout or cancellation lifecycle persistence fails after process convergence | The controller returns rc 93 rather than reporting a successfully finalized 124/137/92 outcome |
+| TC-TURNLIMIT-118 | Step 5 reads an empty `[]` turn-control recovery pointer | Recovery returns `0`, performs no intent write, and falls through to ordinary stale detection |
+| TC-TURNLIMIT-119 | Step 5 reads a non-empty recovery pointer with no `reason=turn-cap` entry | Recovery returns `0`, performs no intent write, and falls through to ordinary stale detection |
+| TC-TURNLIMIT-120 | Step 5 reads a genuine `reason=turn-cap` recovery candidate | Recovery writes and verifies the pinned terminal intent, then returns `10` |
+| TC-TURNLIMIT-121 | Step 5 reads a corrupt recovery pointer | Recovery returns `20` and performs no terminal intent write |
+| TC-TURNLIMIT-122 | The real dispatcher Step 5 turn-cap block runs with an empty pointer | It emits no `turn-cap pending-intent read/write unavailable` log and reaches ordinary stale detection |
+| TC-TURNLIMIT-123 | Pipeline documentation is scanned for the pending-intent return contract | INV-145 exists and the dispatcher flow, handoffs, and state machine all reference it |

@@ -8,6 +8,7 @@ FAIL=0
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 LIB="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-turn-limit.sh"
+TICK="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/dispatcher-tick.sh"
 FIXTURES="$SCRIPT_DIR/fixtures"
 SPEC="$PROJECT_ROOT/docs/pipeline/adapter-spec.md"
 DESIGN="$PROJECT_ROOT/docs/designs/turn-limit-control.md"
@@ -38,8 +39,8 @@ run_rc() {
   printf '%s' "$?"
 }
 
-if [[ ! -r "$LIB" ]]; then
-  fail "TC-TURNLIMIT-010 lib-turn-limit.sh exists"
+if [[ ! -r "$LIB" || ! -r "$TICK" ]]; then
+  fail "TC-TURNLIMIT-010 turn-limit production sources exist"
   printf 'TURN-LIMIT-UNIT-SUMMARY pass=%s fail=%s\n' "$PASS" "$FAIL"
   exit 1
 fi
@@ -766,6 +767,91 @@ if jq -e --argjson required "$required" '
 else
   fail "TC-TURNLIMIT-038 stop evidence has every required field"
 fi
+
+echo "== TC-TURNLIMIT-118..122: pending turn-cap recovery =="
+recovery_pointer="$WORK/turn-cap-recovery-pointer.json"
+recovery_intent_log="$WORK/turn-cap-recovery-intents"
+recovery_live_intent=""
+token_budget_recovery_pointer_read() {
+  cat "$recovery_pointer"
+}
+terminal_intent_write() {
+  printf '%s|%s|%s|%s|%s\n' "$@" >>"$recovery_intent_log"
+  recovery_live_intent="$(jq -nc \
+    --argjson issue "$1" \
+    --arg intent "$2" \
+    --arg invocation "$3" \
+    --arg reason "$4" \
+    --arg owner "$5" \
+    '{issue:$issue,intent:$intent,invocation:$invocation,reason:$reason,owner:$owner}')"
+}
+terminal_intent_read() {
+  [[ -n "$recovery_live_intent" ]] || return 1
+  printf '%s\n' "$recovery_live_intent"
+}
+
+printf '[]\n' >"$recovery_pointer"
+: >"$recovery_intent_log"
+assert_rc "TC-TURNLIMIT-118 empty pointer is not a recovery error" 0 \
+  "$(run_rc turn_control_recover_pending_intent 531 review-wrapper)"
+assert_eq "TC-TURNLIMIT-118 empty pointer writes no terminal intent" 0 \
+  "$(wc -l <"$recovery_intent_log" | tr -d ' ')"
+
+printf '[{"invocation":"inv-other","reason":"token-cap"}]\n' >"$recovery_pointer"
+: >"$recovery_intent_log"
+assert_rc "TC-TURNLIMIT-119 non-matching pointer is not a recovery error" 0 \
+  "$(run_rc turn_control_recover_pending_intent 531 review-wrapper)"
+assert_eq "TC-TURNLIMIT-119 non-matching pointer writes no terminal intent" 0 \
+  "$(wc -l <"$recovery_intent_log" | tr -d ' ')"
+
+printf '[{"invocation":"inv-turn-cap","reason":"turn-cap"}]\n' >"$recovery_pointer"
+: >"$recovery_intent_log"
+recovery_live_intent=""
+assert_rc "TC-TURNLIMIT-120 matching pointer recovers the terminal intent" 10 \
+  "$(run_rc turn_control_recover_pending_intent 531 review-wrapper)"
+assert_eq "TC-TURNLIMIT-120 matching pointer writes the pinned intent once" \
+  "531|inv-turn-cap|inv-turn-cap|turn-cap|review-wrapper" \
+  "$(cat "$recovery_intent_log")"
+
+printf '}{\n' >"$recovery_pointer"
+: >"$recovery_intent_log"
+recovery_live_intent=""
+assert_rc "TC-TURNLIMIT-121 corrupt pointer remains a recovery error" 20 \
+  "$(run_rc turn_control_recover_pending_intent 531 review-wrapper)"
+assert_eq "TC-TURNLIMIT-121 corrupt pointer writes no terminal intent" 0 \
+  "$(wc -l <"$recovery_intent_log" | tr -d ' ')"
+
+step5_turn_pending_block="$(
+  awk '
+    /^    _turn_pending_rc=0$/ { capture=1 }
+    capture && /^    _token_pending_rc=0$/ { exit }
+    capture { sub(/^    /, ""); print }
+  ' "$TICK"
+)"
+step5_log="$WORK/step5-turn-cap.log"
+log() {
+  printf '%s\n' "$*" >>"$step5_log"
+}
+terminal_intent_cleanup_transition() {
+  return 0
+}
+turn_control_recovery_complete() {
+  return 0
+}
+printf '[]\n' >"$recovery_pointer"
+: >"$step5_log"
+stale_detection_reached=0
+# shellcheck disable=SC2034 # The extracted production block consumes both via eval.
+kind=review
+issue_num=531
+for ((_step5_once = 0; _step5_once < 1; _step5_once++)); do
+  eval "$step5_turn_pending_block"
+  stale_detection_reached=1
+done
+assert_eq "TC-TURNLIMIT-122 empty pointer reaches ordinary stale detection" 1 \
+  "$stale_detection_reached"
+assert_eq "TC-TURNLIMIT-122 empty pointer emits no unavailable diagnostic" "" \
+  "$(grep 'turn-cap pending-intent read/write unavailable' "$step5_log" || true)"
 
 echo "== TC-TURNLIMIT-014/111: docs/runtime parity =="
 capability_doc_rows() {

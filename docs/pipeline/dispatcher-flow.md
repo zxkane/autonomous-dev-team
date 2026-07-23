@@ -715,6 +715,18 @@ transition, even if an operator has since unset the budgets; Step 5 can never
 resurrect `pending-dev` or `pending-review` past it. With no live intent the
 helper delegates the original transition arguments unchanged.
 
+Before ordinary DEAD branching, Step 5 also calls
+`turn_control_recover_pending_intent` for the active wrapper owner
+([INV-145](invariants.md#inv-145-step-5-turn-cap-pending-intent-recovery-distinguishes-normal-absence-from-a-real-readparsewrite-failure)).
+Return `0` means there is no pending turn-cap candidate, including an empty
+`[]` pointer or a pointer with no `reason=turn-cap` entry, so stale detection
+continues normally. Return `10` means the candidate's terminal intent was
+recovered and verified; Step 5 runs the terminal transition and recovery
+finalization, then continues to the next issue. Return `20` alone is reserved
+for a real pointer read/JSON parse/intent write or readback failure; it makes
+Step 5 log `turn-cap pending-intent read/write unavailable`, preserve the
+active label, and defer the issue to the next tick.
+
 Before ordinary DEAD branching, active hard token enforcement also checks for
 an unresolved trusted `token-budget-intent-pending-v1` marker owned by the
 corresponding wrapper. This marker means the wrapper committed a hard
