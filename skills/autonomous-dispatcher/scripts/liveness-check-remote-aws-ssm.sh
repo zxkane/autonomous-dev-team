@@ -134,6 +134,8 @@ _THIS_SCRIPT_PATH="${BASH_SOURCE[0]:-$0}"
 SCRIPT_DIR="${_THIS_SCRIPT_PATH%/*}"
 # shellcheck source=lib-ssm.sh
 source "${SCRIPT_DIR}/lib-ssm.sh"
+# shellcheck source=lib-state-root.sh
+source "${SCRIPT_DIR}/lib-state-root.sh"
 
 # ---------------------------------------------------------------------------
 # Operator-controlled value validation (CWE-78)
@@ -194,7 +196,8 @@ DEFER_MAX_AGE="${DEFER_MARKER_MAX_AGE_SECONDS:-900}"
 #
 # LANE_DIR is DELIBERATELY a SEPARATE computation from PIDFILE/HBFILE's
 # DIR below — it must match lib-lane.sh's own `ADT_STATE_ROOT` canonical-
-# ization (`${ADT_STATE_ROOT:-$HOME/.local/state}`, NEVER `XDG_RUNTIME_DIR`
+# ization (explicit ADT_STATE_ROOT, then the host-user pointer, then
+# `$HOME/.local/state`; NEVER `XDG_RUNTIME_DIR`
 # — design §4-C1's explicit "XDG_STATE_HOME is deliberately ignored"
 # rationale extends to XDG_RUNTIME_DIR too: the lane registry has always
 # used one canonical anchor regardless of which shell/session wrote it),
@@ -208,14 +211,17 @@ if [[ -n "$SSM_REMOTE_PROFILE" ]]; then
   profile_prefix="source ${SSM_REMOTE_PROFILE}; "
 fi
 
+STATE_ROOT_RESOLVER="$(declare -f adt_resolve_state_root)"
 INNER_CMD=$(cat <<EOF
 ${profile_prefix}set -u
+${STATE_ROOT_RESOLVER}
 PROJECT_ID="${SSM_REMOTE_PROJECT_ID}"
 KIND="${KIND}"
 N="${ISSUE_NUM}"
 HBI="${HBI}"
 DEFER_MAX_AGE="${DEFER_MAX_AGE}"
-LANE_DIR="\${ADT_STATE_ROOT:-\$HOME/.local/state}/autonomous-\${PROJECT_ID}/lanes"
+ADT_STATE_ROOT="\$(adt_resolve_state_root)"
+LANE_DIR="\${ADT_STATE_ROOT}/autonomous-\${PROJECT_ID}/lanes"
 DEFER_MARKER="\${LANE_DIR}/.defer-\${KIND}-\${N}"
 ATTEMPT_MARKER="\${LANE_DIR}/.attempt-\${KIND}-\${N}"
 DIR="\${XDG_RUNTIME_DIR:-\$HOME/.local/state}/autonomous-\${PROJECT_ID}"

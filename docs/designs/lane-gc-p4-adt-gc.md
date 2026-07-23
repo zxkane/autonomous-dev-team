@@ -162,9 +162,11 @@ skill: pick the simpler, more maintainable option)
 - Full macOS-runner CI execution — no macOS runner exists in this repo's CI
   pool. macOS-specific code paths (launchd installer, procargs2 shim, BSD
   parser) are unit-tested with mocked BSD/launchd outputs (`uname`/`ps`
-  override seams already established by `lib-lane.sh`'s own tests); live
-  macOS verification is a non-blocking follow-up gating the PR-8 flip, not
-  this PR.
+  override seams already established by `lib-lane.sh`'s own tests). P8
+  proposes a Linux-only waiver for the enforcement candidate; that waiver is
+  not an operator sign-off, and the production gate remains open pending
+  #384's soak evidence. Any future macOS rollout still requires that live
+  validation first.
 
 Guardian (P5), systemd-scope backend (P7), and the back-pressure admission
 gate (P6) are later PRs in the series — not touched here.

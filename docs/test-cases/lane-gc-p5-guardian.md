@@ -16,8 +16,9 @@ including SIGKILL and OOM, which bypass every in-process trap:
    `reap.lock`, lane-scoped escape sweep, ENOENT-tolerant).
 2. **Wrapper integration** (`autonomous-dev.sh`, `autonomous-review.sh`):
    `mkfifo` → write-fd open → `setsid` prereq check → guardian spawn
-   (closing its own inherited fd) → `GUARDIAN_PID` recorded. `cleanup()`
-   gains the FIFO clean-exit handshake in the slot [INV-115] reserved.
+   (closing its own inherited fd) → `GUARDIAN_IDENTITY` recorded →
+   `GUARDIAN_PID` recorded. `cleanup()` gains the FIFO clean-exit handshake
+   in the slot [INV-115] reserved.
 3. **FD-hygiene closes** at every long-lived background spawn site this
    series already ships (agent CLI spawn, heartbeat, both TERM-trap
    escalators, token daemon, `lane_kill`'s escalator, `_bounded_call`'s
@@ -32,6 +33,29 @@ escape-sweep tests need `TERM_PROGRAM` unset to actually exercise the sweep
 (this dev box exports `TERM_PROGRAM=tmux`, which the guardian's own operator
 fail-safe unconditionally skips regardless of lane tag — the suite detects
 this and marks the affected assertion SKIPPED-AS-FAIL, not silently green).
+
+## Post-P8 registry and delayed-GC compatibility
+
+The current lane registry includes `pgids.lock`, and each serialized `pgids`
+append is `<pgid> <role> <epoch> <identity>`. Linux identity binds the kernel
+boot UUID to the process leader's `/proc` start ticks
+(`v2-linux:<boot-id>:<start-ticks>`); BSD/macOS identity is the compact
+diagnostic `v1-bsd:<spawn-time-ppid>:<sha256(comm+spawn-time-ppid+lstart)>`
+fingerprint. Only Linux v2 is durable delayed-signal authority. These schema
+assertions are exercised by the P2 registry suite; the delayed-GC decisions
+below are exercised by
+`tests/unit/test-lane-gc-p8-enforcement.sh`.
+
+| Cross-suite case | Scenario | Expected |
+|------------------|----------|----------|
+| TC-LGC2-030/034 | one or concurrent PGID writers | `pgids.lock` serializes complete four-field records with compact identities |
+| TC-LGC8-012/013/014 | delayed GC sees a matching, mismatched, or legacy three-field live PGID | only the matching identity authorizes a signal; mismatch or missing identity fails the whole delayed reap toward leak |
+| TC-LGC8-015/016 | delayed GC sees a recycled guardian PID or a live guardian with no `GUARDIAN_IDENTITY` | neither PID is signaled; proven mismatch permits stale metadata collection, while unverifiable legacy state preserves the lane |
+| TC-LGC8-018e-g | strict delayed GC lacks `reap.lock`, or a writer attempts to register after the strict snapshot starts | missing lock refuses every signal; `pgids.closed` is created under `pgids.lock` and blocks the late append |
+
+This strict identity policy is limited to delayed periodic GC. The wrapper's
+immediate cleanup and the guardian's EOF-triggered cleanup remain best-effort
+and continue to consume old three-field PGID records.
 
 ## No-writer watchdog + the ordering-bug regression (AC covers the "no
 writer present" scenario the design's §4-C3 mandates)

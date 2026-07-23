@@ -264,6 +264,10 @@ if [[ -n "$ADT_LANE_DIR" ]]; then
     ADT_GUARDIAN_PID=$!
     disown "$ADT_GUARDIAN_PID" 2>/dev/null || true
     if declare -F lane_set >/dev/null 2>&1; then
+      ADT_GUARDIAN_IDENTITY="$(proc_identity "$ADT_GUARDIAN_PID" 2>/dev/null)" || ADT_GUARDIAN_IDENTITY="-"
+      # Identity first, PID second: a concurrent GC can observe either the
+      # old "-" PID or the complete pair, never a new PID with stale identity.
+      lane_set "$ADT_LANE_DIR" GUARDIAN_IDENTITY "$ADT_GUARDIAN_IDENTITY" || true
       lane_set "$ADT_LANE_DIR" GUARDIAN_PID "$ADT_GUARDIAN_PID" || true
     fi
   fi

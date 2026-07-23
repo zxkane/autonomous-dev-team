@@ -35,7 +35,7 @@ Test runner: `bash tests/unit/test-lib-lane.sh` (auto-discovered by the CI
 
 | ID | Scenario | Expected |
 |----|----------|----------|
-| TC-LGC2-001 | `lane_install` called normally | returns the final lane dir path; `lane/pgids/reap.lock` all present; `lane` file parses with `lane_get` for every KV key |
+| TC-LGC2-001 | `lane_install` called normally | returns the final lane dir path; `lane`/`pgids`/`pgids.lock`/`reap.lock` all present; `lane` file parses with `lane_get` for every KV key |
 | TC-LGC2-002 | Atomic-mint stress: SIGKILL a subshell running `lane_install` mid-flight, × 50 iterations | zero iterations observe a `lanes/<id>/` dir under its FINAL name missing `WRAPPER_PID`/`WRAPPER_START`/`CREATED_EPOCH`/`STATE` — either fully absent, or `.pending-*` only, or fully populated |
 | TC-LGC2-003 | Registry existence before ANY spawn (dev wrapper) | after the mint block runs (before the `GH_AUTH_MODE` branch), `ADT_LANE_DIR/lane` exists and is parseable |
 | TC-LGC2-004 | Registry existence before ANY spawn (review wrapper) | same as TC-LGC2-003, mirrored for `autonomous-review.sh` |
@@ -64,11 +64,11 @@ Test runner: `bash tests/unit/test-lib-lane.sh` (auto-discovered by the CI
 
 | ID | Scenario | Expected |
 |----|----------|----------|
-| TC-LGC2-030 | `_run_with_timeout` spawns a command with `ADT_LANE_DIR` set | the spawned PGID is appended as one line `<pgid> <role> <epoch>` to `${ADT_LANE_DIR}/pgids` |
+| TC-LGC2-030 | `_run_with_timeout` spawns a command with `ADT_LANE_DIR` set | the spawned PGID is appended under `pgids.lock` as one line `<pgid> <role> <epoch> <process-identity>` to `${ADT_LANE_DIR}/pgids` |
 | TC-LGC2-031 | `_run_with_timeout` spawns with `ADT_LANE_DIR` unset/empty | no error, no write attempted (silent no-op — `lane_record_pgid`'s own missing-dir guard) |
 | TC-LGC2-032 | Fan-out-style scenario: PGID recorded into the durable lane dir, then the SIDECAR tmpdir (`_FANOUT_DIR`-equivalent) is `rm -rf`'d | the durable `pgids` file entry survives the sidecar removal — `lane_kill` still reaps the recorded PGID afterward |
 | TC-LGC2-033 | E2E command-mode lane (`_run_command_e2e_verify`) | records its own PGID directly into `pgids` (bypasses `_run_with_timeout`) — grep-pin + behavioral (spawn a stub verify command, confirm the `pgids` line appears) |
-| TC-LGC2-034 | Multiple concurrent appenders write to the same `pgids` file | no interleaved/partial lines — every line matches `^[0-9]+ \S+ [0-9]+$` (each append is < POSIX PIPE_BUF) |
+| TC-LGC2-034 | Multiple concurrent appenders write to the same `pgids` file | no interleaved/partial lines — every line has four fields and a compact boot-bound `v2-linux:` identity, a diagnostic `v1-bsd:` fallback, or `-` when unreadable; writers serialize on `pgids.lock` |
 
 ## Liveness probe (AC: lane liveness = pid ∧ start-time match)
 
