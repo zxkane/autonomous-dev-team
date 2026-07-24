@@ -1,5 +1,5 @@
 #!/bin/bash
-# Regression coverage for issue #534 command-context resolution.
+# Regression coverage for issues #534 and #537 command-context resolution.
 
 set -uo pipefail
 
@@ -127,7 +127,7 @@ assert_resolver() {
 }
 
 echo ""
-echo "=== TC-BCOW-001..013: block-commit command context ==="
+echo "=== TC-BCOW-001..015: block-commit command context ==="
 echo ""
 
 assert_hook_rc \
@@ -354,6 +354,215 @@ assert_resolver \
 assert_hook_rc \
   "TC-BCOW-013h NUL segment followed by non-git suffix remains allowed" 0 "$REPO_A" \
   "git$'\\x00'ignored commit -m not-git"
+
+assert_no_commit() {
+  local suffix="$1"
+  local description="$2"
+  local command="$3"
+
+  assert_resolver "TC-BCOW-014${suffix} helper: $description" 1 "" commit \
+    "$command" "$REPO_A"
+  assert_hook_rc "TC-BCOW-014${suffix} $description" 0 "$REPO_A" "$command"
+}
+
+# shellcheck disable=SC2016
+assert_no_commit "a" "looped variable git -C log" \
+  'for p in x; do git -C "$p" log; done'
+# shellcheck disable=SC2016
+assert_no_commit "b" "bare variable git -C log with pathspec" \
+  'git -C "$p" log -- somefile'
+# shellcheck disable=SC2016
+assert_no_commit "c" "bare variable git -C diff" \
+  'git -C "$var" diff'
+# shellcheck disable=SC2016
+assert_no_commit "d" "looped variable git -C diff" \
+  'for var in x; do git -C "$var" diff; done'
+# shellcheck disable=SC2016
+assert_no_commit "e" "variable git config option" \
+  'git -c "$config" status'
+# shellcheck disable=SC2016
+assert_no_commit "f" "variable git-dir option" \
+  'git --git-dir "$git_dir" log'
+# shellcheck disable=SC2016
+assert_no_commit "g" "variable work-tree option" \
+  'git --work-tree "$work_tree" diff'
+# shellcheck disable=SC2016
+assert_no_commit "h" "variable namespace option" \
+  'git --namespace "$namespace" status'
+# shellcheck disable=SC2016
+assert_no_commit "i" "variable super-prefix option" \
+  'git --super-prefix "$prefix" log'
+# shellcheck disable=SC2016
+assert_no_commit "j" "attached variable git-dir option" \
+  'git --git-dir="$git_dir" log'
+# shellcheck disable=SC2016
+assert_no_commit "k" "attached variable work-tree option" \
+  'git --work-tree="$work_tree" diff'
+# shellcheck disable=SC2016
+assert_no_commit "l" "attached variable namespace option" \
+  'git --namespace="$namespace" status'
+# shellcheck disable=SC2016
+assert_no_commit "m" "attached variable super-prefix option" \
+  'git --super-prefix="$prefix" log'
+
+# shellcheck disable=SC2016
+assert_resolver \
+  "TC-BCOW-014n helper: hidden operation after variable git -C" 2 "" commit \
+  'git -C "$p" $(echo commit) -m hidden' "$REPO_A"
+# shellcheck disable=SC2016
+assert_hook_rc \
+  "TC-BCOW-014n hidden operation after variable git -C" 2 "$REPO_A" \
+  'git -C "$p" $(echo commit) -m hidden'
+
+assert_no_commit "o" "literal git -C log remains allowed" \
+  'git -C /tmp log'
+assert_no_commit "p" "looped git log remains allowed" \
+  'for p in x; do git log; done'
+
+assert_resolver \
+  "TC-BCOW-015a helper: bare commit remains supported" 0 "$CANON_A" commit \
+  'git commit -m x' "$REPO_A"
+assert_hook_rc \
+  "TC-BCOW-015a bare commit remains blocked" 2 "$REPO_A" \
+  'git commit -m x'
+assert_resolver \
+  "TC-BCOW-015b helper: looped commit remains unsupported" 2 "" commit \
+  'for f in a b; do git commit -m x; done' "$REPO_A"
+assert_hook_rc \
+  "TC-BCOW-015b looped commit remains blocked" 2 "$REPO_A" \
+  'for f in a b; do git commit -m x; done'
+assert_resolver \
+  "TC-BCOW-015c helper: chained commit remains unsupported" 2 "" commit \
+  'git log; git commit -m sneaky' "$REPO_A"
+assert_hook_rc \
+  "TC-BCOW-015c chained commit remains blocked" 2 "$REPO_A" \
+  'git log; git commit -m sneaky'
+# shellcheck disable=SC2016
+assert_resolver \
+  "TC-BCOW-015d helper: hidden operation remains unsupported" 2 "" commit \
+  'git $(echo commit) -m x' "$REPO_A"
+# shellcheck disable=SC2016
+assert_hook_rc \
+  "TC-BCOW-015d hidden operation remains blocked" 2 "$REPO_A" \
+  'git $(echo commit) -m x'
+assert_resolver \
+  "TC-BCOW-015e helper: linked-worktree commit context" 0 "$REPO_A_LINKED" commit \
+  'git commit -m linked' "$REPO_A_LINKED"
+assert_hook_rc \
+  "TC-BCOW-015e linked-worktree commit remains allowed" 0 "$REPO_A_LINKED" \
+  'git commit -m linked'
+assert_resolver \
+  "TC-BCOW-015f helper: escaped long global flag remains fail-closed" 2 "" commit \
+  'git --git\-dir .git commit -m x' "$REPO_A"
+assert_hook_rc \
+  "TC-BCOW-015f escaped long global flag remains blocked" 2 "$REPO_A" \
+  'git --git\-dir .git commit -m x'
+assert_resolver \
+  "TC-BCOW-015g helper: escaped short global flag remains fail-closed" 2 "" commit \
+  'git -\C . commit -m x' "$REPO_A"
+assert_hook_rc \
+  "TC-BCOW-015g escaped short global flag remains blocked" 2 "$REPO_A" \
+  'git -\C . commit -m x'
+# shellcheck disable=SC2016
+assert_resolver \
+  "TC-BCOW-015h helper: unquoted git -C operand remains fail-closed" 2 "" commit \
+  'p=". commit"; git -C $p -m x' "$REPO_A"
+# shellcheck disable=SC2016
+assert_hook_rc \
+  "TC-BCOW-015h unquoted git -C operand remains blocked" 2 "$REPO_A" \
+  'p=". commit"; git -C $p -m x'
+# shellcheck disable=SC2016
+assert_resolver \
+  "TC-BCOW-015i helper: unquoted attached global operand remains fail-closed" 2 "" commit \
+  'git_dir=".git commit"; git --git-dir=$git_dir -m x' "$REPO_A"
+# shellcheck disable=SC2016
+assert_hook_rc \
+  "TC-BCOW-015i unquoted attached global operand remains blocked" 2 "$REPO_A" \
+  'git_dir=".git commit"; git --git-dir=$git_dir -m x'
+# shellcheck disable=SC2016
+assert_resolver \
+  "TC-BCOW-015j helper: command-substitution flag operand remains fail-closed" 2 "" commit \
+  'git -C $(printf ". commit") -m x' "$REPO_A"
+# shellcheck disable=SC2016
+assert_hook_rc \
+  "TC-BCOW-015j command-substitution flag operand remains blocked" 2 "$REPO_A" \
+  'git -C $(printf ". commit") -m x'
+# shellcheck disable=SC2016
+assert_resolver \
+  "TC-BCOW-015k helper: quoted dynamic global flag remains fail-closed" 2 "" commit \
+  'flag=C; git "-$flag" . commit -m x' "$REPO_A"
+# shellcheck disable=SC2016
+assert_hook_rc \
+  "TC-BCOW-015k quoted dynamic global flag remains blocked" 2 "$REPO_A" \
+  'flag=C; git "-$flag" . commit -m x'
+# shellcheck disable=SC2016
+assert_resolver \
+  "TC-BCOW-015l helper: mixed unquoted git -C operand remains fail-closed" 2 "" commit \
+  'p=". commit"; git -C $p"" -m x' "$REPO_A"
+# shellcheck disable=SC2016
+assert_hook_rc \
+  "TC-BCOW-015l mixed unquoted git -C operand remains blocked" 2 "$REPO_A" \
+  'p=". commit"; git -C $p"" -m x'
+assert_resolver \
+  "TC-BCOW-015m helper: process-substitution flag operand remains fail-closed" 2 "" commit \
+  'git --namespace <(printf ns) commit -m x' "$REPO_A"
+assert_hook_rc \
+  "TC-BCOW-015m process-substitution flag operand remains blocked" 2 "$REPO_A" \
+  'git --namespace <(printf ns) commit -m x'
+assert_resolver \
+  "TC-BCOW-015n helper: escaped-space attached operand remains fail-closed" 2 "" commit \
+  'git --namespace=name\ space commit -m x' "$REPO_A"
+assert_hook_rc \
+  "TC-BCOW-015n escaped-space attached operand remains blocked" 2 "$REPO_A" \
+  'git --namespace=name\ space commit -m x'
+# shellcheck disable=SC2016
+assert_resolver \
+  "TC-BCOW-015o helper: quoted backtick operation remains fail-closed" 2 "" commit \
+  'git "`echo commit`" -m x' "$REPO_A"
+# shellcheck disable=SC2016
+assert_hook_rc \
+  "TC-BCOW-015o quoted backtick operation remains blocked" 2 "$REPO_A" \
+  'git "`echo commit`" -m x'
+# shellcheck disable=SC2016
+assert_resolver \
+  "TC-BCOW-015p helper: quoted positional operands remain fail-closed" 2 "" commit \
+  'set -- . commit; git -C "$@" -m x' "$REPO_A"
+# shellcheck disable=SC2016
+assert_hook_rc \
+  "TC-BCOW-015p quoted positional operands remain blocked" 2 "$REPO_A" \
+  'set -- . commit; git -C "$@" -m x'
+# shellcheck disable=SC2016
+assert_resolver \
+  "TC-BCOW-015q helper: quoted attached array operand remains fail-closed" 2 "" commit \
+  'args=(".git" commit); git --git-dir="${args[@]}" -m x' "$REPO_A"
+# shellcheck disable=SC2016
+assert_hook_rc \
+  "TC-BCOW-015q quoted attached array operand remains blocked" 2 "$REPO_A" \
+  'args=(".git" commit); git --git-dir="${args[@]}" -m x'
+# shellcheck disable=SC2016
+assert_resolver \
+  "TC-BCOW-015r helper: indirect git -C operand remains fail-closed" 2 "" commit \
+  'set -- . commit; name=@; git -C "${!name}" -m x' "$REPO_A"
+# shellcheck disable=SC2016
+assert_hook_rc \
+  "TC-BCOW-015r indirect git -C operand remains blocked" 2 "$REPO_A" \
+  'set -- . commit; name=@; git -C "${!name}" -m x'
+# shellcheck disable=SC2016
+assert_resolver \
+  "TC-BCOW-015s helper: indirect attached operand remains fail-closed" 2 "" commit \
+  'set -- ns commit; name=@; git --namespace="${!name}" -m x' "$REPO_A"
+# shellcheck disable=SC2016
+assert_hook_rc \
+  "TC-BCOW-015s indirect attached operand remains blocked" 2 "$REPO_A" \
+  'set -- ns commit; name=@; git --namespace="${!name}" -m x'
+# shellcheck disable=SC2016
+assert_resolver \
+  "TC-BCOW-015t helper: nested command in quoted operand remains fail-closed" 2 "" commit \
+  'unset p; git -C "${p:-$(git commit -m nested)}" log' "$REPO_A"
+# shellcheck disable=SC2016
+assert_hook_rc \
+  "TC-BCOW-015t nested command in quoted operand remains blocked" 2 "$REPO_A" \
+  'unset p; git -C "${p:-$(git commit -m nested)}" log'
 
 echo ""
 echo "========================================"
