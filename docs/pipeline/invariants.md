@@ -9322,3 +9322,63 @@ across the three Step 5 pipeline narratives.
 - [`dispatcher-flow.md` Step 5](dispatcher-flow.md#step-5-stale-detection) - caller control flow for the three return values.
 
 ---
+
+## INV-146: commit worktree enforcement is scoped to the resolved command repository and fails closed when command context is uncertain
+
+_Triage (issue #236): [machine-checked: tests/unit/test-block-commit-outside-worktree.sh]_
+
+**Rule**: `resolve_git_command_cwd <operation> <command> <base-dir>` resolves
+exactly one matching invocation from this bounded grammar:
+
+```text
+git <operation> ...
+cd <literal-path> && git <operation> ...
+cd <literal-path> && git add ... && git <operation> ...
+git -C <literal-path> <operation> ...
+```
+
+It returns the canonical absolute effective cwd with rc `0`, empty output with
+rc `1` when no invocation matches, and empty output with rc `2` when a matching
+invocation is unsupported, ambiguous, or unresolvable. Literal paths may be
+absolute, relative to `<base-dir>`, unquoted `~`/`~/...`, single quoted, or
+double quoted without expansion syntax. The helper never evaluates, sources,
+or executes command text or shell expansion.
+
+Relative `cd` operands apply Bash's default logical dot-segment handling before
+canonicalization. Relative `git -C` operands use physical filesystem traversal,
+matching Git's `chdir` behavior. This distinction prevents symlink-plus-`..`
+paths from resolving to a repository different from the command's real target.
+
+`block-commit-outside-worktree.sh` captures the hook cwd's canonical
+`git-common-dir` before target evaluation. A resolved target with a different
+canonical `git-common-dir` is outside the installing repository's policy and is
+allowed. A target in the same repository is blocked when canonical `git-dir ==
+git-common-dir` and allowed when they differ, which identifies a linked
+worktree. Helper rc `2`, a missing/non-git target, or a failed canonical probe
+falls back to evaluating the hook cwd; uncertainty never grants a commit. The
+blanket `--amend` exemption remains unchanged.
+
+The supported grammar is intentionally not a general shell parser. Repeated
+`cd`, mixed `cd` plus `git -C`, wrappers, other git global options, control
+flow, substitutions/expansions, malformed quotes, multiple matching
+invocations, attached or repeated `-C`, and special/option-like `cd` operands
+are unsupported and take the rc `2` fail-closed path.
+
+**Producer**: `lib.sh::resolve_git_command_cwd`.
+
+**Consumer**: `block-commit-outside-worktree.sh`.
+
+**Status**: **ENFORCED**.
+
+**Test**: `tests/unit/test-block-commit-outside-worktree.sh`
+(`TC-BCOW-001..013`) covers both repository identities and main/linked
+worktrees, all supported path forms, helper return codes, the fail-closed
+syntax matrix, and non-execution sentinels. The exact unrelated-repository
+reproduction is red on the parent implementation and green with this
+invariant.
+
+**Cross-reference**:
+[`docs/designs/block-commit-command-context.md`](../designs/block-commit-command-context.md)
+defines the full helper contract and repository decision table.
+
+---
