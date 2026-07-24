@@ -4,13 +4,34 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib.sh
 source "$SCRIPT_DIR/lib.sh"
 
 input=$(read_hook_stdin)
 command=$(parse_command "$input")
 
-# Only check git commit commands
-if ! is_git_command "commit" "$command"; then
+# Capture the installing repository identity before evaluating command context.
+base_dir=$(pwd -P)
+hook_common_dir=""
+if hook_common_dir=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null); then
+  hook_common_dir=$(_canonical_existing_directory "$hook_common_dir") || hook_common_dir=""
+fi
+
+# Resolve command context independently from the boolean detector. The resolver
+# also recognizes supported quoted `git -C` paths that the detector strips.
+detected_commit=0
+if is_git_command "commit" "$command"; then
+  detected_commit=1
+fi
+
+resolved_dir=""
+if resolved_dir=$(resolve_git_command_cwd "commit" "$command" "$base_dir"); then
+  resolve_rc=0
+else
+  resolve_rc=$?
+fi
+
+if [[ "$resolve_rc" -eq 1 && "$detected_commit" -eq 0 ]]; then
   exit 0
 fi
 
@@ -19,15 +40,30 @@ if [[ "$command" =~ --amend ]]; then
   exit 0
 fi
 
-# Check if we're inside a worktree (not the main working tree)
-# Uses git-dir vs git-common-dir: in a worktree, git-dir points to
-# .git/worktrees/<name> which differs from git-common-dir (.git)
-if git rev-parse --is-inside-work-tree &>/dev/null; then
-  git_dir=$(git rev-parse --git-dir 2>/dev/null || echo "")
-  git_common_dir=$(git rev-parse --git-common-dir 2>/dev/null || echo "")
-  if [[ "$git_dir" != "$git_common_dir" ]]; then
+# Any mismatch or resolution uncertainty falls back to the inherited cwd.
+if [[ "$resolve_rc" -ne 0 ]]; then
+  resolved_dir="$base_dir"
+fi
+
+target_common_dir=""
+if [[ -n "$hook_common_dir" ]] &&
+  target_common_dir=$(git -C "$resolved_dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) &&
+  target_common_dir=$(_canonical_existing_directory "$target_common_dir"); then
+  if [[ "$target_common_dir" != "$hook_common_dir" ]]; then
     exit 0
   fi
+else
+  resolved_dir="$base_dir"
+  target_common_dir="$hook_common_dir"
+fi
+
+# For repo A, git-dir differs from git-common-dir only in a linked worktree.
+target_git_dir=""
+if [[ -n "$target_common_dir" ]] &&
+  target_git_dir=$(git -C "$resolved_dir" rev-parse --path-format=absolute --git-dir 2>/dev/null) &&
+  target_git_dir=$(_canonical_existing_directory "$target_git_dir") &&
+  [[ "$target_git_dir" != "$target_common_dir" ]]; then
+  exit 0
 fi
 
 # Block the commit

@@ -370,6 +370,367 @@ is_git_command() {
   return 1
 }
 
+# Canonicalize an existing directory without changing the caller's cwd.
+_canonical_existing_directory() {
+  (
+    builtin cd -P -- "$1" 2>/dev/null &&
+      builtin pwd -P
+  )
+}
+
+_resolve_git_append_word() {
+  _RGCC_TOKEN_TYPES+=("word")
+  _RGCC_TOKEN_VALUES+=("$1")
+  _RGCC_TOKEN_QUOTES+=("$2")
+}
+
+_resolve_git_append_operator() {
+  _RGCC_TOKEN_TYPES+=("operator")
+  _RGCC_TOKEN_VALUES+=("$1")
+  _RGCC_TOKEN_QUOTES+=("unquoted")
+}
+
+# Tokenize only enough shell syntax to recognize the bounded grammar used by
+# resolve_git_command_cwd. Unsafe expansion syntax is recorded, never expanded.
+_resolve_git_command_tokenize() {
+  local command="$1"
+  local state="unquoted"
+  local value=""
+  local quote_kind=""
+  local started=0
+  local character next operator
+  local i length=${#command}
+
+  _RGCC_TOKEN_TYPES=()
+  _RGCC_TOKEN_VALUES=()
+  _RGCC_TOKEN_QUOTES=()
+  _RGCC_UNSAFE=0
+  _RGCC_MALFORMED=0
+
+  for ((i = 0; i < length; i++)); do
+    character="${command:i:1}"
+
+    case "$state" in
+      single)
+        if [[ "$character" == "'" ]]; then
+          state="unquoted"
+        else
+          value+="$character"
+        fi
+        ;;
+      double)
+        if [[ "$character" == '"' ]]; then
+          state="unquoted"
+        else
+          case "$character" in
+            '$'|'`'|\\) _RGCC_UNSAFE=1 ;;
+          esac
+          value+="$character"
+        fi
+        ;;
+      unquoted)
+        case "$character" in
+          ' '|$'\t')
+            if (( started == 1 )); then
+              _resolve_git_append_word "$value" "${quote_kind:-unquoted}"
+              value=""
+              quote_kind=""
+              started=0
+            fi
+            ;;
+          $'\n'|$'\r')
+            _RGCC_UNSAFE=1
+            if (( started == 1 )); then
+              _resolve_git_append_word "$value" "${quote_kind:-unquoted}"
+              value=""
+              quote_kind=""
+              started=0
+            fi
+            ;;
+          "'")
+            if (( started == 1 )); then
+              quote_kind="mixed"
+            else
+              quote_kind="single"
+            fi
+            started=1
+            state="single"
+            ;;
+          '"')
+            if (( started == 1 )); then
+              quote_kind="mixed"
+            else
+              quote_kind="double"
+            fi
+            started=1
+            state="double"
+            ;;
+          '&'|'|'|';'|'('|')')
+            if (( started == 1 )); then
+              _resolve_git_append_word "$value" "${quote_kind:-unquoted}"
+              value=""
+              quote_kind=""
+              started=0
+            fi
+
+            operator="$character"
+            if [[ "$character" == '&' || "$character" == '|' ]]; then
+              next=""
+              if (( i + 1 < length )); then
+                next="${command:i+1:1}"
+              fi
+              if [[ "$next" == "$character" ]]; then
+                operator+="$next"
+                i=$((i + 1))
+              fi
+            fi
+            _resolve_git_append_operator "$operator"
+            ;;
+          *)
+            if (( started == 1 )) &&
+              [[ "$quote_kind" != "unquoted" && "$quote_kind" != "" ]]; then
+              quote_kind="mixed"
+            elif (( started == 0 )); then
+              quote_kind="unquoted"
+            fi
+            case "$character" in
+              '$'|'`'|\\|'<'|'>'|'{'|'}') _RGCC_UNSAFE=1 ;;
+            esac
+            started=1
+            value+="$character"
+            ;;
+        esac
+        ;;
+    esac
+  done
+
+  if [[ "$state" != "unquoted" ]]; then
+    _RGCC_MALFORMED=1
+  fi
+  if (( started == 1 )); then
+    _resolve_git_append_word "$value" "${quote_kind:-unquoted}"
+  fi
+}
+
+_resolve_git_tokens_contain_operation() {
+  local operation="$1"
+  local i j n=${#_RGCC_TOKEN_VALUES[@]}
+
+  for ((i = 0; i < n; i++)); do
+    [[ "${_RGCC_TOKEN_TYPES[i]}" == "word" ]] || continue
+    [[ "${_RGCC_TOKEN_VALUES[i]}" == "git" ]] || continue
+
+    j=$((i + 1))
+    while (( j < n )) && [[ "${_RGCC_TOKEN_TYPES[j]}" == "word" ]]; do
+      case "${_RGCC_TOKEN_VALUES[j]}" in
+        -c|-C|--git-dir|--work-tree|--namespace|--super-prefix)
+          j=$((j + 2))
+          ;;
+        -C?*|--*=*|--*)
+          j=$((j + 1))
+          ;;
+        *)
+          break
+          ;;
+      esac
+    done
+    if (( j < n )) &&
+      [[ "${_RGCC_TOKEN_TYPES[j]}" == "word" ]] &&
+      [[ "${_RGCC_TOKEN_VALUES[j]}" == "$operation" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+_resolve_git_static_token_value() {
+  local index="$1"
+  local value="${_RGCC_TOKEN_VALUES[index]}"
+  local match
+
+  if [[ "${_RGCC_TOKEN_QUOTES[index]}" == "mixed" && "$value" == '$'* ]]; then
+    value="${value:1}"
+  fi
+  while [[ "$value" =~ \$\{[^}]*\} ]]; do
+    match="${BASH_REMATCH[0]}"
+    value="${value/"$match"/}"
+  done
+  while [[ "$value" =~ \$[a-zA-Z_][a-zA-Z0-9_]* ]]; do
+    match="${BASH_REMATCH[0]}"
+    value="${value/"$match"/}"
+  done
+  value="${value//\\/}"
+  printf '%s\n' "$value"
+}
+
+# Identify operation words obscured only by rejected expansion/escape syntax.
+# This is conservative static analysis; it never expands the input.
+_resolve_git_unsafe_tokens_contain_operation() {
+  local operation="$1"
+  local i j git_word operation_word
+  local n=${#_RGCC_TOKEN_VALUES[@]}
+
+  for ((i = 0; i < n; i++)); do
+    [[ "${_RGCC_TOKEN_TYPES[i]}" == "word" ]] || continue
+    git_word=$(_resolve_git_static_token_value "$i")
+    [[ "$git_word" == "git" ]] || continue
+
+    for ((j = i + 1; j < n; j++)); do
+      [[ "${_RGCC_TOKEN_TYPES[j]}" == "word" ]] || continue
+      operation_word=$(_resolve_git_static_token_value "$j")
+      [[ "$operation_word" == "$operation" ]] && return 0
+    done
+  done
+  return 1
+}
+
+_resolve_git_tokens_are_words() {
+  local start="$1"
+  local i n=${#_RGCC_TOKEN_TYPES[@]}
+
+  for ((i = start; i < n; i++)); do
+    [[ "${_RGCC_TOKEN_TYPES[i]}" == "word" ]] || return 1
+  done
+}
+
+_resolve_git_unquoted_word_is() {
+  local index="$1"
+  local expected="$2"
+
+  [[ "${_RGCC_TOKEN_TYPES[index]:-}" == "word" ]] &&
+    [[ "${_RGCC_TOKEN_QUOTES[index]:-}" == "unquoted" ]] &&
+    [[ "${_RGCC_TOKEN_VALUES[index]:-}" == "$expected" ]]
+}
+
+_resolve_git_literal_path() {
+  local index="$1"
+  local base_dir="$2"
+  local value="${_RGCC_TOKEN_VALUES[index]:-}"
+  local quote_kind="${_RGCC_TOKEN_QUOTES[index]:-}"
+  local candidate
+
+  [[ "${_RGCC_TOKEN_TYPES[index]:-}" == "word" ]] || return 1
+  [[ -n "$value" ]] || return 1
+
+  case "$quote_kind" in
+    unquoted)
+      case "$value" in
+        \~)
+          [[ -n "${HOME:-}" ]] || return 1
+          value="$HOME"
+          ;;
+        \~/*)
+          [[ -n "${HOME:-}" ]] || return 1
+          value="${HOME}${value:1}"
+          ;;
+        \~*)
+          return 1
+          ;;
+      esac
+      [[ "$value" != *[\*\?\[\]]* ]] || return 1
+      ;;
+    single|double)
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+
+  if [[ "$value" == /* ]]; then
+    candidate="$value"
+  else
+    candidate="$base_dir/$value"
+  fi
+  _canonical_existing_directory "$candidate"
+}
+
+# Resolve the effective cwd for one bounded git operation without executing the
+# command text. Returns 0 with a canonical cwd, 1 for no match, and 2 when a
+# matching invocation is unsupported, ambiguous, or unresolvable.
+resolve_git_command_cwd() {
+  local operation="$1"
+  local command="$2"
+  local base_dir="$3"
+  local canonical_base resolved
+  local separator=-1
+  local i n
+
+  [[ "$operation" =~ ^[a-zA-Z0-9_-]+$ ]] || return 2
+  _resolve_git_command_tokenize "$command"
+
+  if ! _resolve_git_tokens_contain_operation "$operation"; then
+    if (( _RGCC_UNSAFE == 1 )) &&
+      _resolve_git_unsafe_tokens_contain_operation "$operation"; then
+      return 2
+    fi
+    if (( _RGCC_MALFORMED == 1 )) && is_git_command "$operation" "$command"; then
+      return 2
+    fi
+    return 1
+  fi
+  if (( _RGCC_UNSAFE == 1 || _RGCC_MALFORMED == 1 )); then
+    return 2
+  fi
+
+  canonical_base=$(_canonical_existing_directory "$base_dir") || return 2
+  n=${#_RGCC_TOKEN_VALUES[@]}
+
+  if (( n >= 2 )) &&
+    _resolve_git_unquoted_word_is 0 "git" &&
+    _resolve_git_unquoted_word_is 1 "$operation" &&
+    _resolve_git_tokens_are_words 2; then
+    printf '%s\n' "$canonical_base"
+    return 0
+  fi
+
+  if (( n >= 4 )) &&
+    _resolve_git_unquoted_word_is 0 "git" &&
+    _resolve_git_unquoted_word_is 1 "-C" &&
+    _resolve_git_unquoted_word_is 3 "$operation" &&
+    _resolve_git_tokens_are_words 4; then
+    resolved=$(_resolve_git_literal_path 2 "$canonical_base") || return 2
+    printf '%s\n' "$resolved"
+    return 0
+  fi
+
+  if (( n < 5 )) ||
+    ! _resolve_git_unquoted_word_is 0 "cd" ||
+    [[ "${_RGCC_TOKEN_TYPES[1]}" != "word" ]] ||
+    [[ "${_RGCC_TOKEN_TYPES[2]}" != "operator" ]] ||
+    [[ "${_RGCC_TOKEN_VALUES[2]}" != "&&" ]] ||
+    ! _resolve_git_unquoted_word_is 3 "git"; then
+    return 2
+  fi
+
+  if _resolve_git_unquoted_word_is 4 "$operation" &&
+    _resolve_git_tokens_are_words 5; then
+    [[ "${_RGCC_TOKEN_VALUES[1]}" != -* ]] || return 2
+    resolved=$(_resolve_git_literal_path 1 "$canonical_base") || return 2
+    printf '%s\n' "$resolved"
+    return 0
+  fi
+
+  _resolve_git_unquoted_word_is 4 "add" || return 2
+  for ((i = 5; i < n; i++)); do
+    if [[ "${_RGCC_TOKEN_TYPES[i]}" == "operator" ]]; then
+      separator="$i"
+      break
+    fi
+  done
+  if (( separator < 5 )) ||
+    [[ "${_RGCC_TOKEN_VALUES[separator]}" != "&&" ]] ||
+    (( separator + 2 >= n )) ||
+    ! _resolve_git_unquoted_word_is "$((separator + 1))" "git" ||
+    ! _resolve_git_unquoted_word_is "$((separator + 2))" "$operation" ||
+    ! _resolve_git_tokens_are_words "$((separator + 3))"; then
+    return 2
+  fi
+
+  [[ "${_RGCC_TOKEN_VALUES[1]}" != -* ]] || return 2
+  resolved=$(_resolve_git_literal_path 1 "$canonical_base") || return 2
+  printf '%s\n' "$resolved"
+}
+
 # Get the project root directory (delegates to resolve_project_root)
 # Usage: get_project_root
 get_project_root() {
