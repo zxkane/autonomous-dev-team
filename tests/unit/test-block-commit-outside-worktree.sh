@@ -1,5 +1,5 @@
 #!/bin/bash
-# Regression coverage for issue #534 command-context resolution.
+# Regression coverage for issues #534 and #537 command-context resolution.
 
 set -uo pipefail
 
@@ -127,7 +127,7 @@ assert_resolver() {
 }
 
 echo ""
-echo "=== TC-BCOW-001..013: block-commit command context ==="
+echo "=== TC-BCOW-001..015: block-commit command context ==="
 echo ""
 
 assert_hook_rc \
@@ -354,6 +354,103 @@ assert_resolver \
 assert_hook_rc \
   "TC-BCOW-013h NUL segment followed by non-git suffix remains allowed" 0 "$REPO_A" \
   "git$'\\x00'ignored commit -m not-git"
+
+assert_no_commit() {
+  local suffix="$1"
+  local description="$2"
+  local command="$3"
+
+  assert_resolver "TC-BCOW-014${suffix} helper: $description" 1 "" commit \
+    "$command" "$REPO_A"
+  assert_hook_rc "TC-BCOW-014${suffix} $description" 0 "$REPO_A" "$command"
+}
+
+# shellcheck disable=SC2016
+assert_no_commit "a" "looped variable git -C log" \
+  'for p in x; do git -C "$p" log; done'
+# shellcheck disable=SC2016
+assert_no_commit "b" "bare variable git -C log with pathspec" \
+  'git -C "$p" log -- somefile'
+# shellcheck disable=SC2016
+assert_no_commit "c" "bare variable git -C diff" \
+  'git -C "$var" diff'
+# shellcheck disable=SC2016
+assert_no_commit "d" "looped variable git -C diff" \
+  'for var in x; do git -C "$var" diff; done'
+# shellcheck disable=SC2016
+assert_no_commit "e" "variable git config option" \
+  'git -c "$config" status'
+# shellcheck disable=SC2016
+assert_no_commit "f" "variable git-dir option" \
+  'git --git-dir "$git_dir" log'
+# shellcheck disable=SC2016
+assert_no_commit "g" "variable work-tree option" \
+  'git --work-tree "$work_tree" diff'
+# shellcheck disable=SC2016
+assert_no_commit "h" "variable namespace option" \
+  'git --namespace "$namespace" status'
+# shellcheck disable=SC2016
+assert_no_commit "i" "variable super-prefix option" \
+  'git --super-prefix "$prefix" log'
+# shellcheck disable=SC2016
+assert_no_commit "j" "attached variable git-dir option" \
+  'git --git-dir="$git_dir" log'
+# shellcheck disable=SC2016
+assert_no_commit "k" "attached variable work-tree option" \
+  'git --work-tree="$work_tree" diff'
+# shellcheck disable=SC2016
+assert_no_commit "l" "attached variable namespace option" \
+  'git --namespace="$namespace" status'
+# shellcheck disable=SC2016
+assert_no_commit "m" "attached variable super-prefix option" \
+  'git --super-prefix="$prefix" log'
+
+# shellcheck disable=SC2016
+assert_resolver \
+  "TC-BCOW-014n helper: hidden operation after variable git -C" 2 "" commit \
+  'git -C "$p" $(echo commit) -m hidden' "$REPO_A"
+# shellcheck disable=SC2016
+assert_hook_rc \
+  "TC-BCOW-014n hidden operation after variable git -C" 2 "$REPO_A" \
+  'git -C "$p" $(echo commit) -m hidden'
+
+assert_no_commit "o" "literal git -C log remains allowed" \
+  'git -C /tmp log'
+assert_no_commit "p" "looped git log remains allowed" \
+  'for p in x; do git log; done'
+
+assert_resolver \
+  "TC-BCOW-015a helper: bare commit remains supported" 0 "$CANON_A" commit \
+  'git commit -m x' "$REPO_A"
+assert_hook_rc \
+  "TC-BCOW-015a bare commit remains blocked" 2 "$REPO_A" \
+  'git commit -m x'
+assert_resolver \
+  "TC-BCOW-015b helper: looped commit remains unsupported" 2 "" commit \
+  'for f in a b; do git commit -m x; done' "$REPO_A"
+assert_hook_rc \
+  "TC-BCOW-015b looped commit remains blocked" 2 "$REPO_A" \
+  'for f in a b; do git commit -m x; done'
+assert_resolver \
+  "TC-BCOW-015c helper: chained commit remains unsupported" 2 "" commit \
+  'git log; git commit -m sneaky' "$REPO_A"
+assert_hook_rc \
+  "TC-BCOW-015c chained commit remains blocked" 2 "$REPO_A" \
+  'git log; git commit -m sneaky'
+# shellcheck disable=SC2016
+assert_resolver \
+  "TC-BCOW-015d helper: hidden operation remains unsupported" 2 "" commit \
+  'git $(echo commit) -m x' "$REPO_A"
+# shellcheck disable=SC2016
+assert_hook_rc \
+  "TC-BCOW-015d hidden operation remains blocked" 2 "$REPO_A" \
+  'git $(echo commit) -m x'
+assert_resolver \
+  "TC-BCOW-015e helper: linked-worktree commit context" 0 "$REPO_A_LINKED" commit \
+  'git commit -m linked' "$REPO_A_LINKED"
+assert_hook_rc \
+  "TC-BCOW-015e linked-worktree commit remains allowed" 0 "$REPO_A_LINKED" \
+  'git commit -m linked'
 
 echo ""
 echo "========================================"

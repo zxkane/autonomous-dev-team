@@ -724,6 +724,7 @@ _resolve_git_static_token_value() {
 }
 
 # Identify operation words obscured only by rejected expansion/escape syntax.
+# A variable token consumed by a git global flag is not a possible operation.
 # This is conservative static analysis; it never expands the input.
 _resolve_git_unsafe_tokens_contain_operation() {
   local operation="$1"
@@ -742,14 +743,26 @@ _resolve_git_unsafe_tokens_contain_operation() {
       fi
     fi
 
-    for ((j = i + 1; j < n; j++)); do
-      [[ "${_RGCC_TOKEN_TYPES[j]}" == "word" ]] || continue
-      operation_word=$(_resolve_git_static_token_value "$j")
-      if [[ "$operation_word" == "$operation" ]] ||
-        [[ -z "$operation_word" && "${_RGCC_TOKEN_VALUES[j]}" == *'$'* ]]; then
-        return 0
-      fi
+    j=$((i + 1))
+    while (( j < n )) && [[ "${_RGCC_TOKEN_TYPES[j]}" == "word" ]]; do
+      case "${_RGCC_TOKEN_VALUES[j]}" in
+        -c|-C|--git-dir|--work-tree|--namespace|--super-prefix)
+          j=$((j + 2))
+          ;;
+        -*)
+          j=$((j + 1))
+          ;;
+        *)
+          break
+          ;;
+      esac
     done
+    (( j < n )) && [[ "${_RGCC_TOKEN_TYPES[j]}" == "word" ]] || continue
+    operation_word=$(_resolve_git_static_token_value "$j")
+    if [[ "$operation_word" == "$operation" ]] ||
+      [[ "${_RGCC_TOKEN_VALUES[j]}" == *'$'* ]]; then
+      return 0
+    fi
   done
   return 1
 }

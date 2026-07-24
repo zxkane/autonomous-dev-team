@@ -1,6 +1,6 @@
 # Test cases: block-commit command context
 
-Issue #534 is covered by
+Issues #534 and #537 are covered by
 `tests/unit/test-block-commit-outside-worktree.sh`. The test creates two
 independent repositories and linked worktrees under a fresh `mktemp` directory,
 so it is safe under the parallel unit runner.
@@ -31,6 +31,8 @@ These assertions cover all rows of the repository decision table: A main
 |---|---|---|
 | `TC-BCOW-010` | Variable expansion, command substitution, backticks, process substitution, arithmetic expansion, brace expansion, repeated `cd`, special `cd -`, mixed `cd` plus `git -C`, another command between `cd` and commit, malformed quotes, expansion/escape syntax inside command words, generic git global options, whole/fragmented ANSI-C command words using literal, hex, octal, modulo-octal, Unicode, control, invalid, or segment-truncated content, multiple commits, multiple `-C`, attached `-C<path>`, subshell, pipeline, background command, `;`, `||`, `env`, and `sudo` | The helper returns empty output/`2` and the hook exits `2` from repo A main for every form; command/process-substitution sentinels remain absent |
 | `TC-BCOW-013` | Direct helper contract | Supported match returns canonical cwd/`0`; deterministic ANSI-C non-git input, a NUL segment followed by a non-git suffix, and ordinary no-match input return empty/`1`; unsupported or missing-path match returns empty/`2` |
+| `TC-BCOW-014` | Variable-bearing arguments to `-C`, `-c`, `--git-dir`, `--work-tree`, `--namespace`, and `--super-prefix`, including long `--flag=value` forms and compound statements | Non-commit operations return empty/`1` and the hook exits `0`; variable-bearing or command-substitution operation words return empty/`2` and the hook exits `2` |
+| `TC-BCOW-015` | Bare, looped, and chained commits plus unchanged literal-path, no-global-flag, and linked-worktree contexts | Real or hidden commits remain blocked from repo A main; read-only commands and linked-worktree commits retain their previous outcomes |
 
 `TC-BCOW-010` passes all command strings as inert JSON data to the hook. The
 sentinel assertions prove the hook does not execute path-producing input.
@@ -44,3 +46,5 @@ sentinel assertions prove the hook does not execute path-producing input.
 | Input never executed; unsupported syntax fails closed | `TC-BCOW-010` and absent sentinels |
 | Existing behavior preserved | `TC-BCOW-011`, `TC-BCOW-012`, and the full unit suite |
 | Helper exit contract | `TC-BCOW-007` and `TC-BCOW-013` |
+| Variable global-flag arguments are not operation words | `TC-BCOW-014` |
+| Real and hidden commits remain fail-closed | `TC-BCOW-014` and `TC-BCOW-015` |
