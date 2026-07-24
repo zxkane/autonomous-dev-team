@@ -89,13 +89,33 @@ parse_command() {
 # Requires: jq
 parse_exit_code() {
   local json_input="$1"
+  local exit_code
 
   if ! command -v jq &> /dev/null; then
     echo "1"
     return 1
   fi
 
-  echo "$json_input" | jq -r '.tool_response.exitCode // .tool_response.exit_code // "1"'
+  exit_code=$(
+    printf '%s' "$json_input" |
+      jq -r '
+        if (.tool_response | type) == "object" then
+          .tool_response.exitCode // .tool_response.exit_code // "1"
+        elif (.tool_response | type) == "string" then
+          (
+            .tool_response
+            | capture(
+                "(?:^|\\n)Process exited with code (?<code>[0-9]+)(?:\\r?\\n|$)"
+              )
+            | .code
+          ) // "1"
+        else
+          "1"
+        end
+      ' 2>/dev/null
+  ) || exit_code="1"
+
+  printf '%s\n' "$exit_code"
 }
 
 # Parse file path from tool input

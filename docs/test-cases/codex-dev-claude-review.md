@@ -69,6 +69,11 @@ Codex's hooks-config parser is strict: top-level keys are limited to `descriptio
 | TC-CDCR-026 | Generated Codex hook command runs from a nested directory with `$CLAUDE_PROJECT_DIR` unset | Command finds the worktree hook and applies TC-CDCR-023/024 behavior |
 | TC-CDCR-027 | Main checkout has a fresh test-plan mark while Codex edits a linked worktree | Linked-worktree state stays isolated and the worktree edit still emits the reminder |
 | TC-CDCR-027A | Worktree has a fresh test-plan mark while a Claude hook carries the main checkout in `$CLAUDE_PROJECT_DIR` | Hook resolves state from its worktree `cwd`, sees the mark, and emits no reminder |
+| TC-CDCR-028 | Claude object `tool_response` uses `exitCode: 0` or `exit_code: 7` | `parse_exit_code` returns `0` or `7`, preserving the existing object contract |
+| TC-CDCR-029 | Codex string `tool_response` contains `Process exited with code 0` or `Process exited with code 7` | `parse_exit_code` returns the actual trailer status (`0` or `7`), never a blanket success |
+| TC-CDCR-029A | `tool_response` is an unrecognized string, has the exit phrase embedded outside an exact trailer line, is a number, array, or null, or the payload is invalid JSON with a bare control character | `parse_exit_code` returns `1` with status 0 and no jq diagnostic, including under a `set -e` consumer |
+| TC-CDCR-029B | `jq` is unavailable | `parse_exit_code` prints `1` and returns non-zero, preserving the mandatory dependency contract |
+| TC-CDCR-029C | Shared post-Bash consumers receive Codex string responses | Successful non-git commands are quiet no-ops; successful commit/push commands clear state or emit guidance; failed commit/push commands trigger neither success-only behavior |
 
 ## Skills, roles, and topology
 
@@ -84,6 +89,7 @@ Codex's hooks-config parser is strict: top-level keys are limited to `descriptio
 
 - `bash tests/unit/test-install-codex-hooks.sh`
 - `bash tests/unit/test-hook-edit-paths.sh`
+- `bash tests/unit/test-hook-exit-code.sh`
 - `bash tests/unit/test-codex-dev-claude-review-docs.sh`
 - `bash tests/unit/test-lib-agent-per-side-cmd.sh`
 - `bash tests/unit/test-lib-agent-per-side-launcher.sh`
