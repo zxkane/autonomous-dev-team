@@ -382,12 +382,14 @@ _resolve_git_append_word() {
   _RGCC_TOKEN_TYPES+=("word")
   _RGCC_TOKEN_VALUES+=("$1")
   _RGCC_TOKEN_QUOTES+=("$2")
+  _RGCC_TOKEN_ANSI+=("$3")
 }
 
 _resolve_git_append_operator() {
   _RGCC_TOKEN_TYPES+=("operator")
   _RGCC_TOKEN_VALUES+=("$1")
   _RGCC_TOKEN_QUOTES+=("unquoted")
+  _RGCC_TOKEN_ANSI+=("0")
 }
 
 # Tokenize only enough shell syntax to recognize the bounded grammar used by
@@ -397,13 +399,18 @@ _resolve_git_command_tokenize() {
   local state="unquoted"
   local value=""
   local quote_kind=""
+  local ansi_syntax=0
+  local ansi_segment_truncated=0
   local started=0
-  local character next operator
+  local character next operator decoded digits digit
+  local codepoint max_digits offset
+  local backslash=$'\\'
   local i length=${#command}
 
   _RGCC_TOKEN_TYPES=()
   _RGCC_TOKEN_VALUES=()
   _RGCC_TOKEN_QUOTES=()
+  _RGCC_TOKEN_ANSI=()
   _RGCC_UNSAFE=0
   _RGCC_MALFORMED=0
 
@@ -418,21 +425,137 @@ _resolve_git_command_tokenize() {
           value+="$character"
         fi
         ;;
+      ansi)
+        if [[ "$character" == "'" ]]; then
+          state="unquoted"
+          ansi_segment_truncated=0
+        elif [[ "$character" == "$backslash" ]]; then
+          next=""
+          if (( i + 1 < length )); then
+            next="${command:i+1:1}"
+          fi
+          case "$next" in
+            x|u|U)
+              case "$next" in
+                x) max_digits=2 ;;
+                u) max_digits=4 ;;
+                U) max_digits=8 ;;
+              esac
+              digits=""
+              for ((offset = 2; offset < 2 + max_digits; offset++)); do
+                digit=""
+                if (( i + offset < length )); then
+                  digit="${command:i+offset:1}"
+                fi
+                [[ "$digit" =~ ^[0-9a-fA-F]$ ]] || break
+                digits+="$digit"
+              done
+              if [[ -n "$digits" ]]; then
+                codepoint=$((16#$digits))
+                if (( codepoint == 0 )); then
+                  ansi_segment_truncated=1
+                elif (( codepoint <= 127 && ansi_segment_truncated == 0 )); then
+                  printf -v decoded '%b' "\\$next$digits"
+                  value+="$decoded"
+                elif [[ "$next" == "U" ]] &&
+                  (( codepoint >= 2147483648 )); then
+                  # Bash discards out-of-range \U escapes.
+                  :
+                elif (( ansi_segment_truncated == 0 )); then
+                  value+="?"
+                fi
+                i=$((i + 1 + ${#digits}))
+              else
+                (( ansi_segment_truncated == 1 )) || value+="$backslash$next"
+                i=$((i + 1))
+              fi
+              ;;
+            [0-7])
+              digits="$next"
+              for offset in 2 3; do
+                digit=""
+                if (( i + offset < length )); then
+                  digit="${command:i+offset:1}"
+                fi
+                [[ "$digit" =~ ^[0-7]$ ]] || break
+                digits+="$digit"
+              done
+              codepoint=$(((8#$digits) & 255))
+              if (( codepoint == 0 )); then
+                ansi_segment_truncated=1
+              elif (( codepoint <= 127 && ansi_segment_truncated == 0 )); then
+                printf -v decoded '%b' "\\0$digits"
+                value+="$decoded"
+              elif (( ansi_segment_truncated == 0 )); then
+                value+="?"
+              fi
+              i=$((i + ${#digits}))
+              ;;
+            c)
+              if (( i + 2 < length )) &&
+                [[ "${command:i+2:1}" != "'" ]]; then
+                digit="${command:i+2:1}"
+                case "$digit" in
+                  ' '|@|'`')
+                    ansi_segment_truncated=1
+                    ;;
+                  *)
+                    (( ansi_segment_truncated == 1 )) || value+="?"
+                    ;;
+                esac
+                i=$((i + 2))
+              else
+                (( ansi_segment_truncated == 1 )) || value+="$backslash$next"
+                i=$((i + 1))
+              fi
+              ;;
+            \\|"'"|'"')
+              (( ansi_segment_truncated == 1 )) || value+="$next"
+              i=$((i + 1))
+              ;;
+            '?')
+              (( ansi_segment_truncated == 1 )) || value+="?"
+              i=$((i + 1))
+              ;;
+            a) (( ansi_segment_truncated == 1 )) || value+=$'\a'; i=$((i + 1)) ;;
+            b) (( ansi_segment_truncated == 1 )) || value+=$'\b'; i=$((i + 1)) ;;
+            e|E) (( ansi_segment_truncated == 1 )) || value+=$'\e'; i=$((i + 1)) ;;
+            f) (( ansi_segment_truncated == 1 )) || value+=$'\f'; i=$((i + 1)) ;;
+            n) (( ansi_segment_truncated == 1 )) || value+=$'\n'; i=$((i + 1)) ;;
+            r) (( ansi_segment_truncated == 1 )) || value+=$'\r'; i=$((i + 1)) ;;
+            t) (( ansi_segment_truncated == 1 )) || value+=$'\t'; i=$((i + 1)) ;;
+            v) (( ansi_segment_truncated == 1 )) || value+=$'\v'; i=$((i + 1)) ;;
+            *)
+              (( ansi_segment_truncated == 1 )) || value+="$backslash"
+              ;;
+          esac
+        else
+          (( ansi_segment_truncated == 1 )) || value+="$character"
+        fi
+        ;;
       double)
         if [[ "$character" == '"' ]]; then
           state="unquoted"
+        elif [[ "$character" == "$backslash" ]]; then
+          next=""
+          if (( i + 1 < length )); then
+            next="${command:i+1:1}"
+          fi
+          case "$next" in
+            '$'|'`'|'"'|\\)
+              value+="$next"
+              i=$((i + 1))
+              ;;
+            $'\n')
+              i=$((i + 1))
+              ;;
+            *)
+              value+="$backslash"
+              ;;
+          esac
         else
           case "$character" in
             '$'|'`') _RGCC_UNSAFE=1 ;;
-            \\)
-              next=""
-              if (( i + 1 < length )); then
-                next="${command:i+1:1}"
-              fi
-              case "$next" in
-                '$'|'`'|'"'|\\|$'\n') _RGCC_UNSAFE=1 ;;
-              esac
-              ;;
           esac
           value+="$character"
         fi
@@ -441,18 +564,20 @@ _resolve_git_command_tokenize() {
         case "$character" in
           ' '|$'\t')
             if (( started == 1 )); then
-              _resolve_git_append_word "$value" "${quote_kind:-unquoted}"
+              _resolve_git_append_word "$value" "${quote_kind:-unquoted}" "$ansi_syntax"
               value=""
               quote_kind=""
+              ansi_syntax=0
               started=0
             fi
             ;;
           $'\n'|$'\r')
             _RGCC_UNSAFE=1
             if (( started == 1 )); then
-              _resolve_git_append_word "$value" "${quote_kind:-unquoted}"
+              _resolve_git_append_word "$value" "${quote_kind:-unquoted}" "$ansi_syntax"
               value=""
               quote_kind=""
+              ansi_syntax=0
               started=0
             fi
             ;;
@@ -474,11 +599,40 @@ _resolve_git_command_tokenize() {
             started=1
             state="double"
             ;;
+          '$')
+            next=""
+            if (( i + 1 < length )); then
+              next="${command:i+1:1}"
+            fi
+            if [[ "$next" == "'" ]]; then
+              if (( started == 1 )); then
+                quote_kind="mixed"
+              else
+                quote_kind="ansi"
+              fi
+              _RGCC_UNSAFE=1
+              ansi_syntax=1
+              started=1
+              state="ansi"
+              i=$((i + 1))
+            else
+              if (( started == 1 )) &&
+                [[ "$quote_kind" != "unquoted" && "$quote_kind" != "" ]]; then
+                quote_kind="mixed"
+              elif (( started == 0 )); then
+                quote_kind="unquoted"
+              fi
+              _RGCC_UNSAFE=1
+              started=1
+              value+="$character"
+            fi
+            ;;
           '&'|'|'|';'|'('|')')
             if (( started == 1 )); then
-              _resolve_git_append_word "$value" "${quote_kind:-unquoted}"
+              _resolve_git_append_word "$value" "${quote_kind:-unquoted}" "$ansi_syntax"
               value=""
               quote_kind=""
+              ansi_syntax=0
               started=0
             fi
 
@@ -503,7 +657,7 @@ _resolve_git_command_tokenize() {
               quote_kind="unquoted"
             fi
             case "$character" in
-              '$'|'`'|\\|'<'|'>'|'{'|'}') _RGCC_UNSAFE=1 ;;
+              '`'|\\|'<'|'>'|'{'|'}') _RGCC_UNSAFE=1 ;;
             esac
             started=1
             value+="$character"
@@ -517,7 +671,7 @@ _resolve_git_command_tokenize() {
     _RGCC_MALFORMED=1
   fi
   if (( started == 1 )); then
-    _resolve_git_append_word "$value" "${quote_kind:-unquoted}"
+    _resolve_git_append_word "$value" "${quote_kind:-unquoted}" "$ansi_syntax"
   fi
 }
 
@@ -557,9 +711,6 @@ _resolve_git_static_token_value() {
   local value="${_RGCC_TOKEN_VALUES[index]}"
   local match
 
-  if [[ "${_RGCC_TOKEN_QUOTES[index]}" == "mixed" && "$value" == '$'* ]]; then
-    value="${value:1}"
-  fi
   while [[ "$value" =~ \$\{[^}]*\} ]]; do
     match="${BASH_REMATCH[0]}"
     value="${value/"$match"/}"
@@ -586,8 +737,7 @@ _resolve_git_unsafe_tokens_contain_operation() {
       if (( i != 0 )) && [[ "${_RGCC_TOKEN_TYPES[i-1]}" != "operator" ]]; then
         continue
       fi
-      if [[ ! ( "${_RGCC_TOKEN_QUOTES[i]}" == "mixed" &&
-        "${_RGCC_TOKEN_VALUES[i]}" == '$'* ) && -n "$git_word" ]]; then
+      if [[ -n "$git_word" || "${_RGCC_TOKEN_ANSI[i]}" == "1" ]]; then
         continue
       fi
     fi

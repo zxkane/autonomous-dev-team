@@ -17,6 +17,7 @@ REPO_B="$TEST_HOME/unrelated-repo"
 REPO_B_LINKED="$TMPROOT/repo-b-linked"
 REPO_B_ALIAS="$TMPROOT/repo B alias"
 REPO_BACKSLASH="$TEST_HOME/repo\\q"
+REPO_QUOTE="$TEST_HOME/repo\"q"
 LOGICAL_LINK="$REPO_A/link-to-b-subdir"
 DASH_REPO="$REPO_A/-"
 NON_GIT="$TMPROOT/not-a-repo"
@@ -46,6 +47,7 @@ mkdir -p "$TEST_HOME" "$NON_GIT"
 init_repo "$REPO_A"
 init_repo "$REPO_B"
 init_repo "$REPO_BACKSLASH"
+init_repo "$REPO_QUOTE"
 init_repo "$DASH_REPO"
 mkdir -p "$REPO_B/subdir"
 git -C "$REPO_A" worktree add -q -b linked-a "$REPO_A_LINKED"
@@ -56,6 +58,9 @@ ln -s "$REPO_B/subdir" "$LOGICAL_LINK"
 CANON_A="$(cd "$REPO_A" && pwd -P)"
 CANON_B="$(cd "$REPO_B" && pwd -P)"
 CANON_BACKSLASH="$(cd "$REPO_BACKSLASH" && pwd -P)"
+CANON_QUOTE="$(cd "$REPO_QUOTE" && pwd -P)"
+REPO_BACKSLASH_ESCAPED="${REPO_BACKSLASH//\\/\\\\}"
+REPO_QUOTE_ESCAPED="${REPO_QUOTE//\"/\\\"}"
 
 record_pass() {
   echo -e "  ${GREEN}PASS${NC}: $1"
@@ -176,6 +181,18 @@ assert_resolver \
 assert_hook_rc \
   "TC-BCOW-007i double-quoted backslash path targets unrelated repo" 0 "$REPO_A" \
   "cd \"$REPO_BACKSLASH\" && git commit -m backslash"
+assert_resolver \
+  "TC-BCOW-007j double-quoted escaped backslash is decoded" 0 "$CANON_BACKSLASH" commit \
+  "cd \"$REPO_BACKSLASH_ESCAPED\" && git commit -m escaped-backslash" "$REPO_A"
+assert_hook_rc \
+  "TC-BCOW-007k escaped-backslash path targets unrelated repo" 0 "$REPO_A" \
+  "cd \"$REPO_BACKSLASH_ESCAPED\" && git commit -m escaped-backslash"
+assert_resolver \
+  "TC-BCOW-007l double-quoted escaped quote is decoded" 0 "$CANON_QUOTE" commit \
+  "cd \"$REPO_QUOTE_ESCAPED\" && git commit -m escaped-quote" "$REPO_A"
+assert_hook_rc \
+  "TC-BCOW-007m escaped-quote path targets unrelated repo" 0 "$REPO_A" \
+  "cd \"$REPO_QUOTE_ESCAPED\" && git commit -m escaped-quote"
 
 assert_hook_rc \
   "TC-BCOW-008a quoted absolute git -C targets repo B" 0 "$REPO_A" \
@@ -270,11 +287,31 @@ assert_unsupported "z2" "generic uppercase git global option" \
   'git -P commit --dry-run'
 assert_unsupported "z3" "ANSI-C hex escapes inside git word" \
   "$'\\x67\\x69\\x74' commit --dry-run"
+assert_unsupported "z4" "ANSI-C fragment inside git word" \
+  "g$'i't commit --dry-run"
+assert_unsupported "z5" "ANSI-C fragment inside operation word" \
+  "git c$'o'mmit --dry-run"
+assert_unsupported "z6" "ANSI-C octal escapes inside git word" \
+  "$'\\147\\151\\164' commit --dry-run"
+assert_unsupported "z7" "ANSI-C Unicode fragment inside operation word" \
+  "git c$'\\u006f'mmit --dry-run"
+assert_unsupported "z8" "ANSI-C segment-local NUL truncation inside git word" \
+  "$'gi\\x00ignored't commit --dry-run"
+assert_unsupported "z9" "ANSI-C segment-local NUL truncation inside operation word" \
+  "git $'commi\\x00ignored't --dry-run"
+assert_unsupported "z10" "ANSI-C modulo-octal escapes inside git word" \
+  "$'\\547\\551\\564' commit --dry-run"
+assert_unsupported "z11" "ANSI-C modulo-octal NUL inside git word" \
+  "$'git\\400ignored' commit --dry-run"
+assert_unsupported "z12" "ANSI-C control NUL inside git word" \
+  "$'git\\c@ignored' commit --dry-run"
+assert_unsupported "z13" "ANSI-C invalid Unicode escape inside git word" \
+  "$'g\\U80000067it' commit --dry-run"
 
 for sentinel_case in \
-  "TC-BCOW-010z4 command substitution:$COMMAND_SENTINEL" \
-  "TC-BCOW-010z5 backtick substitution:$BACKTICK_SENTINEL" \
-  "TC-BCOW-010z6 process substitution:$PROCESS_SENTINEL"; do
+  "TC-BCOW-010z14 command substitution:$COMMAND_SENTINEL" \
+  "TC-BCOW-010z15 backtick substitution:$BACKTICK_SENTINEL" \
+  "TC-BCOW-010z16 process substitution:$PROCESS_SENTINEL"; do
   sentinel_id="${sentinel_case%%:*}"
   sentinel_path="${sentinel_case#*:}"
   if [[ ! -e "$sentinel_path" ]]; then
@@ -305,6 +342,18 @@ assert_resolver \
 assert_resolver \
   "TC-BCOW-013d unresolvable matching invocation" 2 "" commit \
   "cd $MISSING && git commit -m helper" "$REPO_A"
+assert_resolver \
+  "TC-BCOW-013e deterministic ANSI-C non-git command is not a match" 1 "" commit \
+  "$'echo' commit -m not-git" "$REPO_A"
+assert_hook_rc \
+  "TC-BCOW-013f ANSI-C non-git command remains allowed" 0 "$REPO_A" \
+  "$'echo' commit -m not-git"
+assert_resolver \
+  "TC-BCOW-013g NUL affects only its ANSI-C segment" 1 "" commit \
+  "git$'\\x00'ignored commit -m not-git" "$REPO_A"
+assert_hook_rc \
+  "TC-BCOW-013h NUL segment followed by non-git suffix remains allowed" 0 "$REPO_A" \
+  "git$'\\x00'ignored commit -m not-git"
 
 echo ""
 echo "========================================"
