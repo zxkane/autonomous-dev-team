@@ -523,6 +523,22 @@ assert_resolver \
 assert_hook_rc \
   "TC-BCOW-015o quoted backtick operation remains blocked" 2 "$REPO_A" \
   'git "`echo commit`" -m x'
+# shellcheck disable=SC2016
+assert_resolver \
+  "TC-BCOW-015p helper: quoted positional operands remain fail-closed" 2 "" commit \
+  'set -- . commit; git -C "$@" -m x' "$REPO_A"
+# shellcheck disable=SC2016
+assert_hook_rc \
+  "TC-BCOW-015p quoted positional operands remain blocked" 2 "$REPO_A" \
+  'set -- . commit; git -C "$@" -m x'
+# shellcheck disable=SC2016
+assert_resolver \
+  "TC-BCOW-015q helper: quoted attached array operand remains fail-closed" 2 "" commit \
+  'args=(".git" commit); git --git-dir="${args[@]}" -m x' "$REPO_A"
+# shellcheck disable=SC2016
+assert_hook_rc \
+  "TC-BCOW-015q quoted attached array operand remains blocked" 2 "$REPO_A" \
+  'args=(".git" commit); git --git-dir="${args[@]}" -m x'
 
 echo ""
 echo "========================================"

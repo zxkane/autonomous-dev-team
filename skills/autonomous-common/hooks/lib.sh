@@ -774,11 +774,19 @@ _resolve_git_unsafe_tokens_contain_operation() {
           (( j + 1 < n )) &&
             [[ "${_RGCC_TOKEN_TYPES[j+1]}" == "word" ]] || return 0
           [[ "${_RGCC_TOKEN_UNQUOTED_UNSAFE[j+1]}" != "1" ]] || return 0
+          # shellcheck disable=SC2016
+          case "${_RGCC_TOKEN_VALUES[j+1]}" in
+            *'$@'*|*'${@'*|*'[@]'*|*'${!'*'@'*) return 0 ;;
+          esac
           j=$((j + 2))
           ;;
         --git-dir=*|--work-tree=*|--namespace=*|--super-prefix=*)
           [[ "${_RGCC_TOKEN_ANSI[j]}" != "1" ]] || return 0
           [[ "${_RGCC_TOKEN_UNQUOTED_UNSAFE[j]}" != "1" ]] || return 0
+          # shellcheck disable=SC2016
+          case "$token_word" in
+            *'$@'*|*'${@'*|*'[@]'*|*'${!'*'@'*) return 0 ;;
+          esac
           if [[ "$token_word" == *'$'* || "$token_word" == *'`'* ]]; then
             case "$token_word" in
               --git-dir=*|--work-tree=*|--namespace=*|--super-prefix=*)
