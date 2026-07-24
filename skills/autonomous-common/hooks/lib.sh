@@ -776,7 +776,7 @@ _resolve_git_unsafe_tokens_contain_operation() {
           [[ "${_RGCC_TOKEN_UNQUOTED_UNSAFE[j+1]}" != "1" ]] || return 0
           # shellcheck disable=SC2016
           case "${_RGCC_TOKEN_VALUES[j+1]}" in
-            *'$@'*|*'${@'*|*'[@]'*|*'${!'*'@'*) return 0 ;;
+            *'$@'*|*'${@'*|*'[@]'*|*'${!'*) return 0 ;;
           esac
           j=$((j + 2))
           ;;
@@ -785,7 +785,7 @@ _resolve_git_unsafe_tokens_contain_operation() {
           [[ "${_RGCC_TOKEN_UNQUOTED_UNSAFE[j]}" != "1" ]] || return 0
           # shellcheck disable=SC2016
           case "$token_word" in
-            *'$@'*|*'${@'*|*'[@]'*|*'${!'*'@'*) return 0 ;;
+            *'$@'*|*'${@'*|*'[@]'*|*'${!'*) return 0 ;;
           esac
           if [[ "$token_word" == *'$'* || "$token_word" == *'`'* ]]; then
             case "$token_word" in

@@ -539,6 +539,22 @@ assert_resolver \
 assert_hook_rc \
   "TC-BCOW-015q quoted attached array operand remains blocked" 2 "$REPO_A" \
   'args=(".git" commit); git --git-dir="${args[@]}" -m x'
+# shellcheck disable=SC2016
+assert_resolver \
+  "TC-BCOW-015r helper: indirect git -C operand remains fail-closed" 2 "" commit \
+  'set -- . commit; name=@; git -C "${!name}" -m x' "$REPO_A"
+# shellcheck disable=SC2016
+assert_hook_rc \
+  "TC-BCOW-015r indirect git -C operand remains blocked" 2 "$REPO_A" \
+  'set -- . commit; name=@; git -C "${!name}" -m x'
+# shellcheck disable=SC2016
+assert_resolver \
+  "TC-BCOW-015s helper: indirect attached operand remains fail-closed" 2 "" commit \
+  'set -- ns commit; name=@; git --namespace="${!name}" -m x' "$REPO_A"
+# shellcheck disable=SC2016
+assert_hook_rc \
+  "TC-BCOW-015s indirect attached operand remains blocked" 2 "$REPO_A" \
+  'set -- ns commit; name=@; git --namespace="${!name}" -m x'
 
 echo ""
 echo "========================================"
