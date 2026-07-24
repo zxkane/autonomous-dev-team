@@ -674,6 +674,7 @@ _resolve_git_command_tokenize() {
                 ;;
               \\)
                 _RGCC_UNSAFE=1
+                unquoted_unsafe=1
                 ;;
             esac
             started=1
@@ -803,7 +804,9 @@ _resolve_git_unsafe_tokens_contain_operation() {
     (( j < n )) && [[ "${_RGCC_TOKEN_TYPES[j]}" == "word" ]] || continue
     operation_word=$(_resolve_git_static_token_value "$j")
     if [[ "$operation_word" == "$operation" ]] ||
-      [[ "${_RGCC_TOKEN_VALUES[j]}" == *'$'* ]]; then
+      [[ "${_RGCC_TOKEN_VALUES[j]}" == *'$'* ]] ||
+      [[ "${_RGCC_TOKEN_VALUES[j]}" == *'`'* ]] ||
+      [[ "${_RGCC_TOKEN_UNQUOTED_UNSAFE[j]}" == "1" ]]; then
       return 0
     fi
   done

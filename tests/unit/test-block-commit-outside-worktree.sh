@@ -509,6 +509,20 @@ assert_resolver \
 assert_hook_rc \
   "TC-BCOW-015m process-substitution flag operand remains blocked" 2 "$REPO_A" \
   'git --namespace <(printf ns) commit -m x'
+assert_resolver \
+  "TC-BCOW-015n helper: escaped-space attached operand remains fail-closed" 2 "" commit \
+  'git --namespace=name\ space commit -m x' "$REPO_A"
+assert_hook_rc \
+  "TC-BCOW-015n escaped-space attached operand remains blocked" 2 "$REPO_A" \
+  'git --namespace=name\ space commit -m x'
+# shellcheck disable=SC2016
+assert_resolver \
+  "TC-BCOW-015o helper: quoted backtick operation remains fail-closed" 2 "" commit \
+  'git "`echo commit`" -m x' "$REPO_A"
+# shellcheck disable=SC2016
+assert_hook_rc \
+  "TC-BCOW-015o quoted backtick operation remains blocked" 2 "$REPO_A" \
+  'git "`echo commit`" -m x'
 
 echo ""
 echo "========================================"
