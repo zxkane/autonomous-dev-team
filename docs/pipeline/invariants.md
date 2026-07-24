@@ -9344,6 +9344,11 @@ absolute, relative to `<base-dir>`, unquoted `~`/`~/...`, single quoted, or
 double quoted without expansion syntax. The helper never evaluates, sources,
 or executes command text or shell expansion.
 
+Relative `cd` operands apply Bash's default logical dot-segment handling before
+canonicalization. Relative `git -C` operands use physical filesystem traversal,
+matching Git's `chdir` behavior. This distinction prevents symlink-plus-`..`
+paths from resolving to a repository different from the command's real target.
+
 `block-commit-outside-worktree.sh` captures the hook cwd's canonical
 `git-common-dir` before target evaluation. A resolved target with a different
 canonical `git-common-dir` is outside the installing repository's policy and is

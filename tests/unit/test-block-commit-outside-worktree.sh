@@ -16,6 +16,8 @@ REPO_A_LINKED="$TMPROOT/repo-a-linked"
 REPO_B="$TEST_HOME/unrelated-repo"
 REPO_B_LINKED="$TMPROOT/repo-b-linked"
 REPO_B_ALIAS="$TMPROOT/repo B alias"
+REPO_BACKSLASH="$TEST_HOME/repo\\q"
+LOGICAL_LINK="$REPO_A/link-to-b-subdir"
 DASH_REPO="$REPO_A/-"
 NON_GIT="$TMPROOT/not-a-repo"
 MISSING="$TMPROOT/missing-repo"
@@ -43,13 +45,17 @@ init_repo() {
 mkdir -p "$TEST_HOME" "$NON_GIT"
 init_repo "$REPO_A"
 init_repo "$REPO_B"
+init_repo "$REPO_BACKSLASH"
 init_repo "$DASH_REPO"
+mkdir -p "$REPO_B/subdir"
 git -C "$REPO_A" worktree add -q -b linked-a "$REPO_A_LINKED"
 git -C "$REPO_B" worktree add -q -b linked-b "$REPO_B_LINKED"
 ln -s "$REPO_B" "$REPO_B_ALIAS"
+ln -s "$REPO_B/subdir" "$LOGICAL_LINK"
 
 CANON_A="$(cd "$REPO_A" && pwd -P)"
 CANON_B="$(cd "$REPO_B" && pwd -P)"
+CANON_BACKSLASH="$(cd "$REPO_BACKSLASH" && pwd -P)"
 
 record_pass() {
   echo -e "  ${GREEN}PASS${NC}: $1"
@@ -158,6 +164,18 @@ assert_resolver \
 assert_resolver \
   "TC-BCOW-007e bare command uses canonical base dir" 0 "$CANON_A" commit \
   'git commit -m bare' "$REPO_A/."
+assert_resolver \
+  "TC-BCOW-007f cd resolves symlink dot-dot logically" 0 "$CANON_A" commit \
+  'cd link-to-b-subdir/.. && git commit -m logical-cd' "$REPO_A"
+assert_hook_rc \
+  "TC-BCOW-007g logical cd remains in repo A main" 2 "$REPO_A" \
+  'cd link-to-b-subdir/.. && git commit -m logical-cd'
+assert_resolver \
+  "TC-BCOW-007h double-quoted literal backslash is preserved" 0 "$CANON_BACKSLASH" commit \
+  "cd \"$REPO_BACKSLASH\" && git commit -m backslash" "$REPO_A"
+assert_hook_rc \
+  "TC-BCOW-007i double-quoted backslash path targets unrelated repo" 0 "$REPO_A" \
+  "cd \"$REPO_BACKSLASH\" && git commit -m backslash"
 
 assert_hook_rc \
   "TC-BCOW-008a quoted absolute git -C targets repo B" 0 "$REPO_A" \
@@ -165,6 +183,12 @@ assert_hook_rc \
 assert_resolver \
   "TC-BCOW-008b relative git -C resolves from base dir" 0 "$CANON_B" commit \
   'git -C ../home/unrelated-repo commit -m relative-c' "$REPO_A"
+assert_resolver \
+  "TC-BCOW-008c git -C resolves symlink dot-dot physically" 0 "$CANON_B" commit \
+  'git -C link-to-b-subdir/.. commit -m physical-c' "$REPO_A"
+assert_hook_rc \
+  "TC-BCOW-008d physical git -C targets repo B" 0 "$REPO_A" \
+  'git -C link-to-b-subdir/.. commit -m physical-c'
 
 assert_hook_rc \
   "TC-BCOW-009a missing target fails closed" 2 "$REPO_A" \
@@ -240,11 +264,17 @@ assert_unsupported "x" "escape syntax inside git word" \
   'g\it commit -m escaped-git'
 assert_unsupported "y" "ANSI-C quote syntax inside git word" \
   "$'git' commit -m ansi-c-git"
+assert_unsupported "z1" "generic short git global option" \
+  'git -p commit --dry-run'
+assert_unsupported "z2" "generic uppercase git global option" \
+  'git -P commit --dry-run'
+assert_unsupported "z3" "ANSI-C hex escapes inside git word" \
+  "$'\\x67\\x69\\x74' commit --dry-run"
 
 for sentinel_case in \
-  "TC-BCOW-010z1 command substitution:$COMMAND_SENTINEL" \
-  "TC-BCOW-010z2 backtick substitution:$BACKTICK_SENTINEL" \
-  "TC-BCOW-010z3 process substitution:$PROCESS_SENTINEL"; do
+  "TC-BCOW-010z4 command substitution:$COMMAND_SENTINEL" \
+  "TC-BCOW-010z5 backtick substitution:$BACKTICK_SENTINEL" \
+  "TC-BCOW-010z6 process substitution:$PROCESS_SENTINEL"; do
   sentinel_id="${sentinel_case%%:*}"
   sentinel_path="${sentinel_case#*:}"
   if [[ ! -e "$sentinel_path" ]]; then

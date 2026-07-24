@@ -15,8 +15,8 @@ so it is safe under the parallel unit runner.
 | `TC-BCOW-004` | Explicit `cd` to repo A linked worktree | Hook exits `0` |
 | `TC-BCOW-005` | Explicit `cd` to repo B main | Hook exits `0` |
 | `TC-BCOW-006` | Explicit `cd` to repo B linked worktree | Hook exits `0` |
-| `TC-BCOW-007` | Relative, single-quoted, double-quoted, symlinked, and tilde literal paths | Helper returns the canonical target and the hook applies repo B policy |
-| `TC-BCOW-008` | One two-token `git -C <repo-B> commit`, with absolute/quoted and relative paths | Hook exits `0`; helper resolves the relative path from its base directory |
+| `TC-BCOW-007` | Relative, single-quoted, double-quoted, literal-backslash, symlinked, tilde, and symlink-plus-`..` paths | Helper returns the canonical target; `cd` applies logical dot-segment handling before canonicalization |
+| `TC-BCOW-008` | One two-token `git -C <repo-B> commit`, with absolute/quoted, relative, and symlink-plus-`..` paths | Hook exits `0`; helper resolves from its base directory using physical filesystem traversal |
 | `TC-BCOW-009` | Missing path and existing non-git directory from repo A main | Target probing falls back to hook cwd; hook exits `2` |
 | `TC-BCOW-011` | Bare commit with hook cwd in repo A linked worktree | Hook exits `0` |
 | `TC-BCOW-012` | A command containing `--amend` from repo A main | Existing blanket exemption remains; hook exits `0` |
@@ -29,7 +29,7 @@ These assertions cover all rows of the repository decision table: A main
 
 | ID | Scenario | Unit assertion |
 |---|---|---|
-| `TC-BCOW-010` | Variable expansion, command substitution, backticks, process substitution, arithmetic expansion, brace expansion, repeated `cd`, special `cd -`, mixed `cd` plus `git -C`, another command between `cd` and commit, malformed quotes, expansion/escape syntax inside command words, multiple commits, multiple `-C`, attached `-C<path>`, another git global option, subshell, pipeline, background command, `;`, `||`, `env`, and `sudo` | The helper returns empty output/`2` and the hook exits `2` from repo A main for every form; command/process-substitution sentinels remain absent |
+| `TC-BCOW-010` | Variable expansion, command substitution, backticks, process substitution, arithmetic expansion, brace expansion, repeated `cd`, special `cd -`, mixed `cd` plus `git -C`, another command between `cd` and commit, malformed quotes, expansion/escape syntax inside command words, generic git global options, ANSI-C escaped command words, multiple commits, multiple `-C`, attached `-C<path>`, subshell, pipeline, background command, `;`, `||`, `env`, and `sudo` | The helper returns empty output/`2` and the hook exits `2` from repo A main for every form; command/process-substitution sentinels remain absent |
 | `TC-BCOW-013` | Direct helper contract | Supported match returns canonical cwd/`0`; no match returns empty/`1`; unsupported or missing-path match returns empty/`2` |
 
 `TC-BCOW-010` passes all command strings as inert JSON data to the hook. The

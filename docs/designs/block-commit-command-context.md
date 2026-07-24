@@ -50,10 +50,12 @@ There must be exactly one matching invocation. A literal path is one of:
 - an absolute or relative unquoted shell word;
 - unquoted `~` or `~/...`, expanded only with `HOME`;
 - one single-quoted literal; or
-- one double-quoted literal containing no expansion or escape syntax.
+- one double-quoted literal containing no expansion syntax.
 
-Relative `cd` and `git -C` paths are resolved from `<base-dir>`. Mixed quoting,
-shell expansion syntax, and a missing or non-directory target are not resolved.
+Relative `cd` and `git -C` paths are resolved from `<base-dir>`. `cd` applies
+Bash's default logical dot-segment handling before canonicalization; `git -C`
+uses physical filesystem path traversal. Mixed quoting, shell expansion syntax,
+and a missing or non-directory target are not resolved.
 
 Unsupported forms include repeated `cd`, `cd` combined with `git -C`, another
 command between `cd` and the commit, other git global options before the

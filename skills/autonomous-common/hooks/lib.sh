@@ -423,7 +423,16 @@ _resolve_git_command_tokenize() {
           state="unquoted"
         else
           case "$character" in
-            '$'|'`'|\\) _RGCC_UNSAFE=1 ;;
+            '$'|'`') _RGCC_UNSAFE=1 ;;
+            \\)
+              next=""
+              if (( i + 1 < length )); then
+                next="${command:i+1:1}"
+              fi
+              case "$next" in
+                '$'|'`'|'"'|\\|$'\n') _RGCC_UNSAFE=1 ;;
+              esac
+              ;;
           esac
           value+="$character"
         fi
@@ -526,7 +535,7 @@ _resolve_git_tokens_contain_operation() {
         -c|-C|--git-dir|--work-tree|--namespace|--super-prefix)
           j=$((j + 2))
           ;;
-        -C?*|--*=*|--*)
+        -*)
           j=$((j + 1))
           ;;
         *)
@@ -573,12 +582,23 @@ _resolve_git_unsafe_tokens_contain_operation() {
   for ((i = 0; i < n; i++)); do
     [[ "${_RGCC_TOKEN_TYPES[i]}" == "word" ]] || continue
     git_word=$(_resolve_git_static_token_value "$i")
-    [[ "$git_word" == "git" ]] || continue
+    if [[ "$git_word" != "git" ]]; then
+      if (( i != 0 )) && [[ "${_RGCC_TOKEN_TYPES[i-1]}" != "operator" ]]; then
+        continue
+      fi
+      if [[ ! ( "${_RGCC_TOKEN_QUOTES[i]}" == "mixed" &&
+        "${_RGCC_TOKEN_VALUES[i]}" == '$'* ) && -n "$git_word" ]]; then
+        continue
+      fi
+    fi
 
     for ((j = i + 1; j < n; j++)); do
       [[ "${_RGCC_TOKEN_TYPES[j]}" == "word" ]] || continue
       operation_word=$(_resolve_git_static_token_value "$j")
-      [[ "$operation_word" == "$operation" ]] && return 0
+      if [[ "$operation_word" == "$operation" ]] ||
+        [[ -z "$operation_word" && "${_RGCC_TOKEN_VALUES[j]}" == *'$'* ]]; then
+        return 0
+      fi
     done
   done
   return 1
@@ -602,9 +622,41 @@ _resolve_git_unquoted_word_is() {
     [[ "${_RGCC_TOKEN_VALUES[index]:-}" == "$expected" ]]
 }
 
+_resolve_git_logical_absolute_path() {
+  local path="$1"
+  local part joined
+  local -a parts=()
+  local -a stack=()
+
+  [[ "$path" == /* ]] || return 1
+  IFS='/' read -r -a parts <<<"${path#/}"
+  for part in "${parts[@]}"; do
+    case "$part" in
+      ''|'.')
+        ;;
+      '..')
+        if (( ${#stack[@]} > 0 )); then
+          unset 'stack[${#stack[@]}-1]'
+        fi
+        ;;
+      *)
+        stack+=("$part")
+        ;;
+    esac
+  done
+
+  if (( ${#stack[@]} == 0 )); then
+    printf '/\n'
+  else
+    joined=$(IFS='/'; printf '%s' "${stack[*]}")
+    printf '/%s\n' "$joined"
+  fi
+}
+
 _resolve_git_literal_path() {
   local index="$1"
   local base_dir="$2"
+  local resolution_mode="$3"
   local value="${_RGCC_TOKEN_VALUES[index]:-}"
   local quote_kind="${_RGCC_TOKEN_QUOTES[index]:-}"
   local candidate
@@ -640,6 +692,9 @@ _resolve_git_literal_path() {
     candidate="$value"
   else
     candidate="$base_dir/$value"
+  fi
+  if [[ "$resolution_mode" == "logical" ]]; then
+    candidate=$(_resolve_git_logical_absolute_path "$candidate") || return 1
   fi
   _canonical_existing_directory "$candidate"
 }
@@ -688,7 +743,7 @@ resolve_git_command_cwd() {
     _resolve_git_unquoted_word_is 1 "-C" &&
     _resolve_git_unquoted_word_is 3 "$operation" &&
     _resolve_git_tokens_are_words 4; then
-    resolved=$(_resolve_git_literal_path 2 "$canonical_base") || return 2
+    resolved=$(_resolve_git_literal_path 2 "$canonical_base" "physical") || return 2
     printf '%s\n' "$resolved"
     return 0
   fi
@@ -705,7 +760,7 @@ resolve_git_command_cwd() {
   if _resolve_git_unquoted_word_is 4 "$operation" &&
     _resolve_git_tokens_are_words 5; then
     [[ "${_RGCC_TOKEN_VALUES[1]}" != -* ]] || return 2
-    resolved=$(_resolve_git_literal_path 1 "$canonical_base") || return 2
+    resolved=$(_resolve_git_literal_path 1 "$canonical_base" "logical") || return 2
     printf '%s\n' "$resolved"
     return 0
   fi
@@ -727,7 +782,7 @@ resolve_git_command_cwd() {
   fi
 
   [[ "${_RGCC_TOKEN_VALUES[1]}" != -* ]] || return 2
-  resolved=$(_resolve_git_literal_path 1 "$canonical_base") || return 2
+  resolved=$(_resolve_git_literal_path 1 "$canonical_base" "logical") || return 2
   printf '%s\n' "$resolved"
 }
 
