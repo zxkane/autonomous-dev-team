@@ -742,6 +742,25 @@ _resolve_git_static_token_value() {
   printf '%s\n' "$value"
 }
 
+_resolve_git_flag_token_has_unsafe_expansion() {
+  local value="$1"
+  local match
+  # shellcheck disable=SC2016
+  local command_sub='$(' arithmetic='$[' backtick='`' braced='${' positional='$@'
+
+  if [[ "$value" == *"$command_sub"* ||
+    "$value" == *"$arithmetic"* ||
+    "$value" == *"$backtick"* ||
+    "$value" == *"$positional"* ]]; then
+    return 0
+  fi
+  while [[ "$value" =~ (\$\{[a-zA-Z_][a-zA-Z0-9_]*\}) ]]; do
+    match="${BASH_REMATCH[1]}"
+    value="${value/"$match"/}"
+  done
+  [[ "$value" == *"$braced"* ]]
+}
+
 # Identify operation words obscured only by rejected expansion/escape syntax.
 # A quoted variable token consumed by a git global flag is not an operation.
 # This is conservative static analysis; it never expands the input.
@@ -774,19 +793,18 @@ _resolve_git_unsafe_tokens_contain_operation() {
           (( j + 1 < n )) &&
             [[ "${_RGCC_TOKEN_TYPES[j+1]}" == "word" ]] || return 0
           [[ "${_RGCC_TOKEN_UNQUOTED_UNSAFE[j+1]}" != "1" ]] || return 0
-          # shellcheck disable=SC2016
-          case "${_RGCC_TOKEN_VALUES[j+1]}" in
-            *'$@'*|*'${@'*|*'[@]'*|*'${!'*) return 0 ;;
-          esac
+          if _resolve_git_flag_token_has_unsafe_expansion \
+            "${_RGCC_TOKEN_VALUES[j+1]}"; then
+            return 0
+          fi
           j=$((j + 2))
           ;;
         --git-dir=*|--work-tree=*|--namespace=*|--super-prefix=*)
           [[ "${_RGCC_TOKEN_ANSI[j]}" != "1" ]] || return 0
           [[ "${_RGCC_TOKEN_UNQUOTED_UNSAFE[j]}" != "1" ]] || return 0
-          # shellcheck disable=SC2016
-          case "$token_word" in
-            *'$@'*|*'${@'*|*'[@]'*|*'${!'*) return 0 ;;
-          esac
+          if _resolve_git_flag_token_has_unsafe_expansion "$token_word"; then
+            return 0
+          fi
           if [[ "$token_word" == *'$'* || "$token_word" == *'`'* ]]; then
             case "$token_word" in
               --git-dir=*|--work-tree=*|--namespace=*|--super-prefix=*)

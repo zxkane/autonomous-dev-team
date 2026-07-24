@@ -555,6 +555,14 @@ assert_resolver \
 assert_hook_rc \
   "TC-BCOW-015s indirect attached operand remains blocked" 2 "$REPO_A" \
   'set -- ns commit; name=@; git --namespace="${!name}" -m x'
+# shellcheck disable=SC2016
+assert_resolver \
+  "TC-BCOW-015t helper: nested command in quoted operand remains fail-closed" 2 "" commit \
+  'unset p; git -C "${p:-$(git commit -m nested)}" log' "$REPO_A"
+# shellcheck disable=SC2016
+assert_hook_rc \
+  "TC-BCOW-015t nested command in quoted operand remains blocked" 2 "$REPO_A" \
+  'unset p; git -C "${p:-$(git commit -m nested)}" log'
 
 echo ""
 echo "========================================"
