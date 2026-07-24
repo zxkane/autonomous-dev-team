@@ -451,6 +451,42 @@ assert_resolver \
 assert_hook_rc \
   "TC-BCOW-015e linked-worktree commit remains allowed" 0 "$REPO_A_LINKED" \
   'git commit -m linked'
+assert_resolver \
+  "TC-BCOW-015f helper: escaped long global flag remains fail-closed" 2 "" commit \
+  'git --git\-dir .git commit -m x' "$REPO_A"
+assert_hook_rc \
+  "TC-BCOW-015f escaped long global flag remains blocked" 2 "$REPO_A" \
+  'git --git\-dir .git commit -m x'
+assert_resolver \
+  "TC-BCOW-015g helper: escaped short global flag remains fail-closed" 2 "" commit \
+  'git -\C . commit -m x' "$REPO_A"
+assert_hook_rc \
+  "TC-BCOW-015g escaped short global flag remains blocked" 2 "$REPO_A" \
+  'git -\C . commit -m x'
+# shellcheck disable=SC2016
+assert_resolver \
+  "TC-BCOW-015h helper: unquoted git -C operand remains fail-closed" 2 "" commit \
+  'p=". commit"; git -C $p -m x' "$REPO_A"
+# shellcheck disable=SC2016
+assert_hook_rc \
+  "TC-BCOW-015h unquoted git -C operand remains blocked" 2 "$REPO_A" \
+  'p=". commit"; git -C $p -m x'
+# shellcheck disable=SC2016
+assert_resolver \
+  "TC-BCOW-015i helper: unquoted attached global operand remains fail-closed" 2 "" commit \
+  'git_dir=".git commit"; git --git-dir=$git_dir -m x' "$REPO_A"
+# shellcheck disable=SC2016
+assert_hook_rc \
+  "TC-BCOW-015i unquoted attached global operand remains blocked" 2 "$REPO_A" \
+  'git_dir=".git commit"; git --git-dir=$git_dir -m x'
+# shellcheck disable=SC2016
+assert_resolver \
+  "TC-BCOW-015j helper: command-substitution flag operand remains fail-closed" 2 "" commit \
+  'git -C $(printf ". commit") -m x' "$REPO_A"
+# shellcheck disable=SC2016
+assert_hook_rc \
+  "TC-BCOW-015j command-substitution flag operand remains blocked" 2 "$REPO_A" \
+  'git -C $(printf ". commit") -m x'
 
 echo ""
 echo "========================================"
