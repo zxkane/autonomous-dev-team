@@ -487,6 +487,28 @@ assert_resolver \
 assert_hook_rc \
   "TC-BCOW-015j command-substitution flag operand remains blocked" 2 "$REPO_A" \
   'git -C $(printf ". commit") -m x'
+# shellcheck disable=SC2016
+assert_resolver \
+  "TC-BCOW-015k helper: quoted dynamic global flag remains fail-closed" 2 "" commit \
+  'flag=C; git "-$flag" . commit -m x' "$REPO_A"
+# shellcheck disable=SC2016
+assert_hook_rc \
+  "TC-BCOW-015k quoted dynamic global flag remains blocked" 2 "$REPO_A" \
+  'flag=C; git "-$flag" . commit -m x'
+# shellcheck disable=SC2016
+assert_resolver \
+  "TC-BCOW-015l helper: mixed unquoted git -C operand remains fail-closed" 2 "" commit \
+  'p=". commit"; git -C $p"" -m x' "$REPO_A"
+# shellcheck disable=SC2016
+assert_hook_rc \
+  "TC-BCOW-015l mixed unquoted git -C operand remains blocked" 2 "$REPO_A" \
+  'p=". commit"; git -C $p"" -m x'
+assert_resolver \
+  "TC-BCOW-015m helper: process-substitution flag operand remains fail-closed" 2 "" commit \
+  'git --namespace <(printf ns) commit -m x' "$REPO_A"
+assert_hook_rc \
+  "TC-BCOW-015m process-substitution flag operand remains blocked" 2 "$REPO_A" \
+  'git --namespace <(printf ns) commit -m x'
 
 echo ""
 echo "========================================"

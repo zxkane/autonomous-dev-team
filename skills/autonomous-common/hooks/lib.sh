@@ -383,6 +383,7 @@ _resolve_git_append_word() {
   _RGCC_TOKEN_VALUES+=("$1")
   _RGCC_TOKEN_QUOTES+=("$2")
   _RGCC_TOKEN_ANSI+=("$3")
+  _RGCC_TOKEN_UNQUOTED_UNSAFE+=("$4")
 }
 
 _resolve_git_append_operator() {
@@ -390,6 +391,7 @@ _resolve_git_append_operator() {
   _RGCC_TOKEN_VALUES+=("$1")
   _RGCC_TOKEN_QUOTES+=("unquoted")
   _RGCC_TOKEN_ANSI+=("0")
+  _RGCC_TOKEN_UNQUOTED_UNSAFE+=("0")
 }
 
 # Tokenize only enough shell syntax to recognize the bounded grammar used by
@@ -401,6 +403,7 @@ _resolve_git_command_tokenize() {
   local quote_kind=""
   local ansi_syntax=0
   local ansi_segment_truncated=0
+  local unquoted_unsafe=0
   local started=0
   local character next operator decoded digits digit
   local codepoint max_digits offset
@@ -411,6 +414,7 @@ _resolve_git_command_tokenize() {
   _RGCC_TOKEN_VALUES=()
   _RGCC_TOKEN_QUOTES=()
   _RGCC_TOKEN_ANSI=()
+  _RGCC_TOKEN_UNQUOTED_UNSAFE=()
   _RGCC_UNSAFE=0
   _RGCC_MALFORMED=0
 
@@ -564,20 +568,24 @@ _resolve_git_command_tokenize() {
         case "$character" in
           ' '|$'\t')
             if (( started == 1 )); then
-              _resolve_git_append_word "$value" "${quote_kind:-unquoted}" "$ansi_syntax"
+              _resolve_git_append_word "$value" "${quote_kind:-unquoted}" \
+                "$ansi_syntax" "$unquoted_unsafe"
               value=""
               quote_kind=""
               ansi_syntax=0
+              unquoted_unsafe=0
               started=0
             fi
             ;;
           $'\n'|$'\r')
             _RGCC_UNSAFE=1
             if (( started == 1 )); then
-              _resolve_git_append_word "$value" "${quote_kind:-unquoted}" "$ansi_syntax"
+              _resolve_git_append_word "$value" "${quote_kind:-unquoted}" \
+                "$ansi_syntax" "$unquoted_unsafe"
               value=""
               quote_kind=""
               ansi_syntax=0
+              unquoted_unsafe=0
               started=0
             fi
             ;;
@@ -623,16 +631,19 @@ _resolve_git_command_tokenize() {
                 quote_kind="unquoted"
               fi
               _RGCC_UNSAFE=1
+              unquoted_unsafe=1
               started=1
               value+="$character"
             fi
             ;;
           '&'|'|'|';'|'('|')')
             if (( started == 1 )); then
-              _resolve_git_append_word "$value" "${quote_kind:-unquoted}" "$ansi_syntax"
+              _resolve_git_append_word "$value" "${quote_kind:-unquoted}" \
+                "$ansi_syntax" "$unquoted_unsafe"
               value=""
               quote_kind=""
               ansi_syntax=0
+              unquoted_unsafe=0
               started=0
             fi
 
@@ -657,7 +668,13 @@ _resolve_git_command_tokenize() {
               quote_kind="unquoted"
             fi
             case "$character" in
-              '`'|\\|'<'|'>'|'{'|'}') _RGCC_UNSAFE=1 ;;
+              '`'|'<'|'>'|'{'|'}')
+                _RGCC_UNSAFE=1
+                unquoted_unsafe=1
+                ;;
+              \\)
+                _RGCC_UNSAFE=1
+                ;;
             esac
             started=1
             value+="$character"
@@ -671,7 +688,8 @@ _resolve_git_command_tokenize() {
     _RGCC_MALFORMED=1
   fi
   if (( started == 1 )); then
-    _resolve_git_append_word "$value" "${quote_kind:-unquoted}" "$ansi_syntax"
+    _resolve_git_append_word "$value" "${quote_kind:-unquoted}" \
+      "$ansi_syntax" "$unquoted_unsafe"
   fi
 }
 
@@ -728,7 +746,7 @@ _resolve_git_static_token_value() {
 # This is conservative static analysis; it never expands the input.
 _resolve_git_unsafe_tokens_contain_operation() {
   local operation="$1"
-  local i j git_word operation_word option_word
+  local i j git_word operation_word option_word token_word
   local n=${#_RGCC_TOKEN_VALUES[@]}
 
   for ((i = 0; i < n; i++)); do
@@ -745,24 +763,36 @@ _resolve_git_unsafe_tokens_contain_operation() {
 
     j=$((i + 1))
     while (( j < n )) && [[ "${_RGCC_TOKEN_TYPES[j]}" == "word" ]]; do
+      token_word="${_RGCC_TOKEN_VALUES[j]}"
       option_word=$(_resolve_git_static_token_value "$j")
-      if [[ "${_RGCC_TOKEN_QUOTES[j]}" == "unquoted" ]]; then
-        case "${_RGCC_TOKEN_VALUES[j]}" in
-          *'$'*|*'`'*|*'{'*|*'}'*) return 0 ;;
-        esac
-      fi
       case "$option_word" in
         -c|-C|--git-dir|--work-tree|--namespace|--super-prefix)
+          [[ "$token_word" != *'$'* && "$token_word" != *'`'* ]] || return 0
+          [[ "${_RGCC_TOKEN_ANSI[j]}" != "1" ]] || return 0
+          [[ "${_RGCC_TOKEN_UNQUOTED_UNSAFE[j]}" != "1" ]] || return 0
           (( j + 1 < n )) &&
             [[ "${_RGCC_TOKEN_TYPES[j+1]}" == "word" ]] || return 0
-          if [[ "${_RGCC_TOKEN_QUOTES[j+1]}" == "unquoted" ]]; then
-            case "${_RGCC_TOKEN_VALUES[j+1]}" in
-              *'$'*|*'`'*|*'{'*|*'}'*) return 0 ;;
-            esac
-          fi
+          [[ "${_RGCC_TOKEN_UNQUOTED_UNSAFE[j+1]}" != "1" ]] || return 0
           j=$((j + 2))
           ;;
+        --git-dir=*|--work-tree=*|--namespace=*|--super-prefix=*)
+          [[ "${_RGCC_TOKEN_ANSI[j]}" != "1" ]] || return 0
+          [[ "${_RGCC_TOKEN_UNQUOTED_UNSAFE[j]}" != "1" ]] || return 0
+          if [[ "$token_word" == *'$'* || "$token_word" == *'`'* ]]; then
+            case "$token_word" in
+              --git-dir=*|--work-tree=*|--namespace=*|--super-prefix=*)
+                ;;
+              *)
+                return 0
+                ;;
+            esac
+          fi
+          j=$((j + 1))
+          ;;
         -*)
+          [[ "$token_word" != *'$'* && "$token_word" != *'`'* ]] || return 0
+          [[ "${_RGCC_TOKEN_ANSI[j]}" != "1" ]] || return 0
+          [[ "${_RGCC_TOKEN_UNQUOTED_UNSAFE[j]}" != "1" ]] || return 0
           j=$((j + 1))
           ;;
         *)
