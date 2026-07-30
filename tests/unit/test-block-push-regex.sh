@@ -61,6 +61,30 @@ assert_exit() {
   fi
 }
 
+# Set up a SECOND, unrelated repo (with `main` checked out) to stand in for
+# another repository the agent legitimately pushes to — most importantly a
+# project's separate `<project>.wiki.git`, whose default and only branch is
+# `main` and which has no PR flow at all.
+setup_other_repo() {
+  local name="$1"
+  rm -rf "$TMPDIR/$name"
+  mkdir -p "$TMPDIR/$name"
+  git -C "$TMPDIR/$name" init --quiet --initial-branch=main
+  git -C "$TMPDIR/$name" -c user.email=test@test -c user.name=test commit \
+    --quiet --allow-empty -m init
+}
+
+# Run the hook with cwd = the project repo (what Claude Code actually passes)
+# while the command targets a different repo.
+run_hook_cwd() {
+  local cmd="$1" cwd="$2"
+  local input
+  input=$(printf '{"tool_input":{"command":%s},"cwd":%s}' \
+    "$(jq -Rn --arg c "$cmd" '$c')" "$(jq -Rn --arg d "$cwd" '$d')")
+  (cd "$cwd" && CLAUDE_PROJECT_DIR="$TMPDIR/repo" bash "$HOOK" <<<"$input")
+  echo $?
+}
+
 # ===========================================================================
 # TC-BP-01: Bare push from trunk → block
 # ===========================================================================
@@ -164,6 +188,59 @@ echo "=== TC-BP-11: not a push command → allow ==="
 setup_repo main
 out=$(run_hook "git status")
 assert_exit "git status (not a push) allowed" "0" "$out"
+
+# ===========================================================================
+# TC-BP-12: push to ANOTHER repo's main via `git -C <other>` → allow
+# ===========================================================================
+# Trunk protection guards THIS project's repo. A push whose destination
+# repository is a different one is not this guard's business: the agent may
+# legitimately be publishing to a sibling checkout, a vendored dependency, or
+# a wiki. Blocking it is a pure false positive — there is no PR flow here to
+# route the change through.
+echo ""
+echo "=== TC-BP-12: push another repo's main via -C → allow ==="
+setup_repo main
+setup_other_repo other
+out=$(run_hook_cwd "git -C $TMPDIR/other push origin main" "$TMPDIR/repo")
+assert_exit "push to another repo's main via -C allowed" "0" "$out"
+
+# ===========================================================================
+# TC-BP-13: push to a .wiki.git clone's main via `cd && git push` → allow
+# ===========================================================================
+# The real-world shape that motivated this: publishing a design doc to a
+# GitLab project wiki. `<project>.wiki.git` is a separate repository whose
+# only branch is `main`, so the guard fired on every wiki update and the docs
+# could not be pushed at all.
+echo ""
+echo "=== TC-BP-13: push to <project>.wiki.git main via cd → allow ==="
+setup_repo main
+setup_other_repo project.wiki
+out=$(run_hook_cwd "cd $TMPDIR/project.wiki && git push origin main" "$TMPDIR/repo")
+assert_exit "push to <project>.wiki.git main allowed" "0" "$out"
+
+# ===========================================================================
+# TC-BP-14: push THIS repo's main via `git -C <self>` → still block
+# ===========================================================================
+# The scoping must not become an escape hatch: naming the project's own repo
+# explicitly still routes through trunk protection.
+echo ""
+echo "=== TC-BP-14: push own repo main via -C → still block ==="
+setup_repo main
+out=$(run_hook_cwd "git -C $TMPDIR/repo push origin main" "$TMPDIR/repo")
+assert_exit "push to own repo's main via -C still blocked" "2" "$out"
+
+# ===========================================================================
+# TC-BP-15: push main from a linked worktree of THIS repo → still block
+# ===========================================================================
+# A linked worktree shares its git-common-dir with the project repo, so it
+# must still count as "this repo" — otherwise every guard could be sidestepped
+# by committing from a worktree.
+echo ""
+echo "=== TC-BP-15: push own repo main from a linked worktree → still block ==="
+setup_repo main
+git -C "$TMPDIR/repo" worktree add --quiet -b feat/wt "$TMPDIR/wt" >/dev/null 2>&1
+out=$(run_hook_cwd "git push origin HEAD:refs/heads/main" "$TMPDIR/wt")
+assert_exit "push to own repo's main from linked worktree still blocked" "2" "$out"
 
 # ===========================================================================
 # Summary

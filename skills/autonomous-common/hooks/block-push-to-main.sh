@@ -22,6 +22,35 @@ if ! is_git_command "push" "$command"; then
   exit 0
 fi
 
+# Trunk protection guards THIS project's repository. Resolve the repository the
+# push actually targets (`git -C <path> push`, `cd <path> && git push`) and bow
+# out when it is a different one: a sibling checkout, a vendored dependency, or
+# a project's separate `<project>.wiki.git`. A wiki has no PR flow and `main` is
+# its only branch, so blocking it made wiki updates impossible rather than
+# routing them through review.
+#
+# Mirrors the identity check block-commit-outside-worktree.sh already performs.
+# Comparing git-common-dir (shared by a repo and all its linked worktrees) keeps
+# a worktree of this project counted as this project — the scoping must not
+# become an escape hatch (see TC-BP-14/15). Any resolution uncertainty falls
+# back to the inherited cwd, so an unparsable command is still checked.
+hook_common_dir=""
+if hook_common_dir=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null); then
+  hook_common_dir=$(_canonical_existing_directory "$hook_common_dir") || hook_common_dir=""
+fi
+
+push_dir="$(pwd -P)"
+if resolved_dir=$(resolve_git_command_cwd "push" "$command" "$push_dir"); then
+  push_dir="$resolved_dir"
+fi
+
+if [[ -n "$hook_common_dir" ]] &&
+  target_common_dir=$(git -C "$push_dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) &&
+  target_common_dir=$(_canonical_existing_directory "$target_common_dir") &&
+  [[ "$target_common_dir" != "$hook_common_dir" ]]; then
+  exit 0
+fi
+
 # Trunk branch name (issue #478, [INV-131]): BASE_BRANCH (the wrapper
 # resolves+exports it once at startup) → TRUNK_BRANCH (this hook's pre-#478
 # override, still honored standalone e.g. for a manually-run hook outside the
