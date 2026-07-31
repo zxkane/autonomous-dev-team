@@ -1,24 +1,23 @@
 #!/bin/bash
 # test-auto-merge-marker-migration.sh — issue #332 (#296 second-tier).
 #
-# autonomous-dev.sh::resume builds `AUTO_MERGE_FAILURE_MARKER` from the PR's
-# issue-level comments to detect the review wrapper's auto-merge-failure marker
-# (#145 / [INV-33]) and, when present, prepend a mandatory rebase block to the
-# resume prompt.
+# autonomous-dev.sh builds `AUTO_MERGE_FAILURE_MARKER` before mode selection
+# from normalized PR/MR comments and the current full PR HEAD. When present it
+# prepends a mandatory rebase block to new, resume, and resume-fallback prompts.
 #
-# This issue migrates that read from a raw `gh api .../issues/${PR_NUM}/comments`
-# call to the SHIPPED `itp_list_comments` verb — no new verb, shape-equivalent
-# (#315 precedent):
+# Issue #540 moves that read to the CHP PR surface so GitHub PR comments and
+# GitLab MR notes use the same provider-neutral source:
 #
-#   AUTO_MERGE_FAILURE_MARKER=$(itp_list_comments "$PR_NUM" 2>/dev/null \
-#     | jq -r '[.[] | select(.body | startswith("Auto-merge failed:"))] | last // empty | .body' 2>/dev/null || true)
+#   _dev_pr_comments=$(chp_pr_view "$PR_NUM" "comments")
+#   AUTO_MERGE_FAILURE_MARKER=$(jq -r
+#     '[.comments[] | select(.body | startswith("Auto-merge failed:"))] | last // empty | .body'
+#     <<<"$_dev_pr_comments")
 #
 # Two strategies, like test-resume-review-comments-filter.sh:
-#   (1) extract the live `jq -r '<EXPR>'` selector from the wrapper and run it
-#       against synthetic NORMALIZED [INV-90] array fixtures — proves the migrated
-#       selector reproduces the raw-`gh-api` select for every golden case;
+#   (1) extract the live multiline `jq -r '<EXPR>'` selector from the wrapper
+#       and run it against synthetic normalized CHP comment fixtures;
 #   (2) source-shape grep guards — the raw `gh api` site is gone, the
-#       `itp_list_comments | jq` form is present exactly once, and the selector is
+#       validated `chp_pr_view` + jq form is present once, and the selector is
 #       `startswith` (literal, engine-agnostic), not `test()`.
 #
 # Run: env -u PROJECT_DIR bash tests/unit/test-auto-merge-marker-migration.sh
@@ -30,6 +29,7 @@ FAIL=0
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 DEV_WRAPPER="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/autonomous-dev.sh"
+DISPOSITION_LIB="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-review-disposition.sh"
 BASELINE="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/providers/cutover-baseline.json"
 CHECK="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/check-provider-cutover.sh"
 
@@ -37,41 +37,19 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 NC='\033[0m'
 
-# Extract the jq selector following the migrated AUTO_MERGE_FAILURE_MARKER
-# assignment. Post-#332 the wrapper constructs it via:
-#
-#   AUTO_MERGE_FAILURE_MARKER=$(itp_list_comments "$PR_NUM" 2>/dev/null \
-#     | jq -r '<EXPR>' 2>/dev/null || true)
-#
-# The `itp_list_comments … | jq -r '<EXPR>'` spans a leading line ending in a
-# backslash continuation and a continuation line carrying the `jq -r '…'`. We pull
-# the single-quoted jq expression following `jq -r ` anywhere in the wrapper that
-# is the auto-merge-marker selector (anchored on the `Auto-merge failed:` literal).
-extract_selector() {
-  awk '
-    /jq -r .*startswith\("Auto-merge failed:"\)/ {
-      match($0, /jq -r '\''([^'\'']+)'\''/, a)
-      if (a[1] != "") { print a[1]; exit }
-    }
-  ' "$DEV_WRAPPER"
-}
-
-JQ_SELECTOR=$(extract_selector)
-if [[ -z "$JQ_SELECTOR" ]]; then
-  echo -e "${RED}FATAL${NC}: could not extract AUTO_MERGE_FAILURE_MARKER jq selector from $DEV_WRAPPER"
-  echo "  (the migrated 'itp_list_comments … | jq -r '\''…startswith(\"Auto-merge failed:\")…'\''' form is absent)"
+if [[ ! -f "$DISPOSITION_LIB" ]]; then
+  echo -e "${RED}FATAL${NC}: shared recovery-marker contract missing: $DISPOSITION_LIB"
   exit 2
 fi
+# shellcheck source=../../skills/autonomous-dispatcher/scripts/lib-review-disposition.sh
+source "$DISPOSITION_LIB"
 
-echo "Extracted selector: $JQ_SELECTOR"
-echo
-
-# Run the migrated selector against a NORMALIZED [INV-90] array fixture (already a
-# flat array, ascending by createdAt — exactly what itp_list_comments emits) and
+# Run the selector against the normalized CHP `{comments:[...]}` shape and
 # return the selected body (or "" if empty).
 run_selector() {
   local fixture_json="$1"
-  jq -r "($JQ_SELECTOR)" <<<"$fixture_json" 2>/dev/null
+  _review_pr_recovery_comment_from_comments \
+    "$fixture_json" 540 "$HEAD_A" any 2>/dev/null
 }
 
 # mk_comment "<iso-timestamp>" "<body>" — a single normalized-array element.
@@ -106,8 +84,14 @@ assert_body_match() {
   fi
 }
 
-MARKER_R1='Auto-merge failed: rebase required (PR is behind base by 3 commits).'
-MARKER_R2='Auto-merge failed: merge conflict in lib-dispatch.sh — please rebase.'
+HEAD_A='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+HEAD_B='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+CURRENT_CONFLICT_MARKER="<!-- auto-merge-conflict: issue=540 head=${HEAD_A} result=conflict-rebase -->"
+STALE_CONFLICT_MARKER="<!-- auto-merge-conflict: issue=540 head=${HEAD_B} result=conflict-rebase -->"
+CURRENT_FAILURE_MARKER="<!-- auto-merge-failure: issue=540 head=${HEAD_A} -->"
+STALE_FAILURE_MARKER="<!-- auto-merge-failure: issue=540 head=${HEAD_B} -->"
+MARKER_R1="Auto-merge failed: rebase required (PR is behind base by 3 commits)."$'\n'"${CURRENT_FAILURE_MARKER}"
+MARKER_R2="Auto-merge failed: merge conflict in lib-dispatch.sh — please rebase."$'\n'"${CURRENT_CONFLICT_MARKER}"
 DISPATCH_CHATTER='<!-- dispatcher-token: abc123 at 2026-06-30T01:00:00Z mode=review -->
 Dispatching autonomous review...'
 
@@ -115,20 +99,20 @@ Dispatching autonomous review...'
 echo "=== TC-AMM-001..005: migrated selector reproduces the raw-gh-api select (AC1) ==="
 
 # TC-AMM-001 — single Auto-merge failed: comment present → its body returned.
-fixture=$(jq -n --argjson c1 "$(mk_comment '2026-06-30T01:00:00Z' "$MARKER_R1")" '[$c1]')
+fixture=$(jq -n --argjson c1 "$(mk_comment '2026-06-30T01:00:00Z' "$MARKER_R1")" '{comments:[$c1]}')
 out=$(run_selector "$fixture")
-assert_body_match "TC-AMM-001 single 'Auto-merge failed:' comment → body returned" "rebase required" "$out"
+assert_body_match "TC-E2E-REBASE-052 generic INV-33 marker triggers rebase recovery" "rebase required" "$out"
 
 # TC-AMM-002 — multiple Auto-merge failed: comments → NEWEST (last) returned.
 fixture=$(jq -n \
   --argjson c1 "$(mk_comment '2026-06-30T01:00:00Z' "$MARKER_R1")" \
   --argjson c2 "$(mk_comment '2026-06-30T02:00:00Z' "$MARKER_R2")" \
-  '[$c1, $c2]')
+  '{comments:[$c1, $c2]}')
 out=$(run_selector "$fixture")
 assert_body_match "TC-AMM-002 multiple markers → newest (last) returned" "merge conflict in lib-dispatch.sh" "$out"
 
 # TC-AMM-003 — no matching comment (only dispatcher chatter) → empty.
-fixture=$(jq -n --argjson c1 "$(mk_comment '2026-06-30T01:00:00Z' "$DISPATCH_CHATTER")" '[$c1]')
+fixture=$(jq -n --argjson c1 "$(mk_comment '2026-06-30T01:00:00Z' "$DISPATCH_CHATTER")" '{comments:[$c1]}')
 out=$(run_selector "$fixture")
 assert_body_match "TC-AMM-003 no 'Auto-merge failed:' comment → empty" "<EMPTY>" "$out"
 
@@ -139,7 +123,7 @@ QUOTED_HISTORY='Resuming work. Prior status was:
 > Auto-merge failed: rebase required (PR is behind base).
 
 Continuing.'
-fixture=$(jq -n --argjson c1 "$(mk_comment '2026-06-30T01:00:00Z' "$QUOTED_HISTORY")" '[$c1]')
+fixture=$(jq -n --argjson c1 "$(mk_comment '2026-06-30T01:00:00Z' "$QUOTED_HISTORY")" '{comments:[$c1]}')
 out=$(run_selector "$fixture")
 assert_body_match "TC-AMM-004 quoted-history 'Auto-merge failed:' mid-body → NOT matched (startswith anchor)" "<EMPTY>" "$out"
 
@@ -149,9 +133,67 @@ assert_body_match "TC-AMM-004 quoted-history 'Auto-merge failed:' mid-body → N
 fixture=$(jq -n \
   --argjson c1 "$(mk_comment '2026-06-30T01:00:00Z' "$MARKER_R1")" \
   --argjson c2 "$(mk_comment '2026-06-30T02:00:00Z' "$DISPATCH_CHATTER")" \
-  '[$c1, $c2]')
+  '{comments:[$c1, $c2]}')
 out=$(run_selector "$fixture")
 assert_body_match "TC-AMM-005 newer non-matching status does not shadow the marker" "rebase required" "$out"
+
+# TC-AMM-006 — an old HEAD's conflict marker must not trigger another rebase.
+fixture=$(jq -n --argjson c1 "$(mk_comment '2026-06-30T01:00:00Z' \
+  "Auto-merge failed: old conflict.${STALE_CONFLICT_MARKER}")" '{comments:[$c1]}')
+out=$(run_selector "$fixture")
+assert_body_match "TC-AMM-006 stale HEAD-bound marker is ignored" "<EMPTY>" "$out"
+
+# TC-AMM-007 — an old HEAD's generic INV-33 marker is also ignored.
+fixture=$(jq -n --argjson c1 "$(mk_comment '2026-06-30T01:00:00Z' \
+  "Auto-merge failed: old merge attempt.${STALE_FAILURE_MARKER}")" '{comments:[$c1]}')
+out=$(run_selector "$fixture")
+assert_body_match "TC-E2E-REBASE-053 stale generic auto-merge marker is ignored" "<EMPTY>" "$out"
+
+# TC-AMM-008 — preserve the pre-#540 generic INV-33 prefix while canonical
+# hidden markers use strict current-HEAD matching.
+fixture=$(jq -n --argjson c1 "$(mk_comment '2026-06-30T01:00:00Z' \
+  "Auto-merge failed: please rebase this branch")" '{comments:[$c1]}')
+out=$(run_selector "$fixture")
+assert_body_match "TC-E2E-REBASE-053 legacy generic INV-33 prefix remains compatible" \
+  "please rebase this branch" "$out"
+
+# TC-AMM-009 — quoted current-HEAD evidence is not a canonical producer body.
+QUOTED_CURRENT="Status update:
+
+> Auto-merge failed: retry merge.
+> ${CURRENT_FAILURE_MARKER}"
+fixture=$(jq -n --argjson c1 "$(mk_comment '2026-06-30T01:00:00Z' \
+  "$QUOTED_CURRENT")" '{comments:[$c1]}')
+out=$(run_selector "$fixture")
+assert_body_match "TC-E2E-REBASE-053 quoted current-HEAD marker is ignored" "<EMPTY>" "$out"
+
+# TC-AMM-010 — abbreviated and wrong-issue generic markers are not current evidence.
+fixture=$(jq -n \
+  --argjson c1 "$(mk_comment '2026-06-30T01:00:00Z' \
+    'Auto-merge failed: abbreviated.<!-- auto-merge-failure: issue=540 head=aaaaaaa -->')" \
+  --argjson c2 "$(mk_comment '2026-06-30T02:00:00Z' \
+    "Auto-merge failed: wrong issue.<!-- auto-merge-failure: issue=541 head=${HEAD_A} -->")" \
+  '{comments:[$c1, $c2]}')
+out=$(run_selector "$fixture")
+assert_body_match "TC-E2E-REBASE-053 abbreviated and wrong-issue markers are ignored" "<EMPTY>" "$out"
+
+# TC-AMM-011 — an otherwise exact marker with a terminal newline is not the
+# exact final line and must not be treated as canonical evidence.
+fixture=$(jq -n --argjson c1 "$(mk_comment '2026-06-30T03:00:00Z' \
+  "Auto-merge failed: newline spoof"$'\n'"${CURRENT_FAILURE_MARKER}"$'\n')" \
+  '{comments:[$c1]}')
+out=$(run_selector "$fixture")
+assert_body_match "TC-E2E-REBASE-053 terminal-newline canonical lookalike is ignored" \
+  "<EMPTY>" "$out"
+
+# TC-AMM-012 — case-variant marker syntax is still a lookalike and may not fall
+# through to marker-free legacy compatibility.
+fixture=$(jq -n --argjson c1 "$(mk_comment '2026-06-30T03:01:00Z' \
+  "Auto-merge failed: malformed case"$'\n'"<!-- AUTO-MERGE-FAILURE: issue=540 head=${HEAD_A} -->")" \
+  '{comments:[$c1]}')
+out=$(run_selector "$fixture")
+assert_body_match "TC-E2E-REBASE-053 case-variant marker lookalike is ignored" \
+  "<EMPTY>" "$out"
 
 # ===================================================================
 echo
@@ -161,17 +203,20 @@ echo "=== TC-AMM-PARITY-001..002: no engine divergence — startswith is literal
 # matched purely by the literal startswith prefix and returned verbatim. A
 # `test()`-based selector would treat `\b`/`(?i)` as regex and could diverge under
 # Oniguruma; startswith is literal and engine-agnostic.
-META_MARKER='Auto-merge failed: rebase onto 中 \b(?i) [P1] — literal body, no fold'
-fixture=$(jq -n --argjson c1 "$(mk_comment '2026-06-30T01:00:00Z' "$META_MARKER")" '[$c1]')
+META_MARKER="Auto-merge failed: rebase onto 中 \\b(?i) [P1] — literal body, no fold."$'\n'"${CURRENT_FAILURE_MARKER}"
+fixture=$(jq -n --argjson c1 "$(mk_comment '2026-06-30T01:00:00Z' "$META_MARKER")" '{comments:[$c1]}')
 out=$(run_selector "$fixture")
 assert_body_match "TC-AMM-PARITY-001 non-ASCII + metachar body matched literally (startswith, no Oniguruma fold)" "rebase onto 中 \\b(?i) [P1]" "$out"
 
-# TC-AMM-PARITY-002 — the live selector uses startswith and does NOT invoke test().
-if [[ "$JQ_SELECTOR" == *'startswith("Auto-merge failed:")'* && "$JQ_SELECTOR" != *'test('* ]]; then
-  echo -e "  ${GREEN}PASS${NC}: TC-AMM-PARITY-002 selector is startswith (literal), no test()/regex — no engine divergence"
+# TC-AMM-PARITY-002 — the shared parser uses literal startswith/contains
+# operations and does not invoke test().
+parser_source=$(declare -f _review_pr_recovery_comment_from_comments)
+if [[ "$parser_source" == *'startswith("Auto-merge failed:")'* \
+      && "$parser_source" != *'test('* ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-AMM-PARITY-002 shared parser uses literal operations, no test()/regex"
   PASS=$((PASS + 1))
 else
-  echo -e "  ${RED}FAIL${NC}: TC-AMM-PARITY-002 selector regressed (must be startswith, never test()): $JQ_SELECTOR"
+  echo -e "  ${RED}FAIL${NC}: TC-AMM-PARITY-002 shared parser regressed to regex matching"
   FAIL=$((FAIL + 1))
 fi
 
@@ -190,14 +235,27 @@ else
   PASS=$((PASS + 1))
 fi
 
-# TC-AMM-SRC-002 — the migrated itp_list_comments form is present EXACTLY ONCE
-# (live-site non-vacuity; couples the test to the real wrapper assignment).
-_live_count=$(grep -cE 'AUTO_MERGE_FAILURE_MARKER=\$\(itp_list_comments "\$PR_NUM" 2>/dev/null' "$DEV_WRAPPER")
-if [[ "$_live_count" -eq 1 ]]; then
-  echo -e "  ${GREEN}PASS${NC}: TC-AMM-SRC-002 migrated 'itp_list_comments \"\$PR_NUM\"' marker assignment present exactly once"
+# TC-AMM-SRC-002 — the provider-neutral read and shared parser call are each
+# present exactly once.
+_read_count=$(grep -cE '_dev_pr_comments=\$\(chp_pr_view "\$PR_NUM" "comments" 2>/dev/null' "$DEV_WRAPPER")
+_select_count=$(grep -cE '_review_pr_recovery_comment_from_comments' "$DEV_WRAPPER")
+if [[ "$_read_count" -eq 1 && "$_select_count" -eq 1 ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-AMM-SRC-002 provider-neutral comment read and shared parser call are each present once"
   PASS=$((PASS + 1))
 else
-  echo -e "  ${RED}FAIL${NC}: TC-AMM-SRC-002 migrated marker assignment found $_live_count times (expected 1)"
+  echo -e "  ${RED}FAIL${NC}: TC-AMM-SRC-002 read=$_read_count selector=$_select_count (expected 1 each)"
+  FAIL=$((FAIL + 1))
+fi
+
+if [[ "$parser_source" == *'_review_auto_merge_conflict_marker'* \
+      && "$parser_source" == *'_review_auto_merge_failure_marker'* \
+      && "$parser_source" == *'ascii_downcase'* \
+      && "$parser_source" == *'auto-merge-conflict'* \
+      && "$parser_source" == *'auto-merge-failure'* ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-AMM-SRC-002b shared parser owns both current-HEAD contracts and guarded legacy fallback"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-AMM-SRC-002b shared parser contract is incomplete"
   FAIL=$((FAIL + 1))
 fi
 

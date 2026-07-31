@@ -261,14 +261,14 @@ n_pulls=$(nonc "$DEV_SH" | grep -c 'gh api "repos/${REPO}/pulls/${PR_NUM}/commen
 assert_eq "AC3 autonomous-dev.sh has ZERO executable raw 'gh api …/pulls/\$PR_NUM/comments'" "0" "$n_pulls"
 assert_eq "AC3 autonomous-dev.sh invokes chp_list_inline_comments \"\$PR_NUM\" (×1)" \
   "1" "$(grep -c 'chp_list_inline_comments "\$PR_NUM"' "$DEV_SH" || true)"
-# The DISTINCT :1093 issue-level AUTO_MERGE-marker read was migrated behind
-# itp_list_comments by #334 (merged onto main before this rebase) → it is no longer
-# an executable raw `gh api …/issues/$PR_NUM/comments` site.
+# The DISTINCT :1093 AUTO_MERGE-marker read is now provider-neutral through the
+# code-host PR-comment projection, so it is no longer an executable raw
+# `gh api …/issues/$PR_NUM/comments` site.
 n_issues=$(nonc "$DEV_SH" | grep -c 'gh api "repos/${REPO}/issues/${PR_NUM}/comments"' || true)
 assert_eq "AC3 the distinct issues/\$PR_NUM/comments AUTO_MERGE read is also gone (migrated by #334)" \
   "0" "$n_issues"
-assert_eq "AC3 autonomous-dev.sh's AUTO_MERGE marker now routes through itp_list_comments \"\$PR_NUM\"" \
-  "1" "$(grep -c 'AUTO_MERGE_FAILURE_MARKER=$(itp_list_comments "\$PR_NUM"' "$DEV_SH" || true)"
+assert_eq "AC3 autonomous-dev.sh's AUTO_MERGE marker now routes through chp_pr_view \"\$PR_NUM\" \"comments\"" \
+  "1" "$(grep -c '_dev_pr_comments=$(chp_pr_view "\$PR_NUM" "comments"' "$DEV_SH" || true)"
 
 echo "=== AC3 (cont.): the verb is defined in the seam (shim + leaf) ==="
 assert_eq "AC3 lib-code-host.sh defines the chp_list_inline_comments shim" \

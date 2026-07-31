@@ -140,6 +140,24 @@ assert_grep "auto-merge failure path posts via chp_pr_comment (PR-comment verb, 
 assert_grep "auto-merge failure marker prefix appears in wrapper" \
   'Auto-merge failed:' "$WRAPPER_CODE"
 
+assert_grep "TC-E2E-REBASE-052 INV-33 renders a generic marker bound to issue and reviewed HEAD" \
+  '_review_auto_merge_failure_marker +"\$ISSUE_NUMBER" +"\$PR_HEAD_SHA"' "$WRAPPER_CODE"
+
+assert_grep "TC-E2E-REBASE-052 INV-33 appends the rendered marker to its PR comment" \
+  '\$\{_auto_merge_failure_marker\}' "$WRAPPER_CODE"
+
+assert_grep "TC-E2E-REBASE-052 marker-write failure selects pending-review cleanup" \
+  'REVIEW_CRASH_RETRY_STATE="pending-review"' "$WRAPPER_CODE"
+
+assert_grep "TC-E2E-REBASE-052 marker-write failure requeues instead of dispatching unprepared dev" \
+  '_review_requeue_preflight +"\$ISSUE_NUMBER"' "$WRAPPER_CODE"
+
+assert_grep "TC-E2E-REBASE-052 marker-write retry carries a distinct non-substantive cause" \
+  'auto-merge-marker-write-failed' "$WRAPPER_CODE"
+
+assert_not_grep "auto-merge marker write is no longer described as non-fatal before pending-dev" \
+  'auto-merge-failure marker.*non-fatal.*label transition still proceeds' "$WRAPPER_CODE"
+
 # Marker must direct dev re-dispatch (not "please merge manually" which
 # would absolve the autonomous pipeline of further work — issue #145 AC).
 assert_grep "marker mentions re-dispatching dev for rebase" \

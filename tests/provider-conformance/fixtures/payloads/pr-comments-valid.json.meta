@@ -1,0 +1,10 @@
+# pr-comments-valid.json.meta
+#
+# Canonical GitHub issue-comments REST page for PR #42. The provider
+# conformance stub serves it when chp_pr_view requests `comments` through
+# `gh api repos/<repo>/issues/<pr>/comments --paginate`.
+#
+# The comments are intentionally out of order so the normalized CHP result
+# must sort them by createdAt. Field names match the REST payload
+# (`user.login`, `created_at`) rather than the old `gh pr view --json comments`
+# connection.

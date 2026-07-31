@@ -16,6 +16,7 @@ FAIL=0
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 WRAPPER="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/autonomous-dev.sh"
+DISPOSITION_LIB="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-review-disposition.sh"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -35,18 +36,23 @@ assert_grep() {
 # ---------------------------------------------------------------------------
 echo "=== TC-AMF-008: dev resume detects auto-merge-failure marker ==="
 # ---------------------------------------------------------------------------
-# The resume branch must scan PR comments for a comment whose body starts
-# with "Auto-merge failed:" — the marker the review wrapper writes when
-# gh pr merge fails. Without this detection, the dev agent would not know
-# to rebase first.
-assert_grep "wrapper queries PR comments for Auto-merge failure marker" \
-  'Auto-merge failed' "$WRAPPER"
+# The wrapper owns provider reads and delegates the strict current-HEAD marker
+# contract to lib-review-disposition.sh. Parser behavior is covered exhaustively
+# by test-review-disposition.sh; this test pins only the wrapper integration.
+assert_grep "wrapper loads the shared review-disposition contract" \
+  'source "\$\{LIB_DIR\}/lib-review-disposition.sh"' "$WRAPPER"
 
-# The marker selector should be a deterministic startswith (not a brittle
-# substring contains) so dev status comments mentioning the phrase in
-# quoted history can't trigger a false positive.
-assert_grep "marker selector uses startswith for determinism" \
-  'startswith.*"Auto-merge failed' "$WRAPPER"
+assert_grep "wrapper resolves the linked PR and full HEAD before comment parsing" \
+  'resolve_pr_for_issue' "$WRAPPER"
+
+assert_grep "wrapper reads normalized PR comments through the provider seam" \
+  'chp_pr_view "\$PR_NUM" "comments"' "$WRAPPER"
+
+assert_grep "wrapper delegates recovery-marker selection to the shared parser" \
+  '_review_pr_recovery_comment_from_comments' "$WRAPPER"
+
+assert_grep "shared parser requires Auto-merge failed to begin the body" \
+  'startswith\("Auto-merge failed:"\)' "$DISPOSITION_LIB"
 
 # ---------------------------------------------------------------------------
 echo ""

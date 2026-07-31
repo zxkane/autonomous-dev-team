@@ -15,7 +15,7 @@
 #      verbatim jq/-q selector (which carries spaces + `|` pipes) for all 3 sites.
 #   2. SEAM-REACHABILITY + OBSERVED-CALL — each migrated path sources the REAL
 #      lib-code-host.sh (live `chp_*` shim + `chp_github_*` leaf) and asserts the
-#      gh-stub OBSERVED the `gh pr list`/`gh pr view` argv THROUGH the verb —
+#      gh-stub OBSERVED the provider-owned `gh` argv THROUGH the verb —
 #      proving the path was exercised, not merely reachable.
 #   3. FAIL-SOFT RATIONALE — with the verb UNDEFINED the site degrades to "0
 #      PRs"/empty WITHOUT crashing (the `2>/dev/null || echo/true` wrapper). This
@@ -98,12 +98,15 @@ gh() {
   printf "%s %s\n" "${1:-}" "${2:-}" >> "$REC_DIR/.verbs"
   # W1c1 (#397): chp_pr_list now emits `gh api graphql` (cursor page walk).
   # Return the empty-PR envelope so the caller-side jq counts 0 (no PR).
-  # pr view stays byte-identical (chp_pr_view is unchanged at W1c1).
+  # comments-only pr_view uses the paginated issue-comments endpoint.
   if [[ "${1:-}" == "api" && "${2:-}" == "graphql" ]]; then
     printf %s "{\"data\":{\"repository\":{\"pullRequests\":{\"pageInfo\":{\"endCursor\":null,\"hasNextPage\":false},\"nodes\":[]}}}}"
     return 0
   fi
-  if [[ "${1:-}" == "pr" && "${2:-}" == "view" ]]; then printf ""; return 0; fi
+  if [[ "${1:-}" == "api" && "${2:-}" == repos/*/issues/*/comments ]]; then
+    printf "[]"
+    return 0
+  fi
   return 0
 }
 '
@@ -225,14 +228,12 @@ rm -rf "$RUNDIR"
 
 # --- S3: _fetch_sha_evidence → chp_pr_view (SHA-evidence read) ----------------
 #
-# Post-#398 (W1c2), chp_pr_view owns its own gh argv + normalization jq — the
-# leaf runs `gh pr view <PR> --repo <REPO> --json comments --jq "<normalization>"`.
+# Post-#540, chp_pr_view owns the complete paginated issue-comments read.
 # The caller's SHA-selector no longer crosses the seam (it moved to a caller-side
 # `jq -r` over the normalized `{comments:[…]}` object). So this S3 pin was
 # reduced from the per-arg golden trace to the STRUCTURAL invariants: the leaf
-# reaches gh with the expected positional args + the vocabulary field
-# `comments` in the raw --json list + a --jq normalization program (not the
-# pre-#398 caller's SHA-match selector).
+# reaches gh with the expected REST endpoint + `--paginate` (not the pre-#398
+# caller's SHA-match selector).
 echo "=== S3: _fetch_sha_evidence SHA-evidence read → chp_pr_view (W1c2 normalized-shape) ==="
 RUNDIR=$(mktemp -d)
 REC3="$RUNDIR/rec3"; mkdir -p "$REC3"
@@ -246,23 +247,16 @@ env -u CODE_HOST -u AUTONOMOUS_CONF -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR \
     _fetch_sha_evidence 1 0
   " >/dev/null 2>&1
 
-if [[ -f "$REC3/.verbs" ]] && grep -qx "pr view" "$REC3/.verbs"; then
-  pass "S3 seam-reachability: stub OBSERVED a 'gh pr view' call through chp_pr_view"
-  cn=$(call_for_verb "$REC3" pr view) && read_call "$REC3" "$cn"
-  # Structural — W1c2 P1-2 codex fix: the leaf uses capture-then-check
-  # (`raw=$(gh …) || return 1; jq -c "$norm_program" <<<"$raw"`), so gh is
-  # invoked with `--json <field>` ONLY — no `--jq` crosses to gh. The
-  # normalization jq runs downstream on the captured raw JSON. Assert
-  # positional args + `--json comments` present + NO `--jq`/`-q` crossing.
-  assert_eq "S3 argv[0]=pr" "pr" "${CALL_ARGV[0]:-}"
-  assert_eq "S3 argv[1]=view" "view" "${CALL_ARGV[1]:-}"
-  assert_eq "S3 argv[2]=42 (PR_NUMBER positional)" "42" "${CALL_ARGV[2]:-}"
-  assert_eq "S3 argv[3]=--repo" "--repo" "${CALL_ARGV[3]:-}"
-  assert_eq "S3 argv[4]=\$REPO" "$REPO" "${CALL_ARGV[4]:-}"
-  assert_eq "S3 argv[5]=--json" "--json" "${CALL_ARGV[5]:-}"
-  assert_eq "S3 argv[6]=comments (vocabulary field crossing to gh)" "comments" "${CALL_ARGV[6]:-}"
-  assert_eq "S3 argv-count = 7 (no --jq crossing to gh — jq runs downstream in the leaf, P1-2 capture-then-check)" \
-    "7" "${#CALL_ARGV[@]}"
+if [[ -f "$REC3/.verbs" ]] \
+    && grep -qx "api repos/${REPO}/issues/42/comments" "$REC3/.verbs"; then
+  pass "S3 seam-reachability: stub observed paginated issue comments through chp_pr_view"
+  cn=$(call_for_verb "$REC3" api "repos/${REPO}/issues/42/comments") \
+    && read_call "$REC3" "$cn"
+  assert_eq "S3 argv[0]=api" "api" "${CALL_ARGV[0]:-}"
+  assert_eq "S3 argv[1]=paginated PR issue-comments endpoint" \
+    "repos/${REPO}/issues/42/comments" "${CALL_ARGV[1]:-}"
+  assert_eq "S3 argv[2]=--paginate" "--paginate" "${CALL_ARGV[2]:-}"
+  assert_eq "S3 argv-count = 3" "3" "${#CALL_ARGV[@]}"
   # Anti-regression: neither `--jq` nor the caller's SHA-selector may cross
   # to gh. jq stays inside the leaf (over the captured raw stdout), and the
   # caller's own SHA-match selector stays caller-side over the normalized
@@ -279,7 +273,7 @@ if [[ -f "$REC3/.verbs" ]] && grep -qx "pr view" "$REC3/.verbs"; then
     pass "S3 anti-regression: caller SHA-selector did NOT cross the seam (stays caller-side over normalized shape)"
   fi
 else
-  fail "S3 seam-reachability: stub did NOT observe a 'gh pr view' — chp_pr_view not exercised"
+  fail "S3 seam-reachability: stub did NOT observe paginated issue comments — chp_pr_view not exercised"
 fi
 rm -rf "$RUNDIR"
 

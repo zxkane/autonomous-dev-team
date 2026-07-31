@@ -107,6 +107,7 @@ itp_list_comments() {
 itp_post_comment()     { _rec itp_post_comment "$@"; }
 itp_transition_state() { _rec itp_transition_state "$@"; }
 fetch_pr_for_issue()   { _rec fetch_pr_for_issue "$@"; printf '%s' "{\"number\":42,\"headRefOid\":\"${_MOCK_CURRENT_HEAD}\"}"; }
+_latest_review_routing_head() { printf '%s' "$_MOCK_CURRENT_HEAD"; }
 last_reviewed_head()   { printf '%s' "$_MOCK_CURRENT_HEAD"; }
 extract_dev_session_id() { printf '%s' "$_MOCK_SESSION_ID"; }
 is_session_completed() {
@@ -481,6 +482,7 @@ _d4_13_sete_probe() {
     log() { :; }
     extract_dev_session_id() { printf "%s" ""; }
     fetch_pr_for_issue() { printf "%s" "{\"number\":42,\"headRefOid\":\"sha-A\"}"; }
+    _latest_review_routing_head() { printf "%s" "sha-A"; }
     last_reviewed_head() { printf "%s" "sha-A"; }
     may_stall_now() { return 0; }
     classify_recent_review_verdict() {

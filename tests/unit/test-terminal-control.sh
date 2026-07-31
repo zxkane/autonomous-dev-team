@@ -736,13 +736,15 @@ dev_pr_guard='terminal_intent_cleanup_transition "$ISSUE_NUMBER" "in-progress" "
 dev_retry_guard='terminal_intent_cleanup_transition "$ISSUE_NUMBER" "in-progress" "in-progress" "pending-dev"'
 # shellcheck disable=SC2016
 review_retry_guard='terminal_intent_cleanup_transition "$ISSUE_NUMBER" "reviewing" "reviewing" "pending-dev"'
+# shellcheck disable=SC2016
+review_preflight_retry_guard='terminal_intent_cleanup_transition \'
 assert_eq "TC-TERMCTRL-070 dev cleanup has no unguarded pending transition" 0 \
   "$(grep -Ec 'itp_transition_state .*pending-(dev|review)' <<<"$dev_cleanup" || true)"
 assert_eq "TC-TERMCTRL-070 review cleanup has no unguarded pending transition" 0 \
   "$(grep -Ec 'itp_transition_state .*pending-(dev|review)' <<<"$review_cleanup" || true)"
 assert_eq "TC-TERMCTRL-070 dev cleanup has six guarded routes" 6 \
   "$(grep -c 'terminal_intent_cleanup_transition' <<<"$dev_cleanup_routes" || true)"
-assert_eq "TC-TERMCTRL-070 review cleanup has one guarded route" 1 \
+assert_eq "TC-TERMCTRL-070 review cleanup has two guarded routes" 2 \
   "$(grep -c 'terminal_intent_cleanup_transition' <<<"$review_cleanup" || true)"
 assert_eq "TC-TERMCTRL-070 dev PR route keeps exact owner/remove/target argv" 1 \
   "$(grep -Fc "$dev_pr_guard" <<<"$dev_cleanup" || true)"
@@ -750,6 +752,9 @@ assert_eq "TC-TERMCTRL-070 dev retry routes keep exact owner/remove/target argv"
   "$(grep -Fc "$dev_retry_guard" <<<"$dev_cleanup" || true)"
 assert_eq "TC-TERMCTRL-070 review route keeps exact owner/remove/target argv" 1 \
   "$(grep -Fc "$review_retry_guard" <<<"$review_cleanup" || true)"
+assert_eq "TC-TERMCTRL-070 review preflight retry keeps guarded pending-review target" 1 \
+  "$(grep -A1 -F "$review_preflight_retry_guard" <<<"$review_cleanup" \
+      | grep -Fc '"$ISSUE_NUMBER" "reviewing" "reviewing" "pending-review"' || true)"
 
 mark_body_sha="$(awk '/^mark_stalled\(\)/,/^}/' "$DISPATCH_LIB" | sha256sum | awk '{print $1}')"
 assert_eq "TC-TERMCTRL-071 mark_stalled body byte pin" \

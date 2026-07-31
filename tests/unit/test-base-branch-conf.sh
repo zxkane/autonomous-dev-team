@@ -21,6 +21,7 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 LIB_CONFIG="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-config.sh"
 DEV_WRAPPER="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/autonomous-dev.sh"
 REVIEW_WRAPPER="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/autonomous-review.sh"
+MERGEABLE_LIB="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-review-mergeable.sh"
 GH_LEAF="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/providers/chp-github.sh"
 GL_LEAF="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/providers/chp-gitlab.sh"
 REBASE_HOOK="$PROJECT_ROOT/skills/autonomous-common/hooks/check-rebase-before-push.sh"
@@ -191,17 +192,27 @@ echo "=== TC-BASEBR-009..010: dev wrapper prompt rendering ==="
 # interpolation.
 
 render_dev_rebase_block() {
-  # render_dev_rebase_block <base_branch> <delimiter> — extract the heredoc
-  # body between <<DELIM and the standalone DELIM line, then render it with
-  # bash's own $(...) / ${...} interpolation under a controlled environment.
-  local base_branch="$1" delim="$2"
-  local body
-  body=$(awk -v delim="$delim" '
-    $0 ~ ("<<" delim "$") { capture=1; next }
-    capture && $0 == delim { exit }
+  # Render the shared procedure first, then inject it while rendering the
+  # outer conflict block, mirroring the wrapper's two-stage assembly.
+  local base_branch="$1"
+  local procedure_body procedure body
+  procedure_body=$(awk '
+    /^DEV_SAFE_REBASE_PROCEDURE=/ { in_procedure=1 }
+    in_procedure && /cat <<EOF$/ { capture=1; next }
+    capture && $0 == "EOF" { exit }
+    capture { print }
+  ' "$DEV_WRAPPER")
+  procedure="${procedure_body//\$\{BASE_BRANCH\}/$base_branch}"
+  procedure="${procedure//\\\`/\`}"
+  body=$(awk '
+    /^emit_dev_conflict_rebase_block\(\)/ { in_renderer=1 }
+    in_renderer && /cat <<EOF$/ { capture=1; next }
+    capture && $0 == "EOF" { exit }
     capture { print }
   ' "$DEV_WRAPPER")
   env -i PATH="$PATH" BASE_BRANCH="$base_branch" PR_NUM="99" \
+    DEV_PR_HEAD_SHA="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" \
+    DEV_SAFE_REBASE_PROCEDURE="$procedure" \
     AUTO_MERGE_FAILURE_MARKER="Auto-merge failed: test marker" \
     bash -c '
       provider_prompt_fragment() { echo "[stub: $1]"; }
@@ -211,13 +222,13 @@ INNEREOF
     '
 }
 
-rendered_main=$(render_dev_rebase_block "main" "REBASE_BLOCK")
+rendered_main=$(render_dev_rebase_block "main")
 assert_contains "TC-BASEBR-009 BASE_BRANCH=main renders git rebase origin/main" \
   "$rendered_main" "git rebase origin/main"
 assert_contains "TC-BASEBR-009 BASE_BRANCH=main renders git fetch origin main" \
   "$rendered_main" "git fetch origin main"
 
-rendered_develop=$(render_dev_rebase_block "develop" "REBASE_BLOCK")
+rendered_develop=$(render_dev_rebase_block "develop")
 assert_contains "TC-BASEBR-010 BASE_BRANCH=develop renders git rebase origin/develop" \
   "$rendered_develop" "git rebase origin/develop"
 assert_contains "TC-BASEBR-010 BASE_BRANCH=develop renders git fetch origin develop" \
@@ -230,14 +241,12 @@ else
   FAIL=$((FAIL + 1))
 fi
 
-rendered_develop2=$(render_dev_rebase_block "develop" "REBASE_BLOCK2")
-assert_contains "TC-BASEBR-010b resume-fallback block: BASE_BRANCH=develop renders origin/develop" \
-  "$rendered_develop2" "origin/develop"
-if [[ "$rendered_develop2" != *"origin/main"* ]]; then
-  echo -e "  ${GREEN}PASS${NC}: TC-BASEBR-010b resume-fallback block: zero origin/main occurrences"
+rebase_block_sites=$(grep -c '^\${DEV_CONFLICT_REBASE_BLOCK}$' "$DEV_WRAPPER")
+if [[ "$rebase_block_sites" -ge 3 && "$rendered_develop" == *"origin/develop"* ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-BASEBR-010b shared block covers new, resume, and fallback prompts"
   PASS=$((PASS + 1))
 else
-  echo -e "  ${RED}FAIL${NC}: TC-BASEBR-010b origin/main leaked into resume-fallback block"
+  echo -e "  ${RED}FAIL${NC}: TC-BASEBR-010b shared block is missing from a dev prompt"
   FAIL=$((FAIL + 1))
 fi
 
@@ -258,13 +267,13 @@ assert_grep "TC-BASEBR-011 Step 0 block rebases onto origin/\$BASE_BRANCH" \
   'git rebase origin/\$\{BASE_BRANCH\}' "$REVIEW_WRAPPER"
 
 assert_grep "TC-BASEBR-012 INV-44 finding names \${BASE_BRANCH} in the BLOCKING heading" \
-  '\[BLOCKING\] Merge conflict with \$\{BASE_BRANCH\}' "$REVIEW_WRAPPER"
+  '\[BLOCKING\] Merge conflict with \$\{base\}' "$MERGEABLE_LIB"
 assert_grep "TC-BASEBR-012 INV-44 finding's rebase instructions use \${BASE_BRANCH}" \
-  'git fetch origin \$\{BASE_BRANCH\}' "$REVIEW_WRAPPER"
+  'git fetch origin \$\{base\}' "$MERGEABLE_LIB"
 assert_grep "TC-BASEBR-012 Auto-merge failed marker names \${BASE_BRANCH}" \
-  'CONFLICTING with \$\{BASE_BRANCH\}' "$REVIEW_WRAPPER"
+  'CONFLICTING with \$\{base\}' "$MERGEABLE_LIB"
 assert_grep "TC-BASEBR-012 submit_request_changes body names \${BASE_BRANCH}" \
-  'Merge conflict with \$\{BASE_BRANCH\}' "$REVIEW_WRAPPER"
+  'Merge conflict with \$\{base\}' "$MERGEABLE_LIB"
 
 # ===========================================================================
 echo ""

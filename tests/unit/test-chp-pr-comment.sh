@@ -35,6 +35,7 @@ SCRIPTS="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts"
 CHP_LIB="$SCRIPTS/lib-code-host.sh"
 CHP_GITHUB="$SCRIPTS/providers/chp-github.sh"
 REVIEW_SH="$SCRIPTS/autonomous-review.sh"
+MERGEABLE_LIB="$SCRIPTS/lib-review-mergeable.sh"
 E2E_LIB="$SCRIPTS/lib-review-e2e.sh"
 BASELINE="$SCRIPTS/providers/cutover-baseline.json"
 CUTOVER="$SCRIPTS/check-provider-cutover.sh"
@@ -191,27 +192,21 @@ assert_eq "TC-CPC-032 chp_github_pr_comment leaf defined in providers/chp-github
 assert_eq "TC-CPC-032 chp_pr_comment shim defined in lib-code-host.sh" \
   "1" "$(grep -c '^chp_pr_comment()' "$CHP_LIB" || true)"
 
-echo "=== TC-CPC-033: chp_pr_comment invoked at all 7 migrated sites (review ×2, e2e ×5) ==="
-assert_eq "TC-CPC-033 autonomous-review.sh invokes chp_pr_comment ×2" \
-  "2" "$(grep -c 'chp_pr_comment "\$PR_NUMBER"' "$REVIEW_SH" || true)"
+echo "=== TC-CPC-033: chp_pr_comment remains at all 7 semantic sites (review ×1, shared conflict ×1, e2e ×5) ==="
+assert_eq "TC-CPC-033 autonomous-review.sh invokes chp_pr_comment ×1" \
+  "1" "$(grep -c 'chp_pr_comment "\$PR_NUMBER"' "$REVIEW_SH" || true)"
+assert_eq "TC-CPC-033 canonical conflict helper invokes chp_pr_comment ×1" \
+  "1" "$(grep -c 'chp_pr_comment "\$pr"' "$MERGEABLE_LIB" || true)"
 assert_eq "TC-CPC-033 lib-review-e2e.sh invokes chp_pr_comment ×5" \
   "5" "$(grep -c 'chp_pr_comment "\$PR_NUMBER"' "$E2E_LIB" || true)"
 
 echo "=== TC-CPC-010..016: per-site framing preserved verbatim ==="
-# 3342: conflict marker post — `chp_pr_comment "$PR_NUMBER" \` continuation whose
-# body tail closes with `2>/dev/null || true`. The continuation-line form is the
-# ONLY `chp_pr_comment "$PR_NUMBER" \` in autonomous-review.sh (3538 is a capture,
-# not a `\` continuation), so a count of exactly 1 pins it.
-# 3342 is the only review line that STARTS (after indent) with the verb + `\`
-# continuation; 3538's continuation is prefixed by `if ! _comment_err=$(`, so an
-# anchored `^[space]*chp_pr_comment …` pins exactly the conflict-marker post.
-assert_eq "TC-CPC-010 review:3342 chp_pr_comment '\\' continuation present (conflict marker post)" \
-  "1" "$(grep -cE '^[[:space:]]*chp_pr_comment "\$PR_NUMBER" \\$' "$REVIEW_SH" || true)"
-# The conflict-marker body tail keeps its `2>/dev/null || true` framing.
-# issue #478 ([INV-131]): the literal `main.` in this tail is now
-# `${BASE_BRANCH}.` — the configurable-base-branch interpolation.
-assert_eq "TC-CPC-010 review:3342 conflict body tail keeps '2>/dev/null || true'" \
-  "1" "$(grep -cF 'Re-dispatching dev agent to rebase onto ${BASE_BRANCH}.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true' "$REVIEW_SH" || true)"
+# The conflict marker moved into the canonical pre/post-fan-out helper. It keeps
+# the provider seam and requires the write before a pending-dev transition.
+assert_eq "TC-CPC-010 canonical conflict route uses chp_pr_comment" \
+  "1" "$(grep -c 'chp_pr_comment "\$pr" --body "\$body"' "$MERGEABLE_LIB" || true)"
+assert_eq "TC-CPC-010 canonical conflict route checks PR-comment failure" \
+  "1" "$(grep -c '"\$pr" "\$issue" "\$head" "\$pr_body" || return 20' "$MERGEABLE_LIB" || true)"
 # 3538: capture form `if ! _comment_err=$(chp_pr_comment … 2>&1 >/dev/null); then`
 assert_eq "TC-CPC-011 review:3538 keeps the '2>&1 >/dev/null' capture form" \
   "1" "$(grep -cF 'if ! _comment_err=$(chp_pr_comment "$PR_NUMBER" \' "$REVIEW_SH" || true)"

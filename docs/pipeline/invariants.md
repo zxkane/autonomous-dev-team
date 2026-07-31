@@ -1127,21 +1127,30 @@ the wrapper MUST:
 1. Capture the merge stderr (truncated to 500 chars).
 2. Post a comment on the **PR** with prefix `Auto-merge failed:` followed by
    the captured excerpt and the directive `Re-dispatching dev agent to
-   rebase onto main.`
-3. Edit the issue: `−reviewing +pending-dev`. Do NOT remove `autonomous`
+   rebase onto main.`, plus the shared full-HEAD marker
+   `<!-- auto-merge-failure: issue=<N> head=<40-lowercase-hex> -->`.
+3. Treat that PR comment as a required recovery write. If it fails, requeue
+   `reviewing -> pending-review` non-substantively; do not dispatch dev without
+   rebase context.
+4. Edit the issue: `−reviewing +pending-dev`. Do NOT remove `autonomous`
    (the dispatcher's `list_pending_dev` selector gates on `autonomous`).
-4. NOT add `+approved`. NOT call `gh issue close`. NOT post a "please
+5. NOT add `+approved`. NOT call `gh issue close`. NOT post a "please
    merge manually" message that hands the work back to a human — auto-merge
    failure is a dev-rebase task, not a human-handoff.
 
-The dev wrapper's resume branch detects the marker by querying PR-issue
-comments for `startswith("Auto-merge failed:")` and prepends a
-`## Pre-implementation: rebase` section to the resume prompt that
-instructs `git fetch origin && git rebase origin/main` before any other
-work. Once the rebase succeeds, the dev wrapper trap transitions back to
-`+pending-review`, the next dispatcher tick re-dispatches review, and the
-merge succeeds — GitHub then closes the issue via the PR's `Closes #N`
-keyword.
+Every dev prompt mode resolves the linked PR and full current HEAD, then reads
+normalized PR comments through `chp_pr_view`. It accepts a body beginning
+`Auto-merge failed:` only when that body also contains either the exact generic
+INV-33 marker for `(issue,current HEAD)` or INV-147's exact confirmed-conflict
+marker for the same tuple. Marker-free legacy INV-33 comments remain accepted
+for backward compatibility; a body carrying either canonical marker prefix must
+match the current tuple. Quoted history, abbreviated SHAs, wrong-issue markers,
+and stale-HEAD markers are ignored.
+A match prepends a `## Pre-implementation: rebase` section instructing
+`git fetch origin && git rebase origin/main` before any other work. Once the
+rebase succeeds, the dev wrapper trap transitions back to `+pending-review`,
+the next dispatcher tick re-dispatches review, and the merge succeeds —
+GitHub then closes the issue via the PR's `Closes #N` keyword.
 
 **Why**: Reproduced live on a downstream consumer at
 2026-05-20T12:17:35–12:17:37Z: review wrapper PASSED, posted "Reviewed
@@ -1222,16 +1231,17 @@ verdict-PASS branch (the auto-merge sub-branch); the merge leaf routes through
   grep tests:
   - TC-AMF-006: zero `gh issue close` calls in the wrapper (regression pin).
   - TC-AMF-002: failure branch sets `+pending-dev` on the issue.
-  - TC-AMF-003: failure branch posts via `gh pr comment` with the
-    `Auto-merge failed:` marker prefix and `Re-dispatching dev`/`rebase
-    onto main` directive.
+  - TC-AMF-003: failure branch posts via `chp_pr_comment` with the
+    `Auto-merge failed:` prefix, the `Re-dispatching dev`/`rebase onto main`
+    directive, and the generic marker bound to issue plus reviewed HEAD.
   - Failure branch keeps `autonomous` (single `--remove-label autonomous`
     occurrence: the success branch only).
   - Old "Review passed but auto-merge failed. Please merge ... manually"
     wording is removed.
-- `tests/unit/test-autonomous-dev-rebase-marker.sh` — verifies the dev
-  wrapper's resume branch detects the marker via `startswith("Auto-merge
-  failed:")` and conditionally injects rebase instructions.
+- `tests/unit/test-autonomous-dev-rebase-marker.sh` and
+  `tests/unit/test-auto-merge-marker-migration.sh` — verify all dev modes
+  require the anchored prefix plus either current-HEAD machine marker and
+  ignore stale, unbound, malformed, wrong-issue, and quoted lookalikes.
 
 **Cross-references**:
 - [INV-32](#inv-32-gh-wrapper-is-installed-on-two-paths-shared-scriptsgh-for-the-agent-per-run-path-dir-for-the-wrapper) —
@@ -1400,7 +1410,7 @@ Where `<short-token>` is one of `bot-timeout`, `ci-transport`, `no-pr-found`, `m
 
 **Cross-references**:
 - [INV-12](#inv-12-resume-only-against-unfinished-sessions) — the hang-prevention invariant this carves out from.
-- [INV-33](#inv-33-review-wrapper-must-not-close-the-linked-issue) + #146 auto-merge-failure handling — INV-35's `failed-substantive` branch composes with #146's resume-prompt rebase prepend (the prepend fires whenever the most recent PR comment matches `Auto-merge failed:`, regardless of whether the next dispatch is dev-resume or dev-new).
+- [INV-33](#inv-33-review-wrapper-must-not-close-the-linked-issue) + #146 auto-merge-failure handling — INV-35's `failed-substantive` branch composes with #146's rebase prepend in every dev mode. The prepend requires an `Auto-merge failed:` prefix plus an exact current-issue/current-HEAD INV-33 or INV-147 machine marker; stale and unbound comments do not activate it.
 - [`docs/designs/inv35-review-aware-resume.md`](../designs/inv35-review-aware-resume.md) — design canvas with the full routing table and verdict-trailer schema.
 - [`dispatcher-flow.md` § Step 4b.5](dispatcher-flow.md#step-4b5-terminal-state-gate-inv-12) — Step 4's runtime view of the routing.
 
@@ -4394,7 +4404,7 @@ _Triage (issue #236): [machine-checked: tests/unit/test-spec-drift.sh]_
 
 1. **Generated diagram** — the mermaid block in [`state-machine.md`](state-machine.md) is generated FROM `transitions.json` by `scripts/gen-state-machine.sh` (marker-delimited region). Hand-editing inside the markers, or editing the table without regenerating, fails CI (`gen-state-machine.sh --check` diffs and exits non-zero).
 2. **Guard/action mapping** — every `guard`/`action` token in `transitions.json` maps (via [`spec-guard-map.json`](spec-guard-map.json)) to a named function or greppable predicate that MUST still resolve in `lib-dispatch.sh` / the wrappers. A token with no mapping, or a mapped anchor that no longer resolves, fails CI naming the pair. (The map keys on function names + grep-stable literals, NEVER line numbers.)
-3. **Label-write-site completeness** — five sub-checks (plus a variable-write ban) over every literal `label_swap` and direct `itp_transition_state` arg + every `--add/--remove-label` literal in the six pipeline files. **C.1 vocabulary**: each label literal written must appear in `transitions.json` as a state or `actions[]` entry (catches a brand-new label, e.g. a typo). **C.2 movement**: each write *site*'s `(removes→adds)` movement — the set it removes plus the set it adds, normalized as `<sorted-removes>|<sorted-adds>` — must equal the `(remove-label:…, add-label:…)` actions of some transition (catches a write that reuses *known* labels in an **undeclared combination**, e.g. `label_swap "$n" "approved" "stalled"`). **C.3 code-site coverage**: C.2 is movement-*set* membership, so two transitions sharing one movement make a row's deletion invisible. [`spec-codesite-map.json`](spec-codesite-map.json)'s `code_sites` pins every **code-bearing** transition (actor ∉ {maintainer, github}) to a grep-stable anchor, checked both ways — *forward* (anchor still greps) and *reverse* (every key is a live transition id); deleting `dispatch-pending-dev-pr-exists` (movement shared with `dispatch-review-aware-reroute-review`) orphans its entry → **CI red**. **C.4 discovered-site reconciliation**: a NEW site whose movement already exists elsewhere passes C.2/C.3, so C.4 requires the count of literal write sites per `(file, movement)` to equal the count of `spec-codesite-map.json`'s `sites[]` manifest entries — an added/removed/duplicate site drifts the count → **CI red**. **C.5 per-site anchor adjacency**: C.4 is a *count*, so RELOCATING a write within a file (same movement, count unchanged) is invisible; each `sites[]` entry's `anchor` must therefore grep **exactly once** AND have a write of its `movement` within ±8 lines — moving the `label_swap "$n" "pending-dev" "pending-review"` out of `handle_pending_dev_pr_exists()` leaves its anchor with no adjacent write → **CI red**. **P1.1 variable-write ban**: a variable-valued `--add/--remove-label "$x"` is a hard **CI red** (not a NOTE) unless its enclosing function is in `variable_write_allowlist`, which is currently empty because `label_swap` and `hygiene_strip_residual_labels` now delegate to `itp_transition_state` — a variable write could inject an undeclared label invisibly. (C.4/C.5 counts are over CODE SITES, not rows: one site can back several rows and one row can collapse several physical paths, so the count is the stable quantity.) Together C.1+C.2+C.3+C.4+C.5 + the ban make "a PR adding (even a duplicate / shared-movement / relocated / variable) or removing a label-write site without the matching transitions.json entry fails CI" actually hold. Each fails CI with an actionable message naming the orphan label / undeclared movement / orphaned-or-unmapped transition / stale-or-ambiguous anchor / unaccounted-or-count-mismatched site / relocated write / non-allowlisted variable write.
+3. **Label-write-site completeness** — five sub-checks (plus a variable-write ban) over every literal `label_swap` and direct `itp_transition_state` arg + every `--add/--remove-label` literal in the seven pipeline files. **C.1 vocabulary**: each label literal written must appear in `transitions.json` as a state or `actions[]` entry (catches a brand-new label, e.g. a typo). **C.2 movement**: each write *site*'s `(removes→adds)` movement — the set it removes plus the set it adds, normalized as `<sorted-removes>|<sorted-adds>` — must equal the `(remove-label:…, add-label:…)` actions of some transition (catches a write that reuses *known* labels in an **undeclared combination**, e.g. `label_swap "$n" "approved" "stalled"`). **C.3 code-site coverage**: C.2 is movement-*set* membership, so two transitions sharing one movement make a row's deletion invisible. [`spec-codesite-map.json`](spec-codesite-map.json)'s `code_sites` pins every **code-bearing** transition (actor ∉ {maintainer, github}) to a grep-stable anchor, checked both ways — *forward* (anchor still greps) and *reverse* (every key is a live transition id); deleting `dispatch-pending-dev-pr-exists` (movement shared with `dispatch-review-aware-reroute-review`) orphans its entry → **CI red**. **C.4 discovered-site reconciliation**: a NEW site whose movement already exists elsewhere passes C.2/C.3, so C.4 requires the count of literal write sites per `(file, movement)` to equal the count of `spec-codesite-map.json`'s `sites[]` manifest entries — an added/removed/duplicate site drifts the count → **CI red**. **C.5 per-site anchor adjacency**: C.4 is a *count*, so RELOCATING a write within a file (same movement, count unchanged) is invisible; each `sites[]` entry's `anchor` must therefore grep **exactly once** AND have a write of its `movement` within ±8 lines — moving the `label_swap "$n" "pending-dev" "pending-review"` out of `handle_pending_dev_pr_exists()` leaves its anchor with no adjacent write → **CI red**. **P1.1 variable-write ban**: a variable-valued `--add/--remove-label "$x"` is a hard **CI red** (not a NOTE) unless its enclosing function is in `variable_write_allowlist`, which is currently empty because `label_swap` and `hygiene_strip_residual_labels` now delegate to `itp_transition_state` — a variable write could inject an undeclared label invisibly. (C.4/C.5 counts are over CODE SITES, not rows: one site can back several rows and one row can collapse several physical paths, so the count is the stable quantity.) Together C.1+C.2+C.3+C.4+C.5 + the ban make "a PR adding (even a duplicate / shared-movement / relocated / variable) or removing a label-write site without the matching transitions.json entry fails CI" actually hold. Each fails CI with an actionable message naming the orphan label / undeclared movement / orphaned-or-unmapped transition / stale-or-ambiguous anchor / unaccounted-or-count-mismatched site / relocated write / non-allowlisted variable write.
 
 The typed inputs the guards read are enumerated in [`observation-snapshot.md`](observation-snapshot.md) (schema: [`schemas/observation-snapshot.schema.json`](schemas/observation-snapshot.schema.json)), including the SSM-indeterminate third liveness state ([INV-30]).
 
@@ -9380,5 +9390,143 @@ invariant.
 **Cross-reference**:
 [`docs/designs/block-commit-command-context.md`](../designs/block-commit-command-context.md)
 defines the full helper contract and repository decision table.
+
+---
+
+## INV-147: a HEAD-pinned mergeability preflight routes known conflicts before E2E and produces strict durable disposition evidence
+
+_Triage (issue #236): [machine-checked: tests/unit/test-review-disposition.sh, tests/unit/test-review-mergeability-preflight.sh, tests/unit/test-dispatcher-review-disposition-routing.sh, tests/unit/test-handle-completed-routing-golden-trace.sh]_
+
+**Rule**: after resolving and linkage-verifying an open PR, the review wrapper
+captures provider-normalized state, full HEAD, and branch; polls
+`chp_mergeable` with the existing bounded `MERGEABLE_RETRIES`; then captures
+state and full HEAD again before acting. This preflight precedes both command
+and browser INV-46 E2E entry points. Invalid retry-count or retry-delay
+configuration falls back to bounded numeric defaults and cannot terminate a
+`set -e` caller.
+
+A stable `MERGEABLE` HEAD emits no disposition and continues unchanged. A
+stable `CONFLICTING` HEAD skips E2E/fan-out and enters the canonical conflict
+route. Persistent `UNKNOWN`/empty on a stable known HEAD skips E2E/fan-out,
+emits `failed-non-substantive cause=mergeable-unknown`, and routes through
+`pending-dev` for INV-35's bounded re-review. A closed/merged PR reuses INV-54
+remove-only cleanup. A changed HEAD emits no stale evidence and requeues to
+`pending-review` with `cause=head-changed`; an unreadable snapshot likewise
+requeues without asserting a HEAD-bound disposition.
+
+The pre-fan-out producer contract is exactly:
+
+```text
+<!-- review-disposition: issue=<N> head=<40-lowercase-hex> phase=pre-fanout result=<conflict-rebase|mergeable-unknown> -->
+```
+
+Only a whole-body strict-self marker for the active issue, a normalized full
+provider HEAD, the literal phase, and an allow-listed result is valid. Human
+lookalikes, quotes, malformed/trailing text, abbreviated SHAs, and wrong-issue
+markers do not route. `Reviewed HEAD:` retains its INV-04 meaning and
+`last_reviewed_head` remains unchanged. The dispatcher instead selects the
+newest valid strict evidence by `(createdAt,id)` across both contracts that
+matches the current full HEAD for Step 4 routing, then delegates to the existing
+INV-35/INV-85/INV-98 router. When strict author projection is
+unavailable or its provider read fails, the helper returns a distinct
+operational-defer result: `pending-dev` remains unchanged, no dispatch/attempt
+marker is emitted, and the issue is not added to `JUST_DISPATCHED`, allowing
+INV-128 to bound a persistent failure. Only a successful read with no valid
+evidence takes the safe first-review path. It never falls back to
+unauthenticated `Reviewed HEAD:` parsing. Older-head evidence cannot suppress
+review of a new HEAD. Canonical disposition and Reviewed-HEAD anchors are
+write-once per tuple. If routing history moves A -> B -> A, current-head
+filtering reuses the existing A anchor instead of duplicating it. The required
+verdict carries `head=<40-lowercase-hex>`, must match the affected HEAD, and
+must be newer than the latest routing evidence of any head and any same-head
+INV-85 `no-progress-substantive-attempt:<head>` boundary. A second same-head
+conflict therefore emits a fresh verdict and reaches INV-85 rather than
+reusing stale evidence, including an identical verdict for an intervening
+HEAD, or being misclassified as an INV-12 no-verdict handoff. Generic verdict
+producers remain unbound; shared classification accepts the optional token
+without changing verdict semantics. Routing candidates and freshness checks
+derive their indices from one strict-self timeline that excludes malformed
+timestamps. The authenticated verdict grammar allows each optional `cause`,
+`dev-actionable`, and `head` key at most once in canonical renderer order;
+duplicate or contradictory bindings are not routing evidence.
+
+The pending-dev delegation pins its matched routing HEAD through every terminal
+route. The completed-session router re-reads the PR once before acting and
+reuses the snapshot for its substantive decision. The no-session and
+unconfirmed-session recovery paths likewise re-read immediately after their
+no-live-wrapper gate and before verdict-aware recovery. A changed or unreadable
+HEAD returns to `pending-review` without dispatching dev or recording an INV-85
+attempt against the new HEAD. Callers that do not supply this optional routing
+HEAD retain the original INV-04 `last_reviewed_head` consumer unchanged.
+
+Preflight and post-fan-out INV-44 confirmed conflicts share one canonical
+action helper: a required blocking issue finding naming `BASE_BRANCH`, an
+idempotent HEAD-bound PR comment beginning `Auto-merge failed:`, a
+`failed-substantive dev-actionable=true head=<full-head>` trailer, best-effort
+native request changes, and `reviewing -> pending-dev`. Preflight additionally persists
+`result=conflict-rebase`. The disposition, PR marker, and verdict trailer are
+required durable inputs; the blocking finding is also required before either
+route can transition. Post-fan-out additionally repairs a missing strict-self
+`Reviewed HEAD:` anchor before writing the verdict. All return codes are
+checked, writes are idempotent per `(issue,HEAD,result)`, and `pending-dev` is
+unreachable until they succeed.
+A required-write failure requeues non-substantively to `pending-review` so the
+missing write remains retryable. A final transition failure does not set
+`RESULT_PARSED`; cleanup may retry the intended movement without manufacturing
+an evidence-free `pending-dev` route or duplicating the already-durable required
+verdict trailer. Each required-write phase arms
+`pending-review` cleanup before its first write and changes that intent to
+`pending-dev` only after the helper confirms all routing inputs are durable.
+Thus an interruption between writes also remains retryable.
+
+The later INV-44 poll is retained as the race-closing authority for a base
+update during E2E/fan-out. It re-reads PR state and full HEAD after polling and
+acts only if the PR is still open at the reviewed HEAD; close, HEAD-change, and
+read-failure outcomes emit no stale conflict evidence. After dispatching one
+conflict-rebase dev attempt, the completed-session router uses the pinned
+routing HEAD; an unchanged failed rebase therefore reaches INV-85 `stalled`,
+while a successful `git push --force-with-lease` advances HEAD and returns
+through one normal preflight/E2E/review round.
+
+Every dev prompt mode resolves the linked PR, its normalized current HEAD, and
+the canonical HEAD-bound `Auto-merge failed:` comment before ordinary work.
+The provider-neutral comments read is complete; GitHub page-walks the
+issue-comments endpoint so routing evidence after comment 100 remains visible.
+The comment must end with either the exact confirmed-conflict marker
+`auto-merge-conflict` or INV-33's separate generic `auto-merge-failure` marker,
+both rendered by `lib-review-disposition.sh` for the current `(issue,HEAD)`.
+This preserves ordinary post-approval merge-failure recovery without weakening
+the conflict marker's meaning. Marker-free legacy INV-33 comments remain a
+backward-compatible fallback only when the body contains no case-insensitive
+marker lookalike. Quoted, malformed, terminal-newline, wrong-issue, and stale
+canonical markers do not activate the prompt. A matching marker prepends the
+mandatory rebase block.
+Failure to read any of that provider context prepends
+a mandatory fail-closed recovery block instead: the agent must re-read the
+current context before implementation and must report a persistent read
+failure without changing code. INV-122 remains defense in depth, not the first
+known-conflict handler.
+
+**Producer**:
+`autonomous-review.sh`, `lib-review-mergeable.sh`,
+`lib-review-disposition.sh`, and `lib-review-verdict.sh`.
+
+**Consumer**:
+`lib-dispatch.sh::handle_pending_dev_pr_exists` and
+`handle_completed_session_routing`.
+
+**Status**: **ENFORCED**.
+
+**Test**:
+`docs/test-cases/e2e-conflict-preflight.md` maps
+`TC-E2E-REBASE-001..062` across strict marker parsing, the complete preflight
+matrix, required-write faults/idempotency, canonical conflict parity,
+dispatcher convergence, GitHub/GitLab provider fixtures, and retained
+INV-44/INV-46/INV-98/INV-122 regressions.
+
+**Cross-references**:
+- [INV-04](#inv-04-reviewed-head-trailer-format) - fan-out-produced HEAD evidence remains unchanged.
+- [INV-35](#inv-35-review-aware-resume-routing-for-completed-sessions) / [INV-85](#inv-85-the-completed-session-failed-substantive-route-is-bounded-to-one-dev-new-per-unchanged-head-a-no-progress-or-bot-unfixable-finding-escalates-to-stalled-never-loops) / [INV-98](#inv-98-the-step-4a5-same-head-pr-exists-park-is-not-terminal--a-completed-session-delegates-to-the-inv-35-router-only-the-residual-cases-park) - unchanged-HEAD routing and convergence.
+- [INV-44](#inv-44-mergeable-hard-gate--a-conflicting-pr-can-never-reach-approved) / [INV-46](#inv-46-e2e-runs-once-in-a-dedicated-lane-before-the-review-fan-out--gated-not-per-agent) / [INV-54](#inv-54-the-pr-still-open-guard-gates-all-pass-chain-exits-not-just-pass) - retained post-fan-out, E2E, and closed-PR authorities.
 
 ---

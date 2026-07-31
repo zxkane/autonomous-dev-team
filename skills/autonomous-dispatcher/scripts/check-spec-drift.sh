@@ -18,7 +18,7 @@
 #      mapped anchor (function name OR greppable predicate) must still resolve
 #      in its cited file. A token with no mapping, or a mapped anchor that no
 #      longer resolves, fails LOUD naming the pair.
-#   C. Label-write-SITE completeness — FIVE sub-checks over the six pipeline
+#   C. Label-write-SITE completeness — FIVE sub-checks over the seven pipeline
 #      files (label_swap/direct itp_transition_state args plus
 #      --add-label/--remove-label literals), PLUS a hard ban on un-allowlisted
 #      variable-valued writes (P1.1):
@@ -107,8 +107,8 @@ for f in "$TRANSITIONS" "$GUARD_MAP" "$CODESITE_MAP"; do
   [ -f "$f" ] || { echo "check-spec-drift.sh: not found: $f" >&2; exit 3; }
 done
 
-# The six pipeline files whose label writes must be declared.
-PIPELINE_FILES=(autonomous-dev.sh autonomous-review.sh dispatcher-tick.sh lib-dispatch.sh lib-review-unavailable-cap.sh lib-terminal-control.sh)
+# The seven pipeline files whose label writes must be declared.
+PIPELINE_FILES=(autonomous-dev.sh autonomous-review.sh dispatcher-tick.sh lib-dispatch.sh lib-review-mergeable.sh lib-review-unavailable-cap.sh lib-terminal-control.sh)
 
 FAILED=0
 fail() { echo "::error::$*" >&2; FAILED=1; }
@@ -365,7 +365,7 @@ collect_writes() {
 # single-quoted `--add-label 'frobnicate'` (TC-054) are scanned too — every write
 # style is covered, none can bypass the gate.
 # Accepted scanner boundaries (NOT statically detectable without a real
-# bash parser, and none present in the six PIPELINE_FILES today):
+# bash parser, and none present in the seven PIPELINE_FILES today):
 #   1. a flag whose text is itself held in a variable
 #      (`f=--add-label; gh issue edit "$n" $f "$lbl"`); and
 #   2. an UNBALANCED brace inside a string literal in a future allowlisted
@@ -407,7 +407,7 @@ check_variable_writes() {
     done < <(awk '
       # Net brace delta on a line (crude but adequate for these brace-balanced,
       # well-indented bash files): +1 per "{", -1 per "}". NOTE: string/comment
-      # braces are counted raw. The six pipeline files are brace-balanced FILE-WIDE
+      # braces are counted raw. The seven pipeline files are brace-balanced FILE-WIDE
       # *including* their ~100 brace-in-string lines (JSON jq patterns etc.), so the
       # running depth returns to 0 at each top-level boundary and function entry
       # (depth == 0) fires correctly. TC-034 verifies the current repository has

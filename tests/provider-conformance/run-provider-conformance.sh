@@ -339,7 +339,11 @@ if [[ "${_PCF_GH_MODE:-ok}" == "fail" ]]; then
   printf 'stub-gh: simulated failure\n' >&2
   exit 1
 fi
-if [[ "${1:-}" == "api" && "${2:-}" == "--paginate" ]]; then
+_paginate=0
+for _a in "$@"; do
+  [[ "$_a" == "--paginate" ]] && _paginate=1
+done
+if [[ "${1:-}" == "api" && "$_paginate" -eq 1 ]]; then
   # itp_read_task's nested itp_github_list_comments call needs a REST
   # page-set shape distinct from the primary `issue view` payload — served
   # from $_PCF_GH_COMMENTS_PAYLOAD when the caller sets it. Callers that
@@ -904,11 +908,12 @@ _run_pr_view_assert() {
   local verb="chp_pr_view"
   local argv_file="$work_root/.argv-$verb.json"
   local out rc payload="$PAYLOADS/pr-view-valid.json"
+  local comments_payload="$PAYLOADS/pr-comments-valid.json"
 
   # Success path — request every vocabulary-covered shape category at once.
   local fields='state,comments,reviews,closingIssueNumbers,body'
   local invoke="chp_pr_view 42 '$fields'"
-  out="$(_invoke _PCF_GH_MODE="ok" _PCF_GH_PAYLOAD="$payload" _PCF_ARGV_FILE="$argv_file" "$invoke" 2>&1)"; rc=$?
+  out="$(_invoke _PCF_GH_MODE="ok" _PCF_GH_PAYLOAD="$payload" _PCF_GH_COMMENTS_PAYLOAD="$comments_payload" _PCF_ARGV_FILE="$argv_file" "$invoke" 2>&1)"; rc=$?
   if [[ "$rc" != "0" ]]; then
     emit FAIL "$verb" "wrong-shape (non-zero rc on a valid payload: $rc, output: ${out:0:200})"
     return

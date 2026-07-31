@@ -26,6 +26,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 WRAPPER="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/autonomous-review.sh"
 RC_LIB="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-review-request-changes.sh"
+MG_LIB="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-review-mergeable.sh"
 SKILL="$PROJECT_ROOT/skills/autonomous-review/SKILL.md"
 DECISION_GATE="$PROJECT_ROOT/skills/autonomous-review/references/decision-gate.md"
 INVARIANTS="$PROJECT_ROOT/docs/pipeline/invariants.md"
@@ -166,19 +167,24 @@ assert_grep "TC-RC-SRC-00 wrapper sources lib-review-request-changes.sh" \
 assert_grep "TC-RC-SRC-01 submit_request_changes defined in lib" \
   '^submit_request_changes\(\)' "$RC_LIB"
 
-# TC-RC-SRC-02: the wrapper invokes the helper on every substantive FAIL route —
-# the four are: agent-posted findings FAIL, the CONFLICTING mergeable block, the
+# TC-RC-SRC-02: the wrapper or canonical conflict helper invokes the native
+# request-changes helper on every substantive FAIL route. The routes include
+# agent-posted findings FAIL, the CONFLICTING mergeable block, the
 # E2E hard-gate failure ([INV-46], a dev-actionable blocking FAIL produced before
 # the review fan-out — #197 codex finding), and the INV-79 mandatory-bot-review
-# MAX-waits FAIL (#234). Count INVOCATIONS only — the call form is
+# MAX-waits FAIL (#234). The conflict route is shared by pre- and post-fan-out
+# checks in lib-review-mergeable.sh. Count INVOCATIONS only — the call form is
 # `submit_request_changes "<pr>"`; a `|| log "... submit_request_changes
 # returned ..."` mention is NOT a call.
 _calls=$(grep -cE 'submit_request_changes "' "$WRAPPER_CODE" || true)
+_conflict_calls=$(grep -cE 'submit_request_changes "\$pr"' "$MG_LIB" || true)
 if [[ "$_calls" -ge 3 ]]; then
   echo -e "  ${GREEN}PASS${NC}: TC-RC-SRC-02 wrapper calls submit_request_changes on ≥3 substantive FAIL routes (found $_calls)"; PASS=$((PASS + 1))
 else
   echo -e "  ${RED}FAIL${NC}: TC-RC-SRC-02 expected ≥3 helper calls, found $_calls"; FAIL=$((FAIL + 1))
 fi
+assert_eq "TC-RC-SRC-02b canonical conflict route requests changes once" \
+  "1" "$_conflict_calls"
 
 # TC-RC-SRC-06: every helper invocation statement is best-effort — its 3-line
 # window (call line + body line + trailing operator) contains a `|| log`/`|| true`
@@ -219,8 +225,9 @@ fi
 
 # TC-RC-SRC-04: the NON-substantive routes must NOT submit REQUEST_CHANGES —
 # they are transient re-queues / transport failures, not dev-actionable code
-# defects. Pin the helper call count at EXACTLY 6 (the six substantive routes:
-# agent-findings FAIL, CONFLICTING mergeable block, E2E hard-gate fail, the
+# defects. Pin the helper call count at EXACTLY 6 across the wrapper and shared
+# conflict route (the six substantive routes: agent-findings FAIL, CONFLICTING
+# mergeable block, E2E hard-gate fail, the
 # INV-79 mandatory-bot-review MAX-waits FAIL — a bot misconfigured/down after
 # BOT_REVIEW_WAIT_MAX is a dev/maintainer-actionable blocking finding — and the
 # INV-134 CI-rollup gate's two substantive routes: a red check (failed) and the
@@ -230,10 +237,10 @@ fi
 # further call would mean a non-substantive route (mergeable-UNKNOWN,
 # E2E-evidence-missing, agent-crash-no-verdict, an INV-79/INV-134 wait
 # re-queue, or CI-rollup head-changed) wrongly wired it in.
-if [[ "$_calls" -eq 6 ]]; then
-  echo -e "  ${GREEN}PASS${NC}: TC-RC-SRC-04 helper called on EXACTLY the 6 substantive routes (non-substantive routes excluded)"; PASS=$((PASS + 1))
+if [[ "$((_calls + _conflict_calls))" -eq 6 && "$_calls" -eq 5 ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-RC-SRC-04 helper called on EXACTLY the 6 substantive routes (5 wrapper + 1 canonical conflict route)"; PASS=$((PASS + 1))
 else
-  echo -e "  ${RED}FAIL${NC}: TC-RC-SRC-04 expected exactly 6 helper calls (non-substantive routes must NOT request changes), found $_calls"; FAIL=$((FAIL + 1))
+  echo -e "  ${RED}FAIL${NC}: TC-RC-SRC-04 expected 5 wrapper + 1 canonical conflict helper calls, found $_calls + $_conflict_calls"; FAIL=$((FAIL + 1))
 fi
 
 # TC-RC-SRC-04b: the E2E hard-gate FAIL route (the `failed-substantive` +

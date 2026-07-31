@@ -360,9 +360,15 @@ if [[ -f "$CHP_GITHUB" ]]; then
   out=$(REPO=owner/repo bash -c '
     source "'"$CHP_GITHUB"'"
     gh() {
-      cat <<EOF_PAYLOAD
+      if [[ "${1:-} ${2:-}" == "api repos/owner/repo/issues/42/comments" ]]; then
+        cat <<EOF_COMMENTS
+[{"id":"c1","user":{"login":"a"},"body":"hi","created_at":"2026-06-27T10:00:00Z"}]
+EOF_COMMENTS
+      else
+        cat <<EOF_PAYLOAD
 {"state":"OPEN","body":null,"headRefName":"feat/x","headRefOid":"deadbeef","reviewDecision":"APPROVED","mergeable":"MERGEABLE","number":42,"title":"T","createdAt":"2026-06-27T09:00:00Z","updatedAt":"2026-06-28T09:00:00Z","mergedAt":null,"comments":[{"id":"c1","author":{"login":"a"},"body":"hi","createdAt":"2026-06-27T10:00:00Z"}],"reviews":[{"author":{"login":"r"},"state":"APPROVED","submittedAt":"2026-06-27T11:00:00Z"}],"closingIssuesReferences":[{"number":42}]}
 EOF_PAYLOAD
+      fi
     }
     chp_github_pr_view 42 "number,state,title,body,createdAt,updatedAt,mergedAt,headRefName,headRefOid,reviewDecision,mergeable,closingIssueNumbers,comments,reviews"
   ' 2>&1) || rc=$?
@@ -463,6 +469,42 @@ EOF_PAYLOAD
     bad "r2-INLINE-4 zero-comment PR case regressed (rc=$rc out=[$out])"
   fi
 
+  # Issue #540: PR discussion comments are routing inputs. `gh pr view
+  # --json comments` caps the connection at 100, so the leaf must use the
+  # paginated issue-comments endpoint and preserve a marker at position 101.
+  rc=0; out=""
+  out=$(REPO=owner/repo bash -c '
+    source "'"$CHP_GITHUB"'"
+    gh() {
+      if [[ "${1:-} ${2:-}" == "api repos/owner/repo/issues/42/comments" \
+            && " $* " == *" --paginate "* ]]; then
+        jq -cn "[range(1;102) | {
+          id:.,
+          user:{login:\"review-app[bot]\"},
+          body:(if . == 101 then \"marker-101\" else \"noise-\" + (.|tostring) end),
+          created_at:\"2026-07-30T00:00:00Z\"
+        }]"
+      elif [[ "${1:-} ${2:-}" == "pr view" ]]; then
+        jq -cn "{comments:[range(1;101) | {
+          id:.,
+          author:{login:\"review-app[bot]\"},
+          body:(\"noise-\" + (.|tostring)),
+          createdAt:\"2026-07-30T00:00:00Z\"
+        }]}"
+      else
+        return 1
+      fi
+    }
+    chp_github_pr_view 42 comments
+  ' 2>/dev/null) || rc=$?
+  if [[ "$rc" == "0" \
+        && "$(jq -r '.comments | length' <<<"$out" 2>/dev/null)" == "101" \
+        && "$(jq -r '.comments[-1].body' <<<"$out" 2>/dev/null)" == "marker-101" ]]; then
+    ok "TC-E2E-REBASE-056 chp_github_pr_view comments paginates beyond 100 and preserves marker 101"
+  else
+    bad "TC-E2E-REBASE-056 chp_github_pr_view comments truncated or skipped pagination (rc=$rc out=$(head -c 180 <<<"$out"))"
+  fi
+
   # TC-R2-INLINE-5: multi-page arrays still merge complete. Two
   # concatenated array-pages yield one merged/normalized array with both
   # elements — the r2 fix must not break the load-bearing completeness fix.
@@ -472,7 +514,7 @@ EOF_PAYLOAD
     gh() { printf "%s" "[{\"id\":1,\"path\":\"a\",\"line\":1,\"body\":\"x\",\"created_at\":\"2026-06-27T09:00:00Z\",\"user\":{\"login\":\"a\"}}][{\"id\":2,\"path\":\"b\",\"line\":2,\"body\":\"y\",\"created_at\":\"2026-06-28T09:00:00Z\",\"user\":{\"login\":\"b\"}}]"; }
     chp_github_list_inline_comments 42
   ' 2>/dev/null) || rc=$?
-  local _n; _n=$(jq -c length 2>/dev/null <<<"$out")
+  _n=$(jq -c length 2>/dev/null <<<"$out")
   if [[ "$rc" == "0" && "$_n" == "2" ]]; then
     ok "r2-INLINE-5 chp_github_list_inline_comments: multi-page arrays merge complete (2 pages → 2 elements)"
   else

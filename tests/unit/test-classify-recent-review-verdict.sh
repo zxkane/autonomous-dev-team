@@ -345,6 +345,33 @@ classify_recent_review_verdict 100 "$SESSION_END" v c
 assert_eq "TC-389-002 verdict" "failed-non-substantive" "$v"
 assert_eq "TC-389-002 cause" "bot-timeout" "$c"
 
+# TC-E2E-REBASE-060: INV-147 required trailers may carry one normalized full
+# HEAD token. The optional binding remains structurally authentic and does not
+# change ordinary verdict/cause classification.
+BOUND_HEAD="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+_MOCK_COMMENTS_JSON=$(jq -n \
+  --argjson c1 "$(mkc "kane-review-agent[bot]" "2026-05-21T05:30:00Z" "<!-- review-verdict: failed-non-substantive cause=mergeable-unknown head=${BOUND_HEAD} -->")" \
+  '[$c1]')
+v=""; c=""
+classify_recent_review_verdict 100 "$SESSION_END" v c
+assert_eq "TC-E2E-REBASE-060 HEAD-bound verdict classified" "failed-non-substantive" "$v"
+assert_eq "TC-E2E-REBASE-060 HEAD-bound cause preserved" "mergeable-unknown" "$c"
+
+# TC-E2E-REBASE-062: every optional key is singular. Duplicate bindings are
+# malformed rather than authentic evidence, even when each token is valid by
+# itself.
+for duplicate_tokens in \
+  "head=${BOUND_HEAD} head=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" \
+  "cause=first cause=second" \
+  "dev-actionable=true dev-actionable=false"; do
+  _MOCK_COMMENTS_JSON=$(jq -n \
+    --argjson c1 "$(mkc "kane-review-agent[bot]" "2026-05-21T05:30:00Z" "<!-- review-verdict: failed-substantive ${duplicate_tokens} -->")" \
+    '[$c1]')
+  v=""; c=""
+  classify_recent_review_verdict 100 "$SESSION_END" v c
+  assert_eq "TC-E2E-REBASE-062 duplicate optional tokens rejected" "none" "$v"
+done
+
 # TC-389-003: trailer embedded in prose is NOT authenticated (anchored match;
 # round-14 forgery posture: any leading content fails the anchor).
 _MOCK_COMMENTS_JSON=$(jq -n \

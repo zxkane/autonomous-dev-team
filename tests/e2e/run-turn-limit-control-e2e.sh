@@ -1436,6 +1436,16 @@ cp -a "$SCRIPTS/." "$wrapper_scripts/"
 cp "$SCRIPTS/providers/chp-github.caps" "$wrapper_providers/chp-github.caps"
 cp "$SCRIPTS/providers/itp-github.caps" "$wrapper_providers/itp-github.caps"
 
+cat >"$wrapper_bin/gh" <<'EOF'
+#!/bin/bash
+if [[ "$*" == "api user --jq .login" ]]; then
+  printf '%s\n' 'turn-wrapper[bot]'
+  exit 0
+fi
+exit 1
+EOF
+chmod +x "$wrapper_bin/gh"
+
 cat >"$wrapper_providers/chp-github.sh" <<'EOF'
 #!/bin/bash
 
@@ -1450,6 +1460,9 @@ chp_github_find_pr_for_issue() {
 
 chp_github_pr_view() {
   case "${2:-}" in
+    state,headRefOid,headRefName)
+      printf '%s\n' '{"state":"OPEN","headRefOid":"5075075075075075075075075075075075075075","headRefName":"feat/issue-507-turn-limit-control"}'
+      ;;
     headRefName) printf '%s\n' '{"headRefName":"feat/issue-507-turn-limit-control"}' ;;
     headRefOid) printf '%s\n' '{"headRefOid":"5075075075075075075075075075075075075075"}' ;;
     state) printf '%s\n' '{"state":"OPEN"}' ;;

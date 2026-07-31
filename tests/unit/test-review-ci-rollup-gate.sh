@@ -26,6 +26,7 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 SCRIPTS="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts"
 WRAPPER="$SCRIPTS/autonomous-review.sh"
 CIR_LIB="$SCRIPTS/lib-review-ci-rollup.sh"
+MERGEABLE_LIB="$SCRIPTS/lib-review-mergeable.sh"
 CHP_LIB="$SCRIPTS/lib-code-host.sh"
 
 RED='\033[0;31m'
@@ -486,7 +487,7 @@ echo ""
 echo "=== TC-CIR-INV44: INV-44 wording clarification (merge-conflict, not CI) ==="
 # ---------------------------------------------------------------------------
 assert_grep "TC-CIR-INV44-01 mergeable gate finding clarifies merge-conflict (not CI)" \
-  'merge-conflict gate — not a CI-status gate' "$WRAPPER"
+  'merge-conflict gate — not a CI-status gate' "$MERGEABLE_LIB"
 # _classify_mergeable_gate itself is BYTE-UNCHANGED (issue #489: "INV-44
 # ships byte-unchanged"). Assert against the pre-existing golden table in
 # lib-review-mergeable.sh directly rather than re-deriving it here.

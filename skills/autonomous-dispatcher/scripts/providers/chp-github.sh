@@ -1026,8 +1026,9 @@ chp_github_reply_review_comment() {
 # FIELDS_CSV is a comma-separated list of vocabulary field names. Requested
 # fields that are 1:1 in `gh pr view --json` (`number`, `state`, `title`,
 # `body`, `createdAt`, `updatedAt`, `mergedAt`, `headRefName`, `headRefOid`,
-# `reviewDecision`, `mergeable`) are projected verbatim. `comments` normalizes
-# to `[{id, author, body, createdAt}]` ascending by `createdAt`, `reviews` to
+# `reviewDecision`, `mergeable`) are projected verbatim. `comments` is fetched
+# from the paginated issue-comments endpoint and normalizes to
+# `[{id, author, body, createdAt}]` ascending by `createdAt`; `reviews` maps to
 # `[{author, state, submittedAt}]` ascending by `submittedAt`, and
 # `closingIssueNumbers` folds the raw `closingIssuesReferences` collection to
 # an int array (the GitHub-internal shape does not cross the seam). `body`
@@ -1087,7 +1088,7 @@ chp_github_pr_view() {
   local requested=(${fields_csv})
   IFS="$IFS_SAVED"
 
-  local f _seen_map=""
+  local f _seen_map="" need_comments=0
   local _obj_body=""
   for f in "${requested[@]}"; do
     f="${f#"${f%%[![:space:]]*}"}"; f="${f%"${f##*[![:space:]]}"}"   # trim
@@ -1107,11 +1108,15 @@ chp_github_pr_view() {
     esac
     case "$f" in
       closingIssueNumbers) out_field="closingIssuesReferences" ;;
+      comments)
+        out_field=""
+        need_comments=1
+        ;;
       *)                   out_field="$f" ;;
     esac
     # De-dup the raw field list (a caller repeating a vocabulary field, or
     # requesting both `body` twice, must not send two entries to `gh --json`).
-    if [[ ",${_seen_map}," != *",${out_field},"* ]]; then
+    if [[ -n "$out_field" && ",${_seen_map}," != *",${out_field},"* ]]; then
       _seen_map="${_seen_map:+${_seen_map},}${out_field}"
       gh_fields+="${gh_fields:+,}${out_field}"
     fi
@@ -1122,7 +1127,7 @@ chp_github_pr_view() {
         expr='body: (.body // "")'
         ;;
       comments)
-        expr='comments: ([ .comments[]? | { id: (.id // null), author: ((.author | if type == "object" then .login else . end) // null), body: (.body // ""), createdAt: (.createdAt // null) } ] | sort_by(.createdAt // "", .id // 0))'
+        expr='comments: ([ .comments[]? | { id: (.id // null), author: (((.author // .user) | if type == "object" then .login else . end) // null), body: (.body // ""), createdAt: (.createdAt // .created_at // null) } ] | sort_by(.createdAt // "", .id // 0))'
         ;;
       reviews)
         expr='reviews: ([ .reviews[]? | { author: ((.author | if type == "object" then .login else . end) // null), state: (.state // null), submittedAt: (.submittedAt // null) } ] | sort_by(.submittedAt // ""))'
@@ -1162,10 +1167,25 @@ chp_github_pr_view() {
   # `gh(){ return 0; }`) is caught by the `-n` and the `jq -e … type=="object"`
   # guard: any of the three failure modes yields rc≠0 with empty stdout, so the
   # caller's fail-soft framing degrades correctly.
-  local raw
-  raw=$(gh pr view "$pr" --repo "$REPO" --json "$gh_fields") || return 1
-  [[ -n "$raw" ]] || return 1
+  local raw="{}" comments_raw comments
+  if [[ -n "$gh_fields" ]]; then
+    raw=$(gh pr view "$pr" --repo "$REPO" --json "$gh_fields") || return 1
+    [[ -n "$raw" ]] || return 1
+  fi
   jq -e 'type == "object"' >/dev/null 2>&1 <<<"$raw" || return 1
+
+  if [[ "$need_comments" -eq 1 ]]; then
+    comments_raw=$(gh api "repos/${REPO}/issues/${pr}/comments" --paginate) \
+      || return 1
+    [[ -n "$comments_raw" ]] || return 1
+    comments=$(jq -sc '
+      if all(.[]; type == "array") then add // []
+      else error("PR comment pagination emitted a non-array page")
+      end
+    ' <<<"$comments_raw" 2>/dev/null) || return 1
+    raw=$(jq -c --argjson comments "$comments" \
+      '. + {comments: $comments}' <<<"$raw") || return 1
+  fi
   jq -c "$norm_program" <<<"$raw"
 }
 

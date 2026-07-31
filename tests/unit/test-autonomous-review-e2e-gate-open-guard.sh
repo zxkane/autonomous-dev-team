@@ -228,10 +228,15 @@ fi
 # non-substantive + failed-check substantive + awaiting-ci/unavailable wait
 # non-substantive + the wait-max substantive give-up) → 17; INV-141 added
 # three token-budget retry trailers (two launch-refused sites + unavailable
-# hold) → 20. The open-guard itself must not change it.
+# hold) → 20. INV-147 moved the INV-44 conflict trailer into the shared
+# canonical conflict route, but added one pending-review crash-recovery trailer,
+# leaving the wrapper-local count at 20. The open-guard itself must not change
+# either count.
 _trailer_count=$(grep -cE '^\s*(if ! )?(_teardown_call )?emit_verdict_trailer ' "$WRAPPER")
-assert_eq "TC-EOG-REG-04 emit_verdict_trailer call count is 20 (17 existing + INV-141 token-budget retry trailers x3; open-guard adds none)" \
+assert_eq "TC-EOG-REG-04 wrapper-local emit_verdict_trailer call count remains 20 after conflict extraction + retry cleanup" \
   "20" "$_trailer_count"
+assert_src "TC-EOG-REG-04 shared conflict route owns the required substantive trailer" \
+  grep -qE '_review_ensure_required_verdict' "$MG_LIB"
 
 # ---------------------------------------------------------------------------
 echo ""

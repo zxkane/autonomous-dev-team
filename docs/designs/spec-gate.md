@@ -81,7 +81,7 @@ not declare.
 ### Check C — label-write-site completeness (`check-spec-drift.sh`)
 FIVE sub-checks (plus a hard ban on un-allowlisted variable-valued writes) over
 every `label_swap …` call, direct `itp_transition_state …` call, and
-`gh issue edit … --add-label/--remove-label` literal across the six pipeline
+`gh issue edit … --add-label/--remove-label` literal across the seven pipeline
 files:
 - **C.1 vocabulary**: every label literal written appears as a `state` or
   inside an `actions[]` (add-label:X / remove-label:X) of some transition. A

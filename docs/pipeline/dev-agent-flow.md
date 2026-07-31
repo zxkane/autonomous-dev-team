@@ -334,11 +334,50 @@ existing GNU-timeout argv is unchanged.
 
 Within that agent-side wall clock, `autonomous-dev/SKILL.md` Step 5 (Local Verification) governs how the agent invokes its own build/test suite: one synchronous call with a generous `timeout`, never backgrounded-and-polled ([INV-107](invariants.md#inv-107-dev-agent-step-5-verification-runs-as-one-synchronous-command-with-a-generous-timeout--never-backgrounded-and-polled-across-turns), #374) — a background+poll suite run burns LLM turns without advancing the wrapper's own `wait`.
 
+### Conflict-rebase prompt guard (INV-147)
+
+Before constructing any `new`, `resume`, or resume-fallback prompt, the wrapper
+resolves the linked PR and normalized full `headRefOid`, then reads normalized
+PR comments through `chp_pr_view "$PR_NUM" "comments"`; the GitHub leaf obtains
+the complete list from the paginated issue-comments endpoint rather than the
+100-entry `gh pr view` connection. Only a comment beginning
+`Auto-merge failed:` whose exact final line is one marker for the current
+`(issue,HEAD)` activates the rebase prompt:
+
+- `<!-- auto-merge-conflict: ... result=conflict-rebase -->` for an INV-147
+  confirmed conflict; or
+- `<!-- auto-merge-failure: issue=<N> head=<full-head> -->` for a generic
+  post-approval INV-33 merge failure.
+
+The two renderers share full-HEAD normalization but preserve distinct
+semantics. Quoted history, abbreviated SHAs, wrong-issue markers, and
+stale-HEAD markers are ignored. A terminal newline after a marker also makes it
+non-canonical. A marker-free legacy `Auto-merge failed:` comment remains
+accepted for backward compatibility with INV-33 comments written before the
+full-HEAD marker existed; any body containing a case-insensitive
+`auto-merge-conflict` or `auto-merge-failure` lookalike is ineligible for that
+legacy fallback.
+
+A match prepends
+`## Pre-implementation: rebase onto ${BASE_BRANCH} — MANDATORY FIRST STEP`,
+instructing `git fetch origin ${BASE_BRANCH}`,
+`git rebase origin/${BASE_BRANCH}`, and `git push --force-with-lease` before
+implementation or review-finding work. Unsafe conflicts must be reported and
+aborted with `git rebase --abort`; semantic resolution is never forced.
+
+If linked-PR resolution, full-HEAD normalization, or comment reading fails,
+the prompt instead starts with a mandatory fail-closed context-recovery block.
+Ordinary work cannot begin until the current HEAD and canonical marker are
+re-read, and a repeated provider failure must be reported without changing
+code. `BASE_BRANCH` is the wrapper's resolved base branch
+([INV-131](invariants.md#inv-131-the-pipelines-base-branch-is-a-resolved-exported-validated-conf-value--never-a-hardcoded-main-literal-in-a-prompt-hook-or-provider-argv),
+default `main`).
+
 ## Mode = resume
 
 1. **Fetch review feedback** from issue comments — most recent comment whose body **starts with** `Review findings` or `Review PASSED`, OR carries a `BLOCKING` / `[P1]` token ([INV-57](invariants.md#inv-57-dev-resume-must-not-short-circuit-on-a-standing-approval-when-newer-review-findings-exist), closes #188). The two prefixes are wrapper-side strings the review agent emits; dispatcher status comments (e.g. `Dispatching autonomous review`, `Moving to pending-review for assessment`, `no new commits since last review at <sha>`) start with neither prefix and carry neither token, so they are correctly excluded. Pre-fix (#113) the second clause was a substring match on `review`, which let dispatcher chatter shadow real review findings whenever a status comment landed after the verdict — the resumed dev session would then see dispatcher noise as its `## Review Feedback` and make zero progress. The `BLOCKING`/`[P1]` clause (added for #188) broadens recognition beyond the exact `Review findings:` prefix so a late or independent findings comment (a heading `## Codex review findings`, a bare operator note) is still actionable, without re-introducing the #113 false positives. The token clause has two guards (issue #188 review): the `BLOCKING` token is anchored with a *consuming* leading group `(^|[^A-Za-z-])BLOCKING` (never a look-behind) so `NON-BLOCKING` does not match, plus a *consuming* right boundary so `BLOCKINGS` does not match; and a first-line exclusion list (`Review PASSED`/`Review APPROVED`, `## ✅`, `**Agent Session Report`, `Multi-agent review:`, `Reviewed HEAD:`, `<!-- … -->`, `Dispatching`/`Resuming`/`Moving to`) keeps a PASS verdict that says "No BLOCKING issues remain" and dev status/session comments that mention the tokens in prose from being misclassified as change-requests. **Engine boundary ([INV-90]/[INV-91], #296 B6):** the read now routes through `itp_list_comments "$ISSUE" | jq -r '<selector>'` (the normalized [INV-90] array `.[]`), so the selector runs under the **system jq's Oniguruma** engine, not gh's Go-RE2. Because the two engines diverge on `\b`/`\s`/`(?i)` for non-ASCII input, the selector is rewritten to explicit, engine-equivalent forms that select IDENTICALLY in both (= the old RE2 behavior): `BLOCKING\b` → `(?i:(^|[^A-Za-z-])BLOCKING)($|[^A-Za-z0-9_])` (the `(?i)` is SCOPED over the literal only, so the explicit ASCII boundary classes stay OUTSIDE the case-fold and Unicode simple-fold chars `K` U+212A / `ſ` U+017F do not diverge from RE2's ASCII `\b`); `\[P1\]` → `(?i:\[P1\])`; the leading `^\s*` of the exclusion → `^[ \t\r\n\f]*` (explicit ASCII whitespace, excluding NBSP to match RE2's `\s`); each exclusion `(?i)` → a scoped `(?i:…)`. A look-behind remains forbidden (the consuming-anchor design is what makes selection engine-equivalent). `tests/unit/test-resume-selector-re2-compat.sh` (static + system-jq round-trip) and the engine-divergence fixtures in `tests/unit/test-resume-review-comments-filter.sh` guard this boundary; the `:1051` `| last` relies on [INV-90]'s **stable** ascending `createdAt` sort to pick the later of two same-second findings.
 2. **Fetch PR inline review comments** — find the PR linked to the issue, then `gh api repos/.../pulls/N/comments` for each line-anchored comment.
-3. **Detect auto-merge-failure marker** ([INV-33](invariants.md#inv-33-review-wrapper-must-not-close-the-linked-issue)) — query the PR's issue-level comments via `itp_list_comments "$PR_NUM"` (a PR **is** an issue on GitHub, so its issue-level comments resolve through the shipped [INV-90] normalized-array verb; #332 migrated this off a raw `gh api repos/.../issues/<PR>/comments`, the #315 shape-equivalence) with a caller-side `jq -r '[.[] | select(.body | startswith("Auto-merge failed:"))] | last // empty | .body'`. When present, the resume prompt prepends a `## Pre-implementation: rebase onto ${BASE_BRANCH} — MANDATORY FIRST STEP` section instructing `git fetch origin && git rebase origin/${BASE_BRANCH} && git push --force-with-lease` BEFORE addressing review findings. `BASE_BRANCH` is the wrapper's resolved base branch ([INV-131](invariants.md#inv-131-the-pipelines-base-branch-is-a-resolved-exported-validated-conf-value--never-a-hardcoded-main-literal-in-a-prompt-hook-or-provider-argv), default `main`). Anchor on `startswith` (not substring contains) so dev status comments quoting the marker as history can't trigger a false positive; `startswith` is a literal prefix test, engine-agnostic (no `test()`/regex, so no RE2→Oniguruma divergence — the #319/#321 lesson). `last // empty` newest-wins is preserved by the verb's normative ascending `sort_by(.createdAt)` ([INV-90] MUST).
+3. **Include auto-merge recovery context** — prepend the already-resolved current-HEAD rebase or fail-closed recovery block described above.
 4. **Detect post-approval findings** ([INV-57](invariants.md#inv-57-dev-resume-must-not-short-circuit-on-a-standing-approval-when-newer-review-findings-exist)) — `POST_APPROVAL_FINDINGS=$(emit_post_approval_findings_block "$ISSUE_NUMBER" "$PR_NUM")`. Non-empty only when a findings comment post-dates the latest PR approval (or there is no approval). When present, the resume prompt prepends an `## Outstanding post-approval review findings` block that forces the agent to address the late findings and explicitly forbids posting "Resume check — nothing outstanding" + exiting on the strength of a stale standing `reviewDecision == APPROVED` + green CI + mergeable. Fail-closed (any `gh`/`jq` error → empty, so the always-present `## Review Feedback` still carries the findings). See [§ Post-approval findings override (INV-57)](#post-approval-findings-override-inv-57).
 5. Construct resume prompt with both feedback streams (and the optional rebase + post-approval blocks), again wrapped in `<user-issue-content>` tags.
 6. `resume_agent SESSION_ID PROMPT MODEL`. Like `run_agent`, this is a thin dispatcher ([INV-75](invariants.md#inv-75-all-per-cli-behavior-lives-in-that-clis-adapter--inline-cli-conditionals-in-orchestration-code-are-a-defect)): it routes to `adapter_invoke_<cli> dev-resume …`. PROMPT is fed via stdin ([INV-34](invariants.md#inv-34-agent-prompt-is-fed-via-stdin-never-as-a-single-argv-element)). For claude the adapter runs `printf '%s' "$PROMPT" | claude --resume ID --permission-mode auto -p --output-format json` (`--name` omitted on resume). codex/opencode/agy recall a captured session handle and fall back to a fresh run on a sidecar miss; kiro has no usable resume and starts fresh (each handled inside the adapter).

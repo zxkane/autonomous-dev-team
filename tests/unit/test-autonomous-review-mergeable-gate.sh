@@ -101,8 +101,10 @@ assert_grep "TC-MG-SRC-01 wrapper sources lib-review-mergeable.sh" \
 # projection into the leaf — the caller passes ONLY the PR positional and
 # consumes the returned raw token (MERGEABLE|CONFLICTING|UNKNOWN) via
 # `_classify_mergeable_gate` (byte-unchanged, lib-review-mergeable.sh untouched).
-assert_grep "TC-MG-SRC-02 gate queries mergeable via chp_mergeable positional (W1d absorbed the projection)" \
-  'chp_mergeable "\$PR_NUMBER" 2>/dev/null \|\| echo ""' "$WRAPPER"
+assert_grep "TC-MG-SRC-02 wrapper invokes the shared bounded mergeability poller" \
+  '_review_poll_mergeable "\$PR_NUMBER"' "$WRAPPER"
+assert_grep "TC-MG-SRC-02b shared poller queries mergeable via the provider seam" \
+  'chp_mergeable "\$pr"' "$MG_LIB"
 assert_grep "TC-MG-SRC-03 gate calls _classify_mergeable_gate" \
   '_classify_mergeable_gate' "$WRAPPER"
 # The gate must only run when the aggregate PASSed — a fail/all-unavailable
@@ -130,7 +132,7 @@ assert_grep "TC-MG-SRC-10 UNKNOWN retry loop reads MERGEABLE_RETRIES" \
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== TC-MG-SRC-12: emit_verdict_trailer grew by exactly 2 (gate's two block paths) ==="
+echo "=== TC-MG-SRC-12: wrapper trailer sites after canonical conflict extraction ==="
 # ---------------------------------------------------------------------------
 # Pre-gate the wrapper had 6 emit_verdict_trailer call sites (crash trap, no-pr,
 # pass, auto-merge-fail, fail-substantive, fail-non-substantive). The INV-44 gate
@@ -142,7 +144,10 @@ echo "=== TC-MG-SRC-12: emit_verdict_trailer grew by exactly 2 (gate's two block
 # (issue #489) adds four (head-changed non-substantive + failed-check
 # substantive + awaiting-ci/unavailable non-substantive wait + the wait-max
 # substantive give-up) → 17; INV-141 adds three non-substantive token-budget
-# retry trailers (two launch-refused sites + unavailable hold) → 20. All sit
+# retry trailers (two launch-refused sites + unavailable hold) → 20. INV-147
+# extracts the post-fan-out conflict trailer into the shared canonical helper
+# and adds one pending-review crash-recovery trailer, leaving 20 physical
+# wrapper sites. All sit
 # OUTSIDE the per-agent collection loop.
 #
 # [Lane-GC PR-3 / INV-112] The crash-trap call site (inside cleanup()) is now
@@ -150,8 +155,10 @@ echo "=== TC-MG-SRC-12: emit_verdict_trailer grew by exactly 2 (gate's two block
 # the regex tolerates an optional `_teardown_call ` prefix so the call-SITE
 # count stays semantic even though one site's literal text changed.
 EMIT_COUNT=$(grep -cE '^\s*(if ! )?(_teardown_call )?emit_verdict_trailer ' "$WRAPPER")
-assert_eq "TC-MG-SRC-12 emit_verdict_trailer call count is 20 (17 existing + 3 INV-141 token-budget retry trailers)" \
+assert_eq "TC-MG-SRC-12 emit_verdict_trailer call count remains 20 after conflict extraction + retry cleanup" \
   "20" "$EMIT_COUNT"
+assert_grep "TC-MG-SRC-12b canonical route uses the required-status verdict writer" \
+  'emit_verdict_trailer_required' "$MG_LIB"
 
 # ---------------------------------------------------------------------------
 echo ""

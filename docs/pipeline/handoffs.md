@@ -179,19 +179,19 @@ Distinct from H5b: verdict was PASS and PR approval succeeded, but `gh pr merge`
 - Verdict was PASS (`Review PASSED` comment with session-id trailer).
 - `gh pr review --approve` succeeded.
 - `gh pr merge --squash --delete-branch` returned non-zero. `MERGE_OUT` (combined stdout+stderr, truncated to 500 chars) is captured.
-- The wrapper posts a comment on the **PR** (not the issue) with prefix `Auto-merge failed:` followed by the captured excerpt and the directive `Re-dispatching dev agent to rebase onto ${BASE_BRANCH}.`
+- The wrapper posts a comment on the **PR** (not the issue) with prefix `Auto-merge failed:` followed by the captured excerpt, the directive `Re-dispatching dev agent to rebase onto ${BASE_BRANCH}.`, and `<!-- auto-merge-failure: issue=<N> head=<full-reviewed-head> -->`.
 - The wrapper edits the issue: `−reviewing +pending-dev`. Does NOT remove `autonomous`. Does NOT call `gh issue close`. Does NOT add `+approved`.
 - Reviewed-HEAD trailer was already posted (before the merge attempt, in the earlier section of the wrapper).
 
 **Consumer-side invariants** (dev wrapper resume must tolerate):
 
-- The dev resume branch (`autonomous-dev.sh` MODE=resume) queries PR-issue comments via `gh api repos/.../issues/<PR>/comments` with selector `startswith("Auto-merge failed:")`.
+- Every dev mode queries complete normalized PR comments through `chp_pr_view` and requires `startswith("Auto-merge failed:")`. Canonical INV-33/INV-147 comments must end with the exact current-issue/current-full-HEAD marker; stale, malformed, terminal-newline, wrong-issue, and quoted canonical markers are ignored. Marker-free legacy INV-33 comments remain accepted for backward compatibility, but a body containing any case-insensitive marker lookalike cannot fall back to that legacy arm.
 - When the marker is present, the resume prompt prepends a `## Pre-implementation: rebase onto ${BASE_BRANCH} — MANDATORY FIRST STEP` section with `git fetch origin && git rebase origin/${BASE_BRANCH} && git push --force-with-lease` (`BASE_BRANCH` is the wrapper's resolved base branch, default `main`, [INV-131](invariants.md#inv-131-the-pipelines-base-branch-is-a-resolved-exported-validated-conf-value--never-a-hardcoded-main-literal-in-a-prompt-hook-or-provider-argv)).
 - When the marker is absent, the resume prompt is unchanged — H5b semantics apply.
 
 **Failure modes**:
 
-- Marker post fails (token expiry, rate limit) → wrapper logs WARNING; label transition to `pending-dev` still proceeds. The dev agent's resume detects the absence of the marker and falls back to standard review-finding behavior; the agent's MANDATORY pre-review Step 0 (mergeability check in `autonomous-review.sh` prompt) catches the unmerged state on the next review pass.
+- Marker post fails (token expiry, rate limit) → wrapper emits a non-substantive `auto-merge-marker-write-failed` retry and requeues to `pending-review`; it does not dispatch dev without durable rebase context. A later review retries the current-HEAD marker write.
 - Rebase encounters semantic conflicts the agent cannot resolve → dev agent posts a `needs human` comment, runs `git rebase --abort`, exits cleanly. The dispatcher's MAX_RETRIES gate caps the retry budget; `+stalled` is the eventual terminal state.
 - Auto-merge keeps failing for non-rebaseable reasons (e.g. branch protection requiring an external check that never runs) → MAX_RETRIES → `+stalled` → operator intervention.
 

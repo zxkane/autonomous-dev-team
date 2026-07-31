@@ -22,6 +22,7 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 WRAPPER="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/autonomous-review.sh"
 AGG_LIB="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-review-aggregate.sh"
 RESOLVE_LIB="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-review-resolve.sh"
+MG_LIB="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-review-mergeable.sh"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -363,15 +364,20 @@ echo "=== TC-MAR-SRC-12: exactly one aggregated verdict trailer (none in collect
 # substantive + awaiting-ci/unavailable wait non-substantive + wait-max
 # substantive give-up) PLUS the three INV-141 token-budget retry trailers
 # (two launch-refused sites + unavailable hold),
-# all of which sit OUTSIDE the collection loop = 20.
+# all of which sit OUTSIDE the collection loop. INV-147 extracts the INV-44
+# conflict trailer into the canonical conflict helper and adds one
+# pending-review crash-recovery trailer, so 20 remain in the wrapper and one
+# required substantive trailer is owned by that helper.
 #
 # [Lane-GC PR-3 / INV-112] The crash-trap call site (inside cleanup()) is now
 # wrapped as `_teardown_call emit_verdict_trailer …` (bounded network call) —
 # the regex tolerates an optional `_teardown_call ` prefix so the call-SITE
 # count stays semantic even though one site's literal text changed.
 EMIT_COUNT=$(grep -cE '^\s*(if ! )?(_teardown_call )?emit_verdict_trailer ' "$WRAPPER")
-assert_eq "TC-MAR-SRC-12 emit_verdict_trailer call count is 20 (17 existing + 3 INV-141 token-budget retry trailers, none in collection loop)" \
+assert_eq "TC-MAR-SRC-12 wrapper-local emit_verdict_trailer call count remains 20 after conflict extraction + retry cleanup" \
   "20" "$EMIT_COUNT"
+assert_grep "TC-MAR-SRC-12 shared conflict route owns the required substantive trailer" \
+  '_review_ensure_required_verdict' "$MG_LIB"
 
 # ---------------------------------------------------------------------------
 # TC-MAR-SRC-METRICS (#228 round-8 finding 2): review-side token_usage. The

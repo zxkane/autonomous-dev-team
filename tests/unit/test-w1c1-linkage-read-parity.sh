@@ -3,8 +3,8 @@
 #
 # DECISION-level (not byte-level) behavior-parity suite for
 # `chp_find_pr_for_issue`'s callers (`resolve_pr_for_issue` /
-# `verify_pr_closes_issue` in `lib-pr-linkage.sh`) and the six body-mention
-# `chp_pr_list` sites in `autonomous-dev.sh` / `lib-auth.sh`.
+# `verify_pr_closes_issue` in `lib-pr-linkage.sh`) and the remaining five
+# body-mention `chp_pr_list` sites in `autonomous-dev.sh` / `lib-auth.sh`.
 #
 # #397 converts these two CHP read verbs from a gh-argv passthrough to an
 # ABSTRACT contract (positional args, NORMALIZED output, COMPLETE candidate
@@ -15,12 +15,13 @@
 # the "guarded" body-mention selector against the fixtures in
 # `tests/unit/fixtures/w1c1-parity/decision-golden.json`.
 #
-# Two of the six chp_pr_list caller sites (`.body != null and …`) already
+# Two of the original six chp_pr_list caller sites (`.body != null and …`)
+# already
 # carried the guard; the other four (:844 in autonomous-dev.sh, :1174 in
 # autonomous-dev.sh, and both lib-auth.sh sites at :454/:610) did NOT — the
 # #148 hazard class. Line pins reflect the current tree (post-rebase onto
 # W1b=#396). Under the new normalized shape, `body:null → body:""`, so all
-# six converge on the guarded/normalized decision. The golden records the
+# remaining sites converge on the guarded/normalized decision. The golden records the
 # guarded decision (the correct post-normalization behavior); this suite's
 # green run proves the drop-guard change is a fix, not a regression.
 #
@@ -300,8 +301,13 @@ _pin_source "SRC-PIN-DEV-LEN autonomous-dev.sh needs_open_pr_only length shape" 
 _pin_source "SRC-PIN-DEV-LEN autonomous-dev.sh PR_EXISTS length shape"              "$_DEV_SH"  '[.[] | select((.body | test(\"#${ISSUE_NUMBER}[^0-9]\")) or (.body | test(\"#${ISSUE_NUMBER}\$\")))] | length'
 _pin_source "SRC-PIN-AUTH-LEN lib-auth.sh existing length shape"                    "$_AUTH_SH" '[.[] | select((.body | test(\"#${issue_number}[^0-9]\")) or (.body | test(\"#${issue_number}\$\")))] | length'
 
-# Number shape (2 sites — autonomous-dev.sh PR_NUM, lib-auth.sh pr_number).
-_pin_source "SRC-PIN-DEV-NUM autonomous-dev.sh PR_NUM first-number shape"           "$_DEV_SH"  '[.[] | select((.body | test(\"#${ISSUE_NUMBER}[^0-9]\")) or (.body | test(\"#${ISSUE_NUMBER}\$\")))] | .[0].number // empty'
+# Conflict-context PR resolution is authoritative close-linkage, not the old
+# body-mention first-number selector (INV-147 reuses lib-pr-linkage.sh).
+_pin_source "SRC-PIN-DEV-NUM autonomous-dev.sh conflict context uses authoritative resolver" "$_DEV_SH" 'if ! _dev_pr_info=$(resolve_pr_for_issue \'
+_pin_source "SRC-PIN-DEV-NUM autonomous-dev.sh conflict context requests number and full HEAD" "$_DEV_SH" '"$ISSUE_NUMBER" "number,headRefOid"'
+_pin_source "SRC-PIN-DEV-NUM autonomous-dev.sh PR_NUM comes from normalized resolver output" "$_DEV_SH" "PR_NUM=\$(jq -r '.number' <<<\"\$_dev_pr_info\")"
+
+# Number shape (one remaining body-mention site — lib-auth.sh pr_number).
 _pin_source "SRC-PIN-AUTH-NUM lib-auth.sh pr_number first-number shape"             "$_AUTH_SH" '[.[] | select((.body | test(\"#${issue_number}[^0-9]\")) or (.body | test(\"#${issue_number}\$\")))] | (.[0].number // empty)'
 
 # createdAt shape (metrics site, autonomous-dev.sh _pr_created_at).

@@ -689,7 +689,7 @@ delegated_rc="$(
       fetch_pr_for_issue() {
         printf "%s\n" "{\"number\":1,\"headRefOid\":\"sha\"}"
       }
-      last_reviewed_head() { printf "sha\n"; }
+      _latest_review_routing_head() { printf "sha\n"; }
       extract_dev_session_id() { printf "session\n"; }
       is_session_completed() {
         local -n reason_ref="$2" end_ref="$3"

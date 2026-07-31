@@ -627,6 +627,11 @@ for i in $(seq 0 $((pd_count - 1))); do
   if [ "$_pending_pr_route_rc" -eq 0 ]; then
     JUST_DISPATCHED+=("$issue_num")
     continue
+  elif [ "$_pending_pr_route_rc" -eq 3 ]; then
+    # INV-147: strict machine-author evidence could not be read. Keep the issue
+    # in pending-dev without marking it just-dispatched; Step 6's INV-128
+    # watchdog then bounds a persistent operational defer.
+    continue
   elif [ "$_pending_pr_route_rc" -ne 1 ]; then
     exit "$_pending_pr_route_rc"
   fi

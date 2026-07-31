@@ -71,6 +71,25 @@ sequenceDiagram
         W->>GH: remove reviewing, add pending-dev
         W-->>D: exit 1
     end
+    W->>GH: capture OPEN PR state + full HEAD
+    W->>GH: chp_mergeable (bounded UNKNOWN polling)
+    W->>GH: re-read PR state + full HEAD
+    alt stable CONFLICTING HEAD
+        W->>GH: persist disposition + Auto-merge failed + failed-substantive
+        W->>GH: request changes (best-effort)
+        W->>GH: remove reviewing, add pending-dev
+        W-->>D: exit 0 (no E2E or fan-out)
+    else stable UNKNOWN/empty HEAD
+        W->>GH: persist mergeable-unknown disposition + failed-non-substantive
+        W->>GH: remove reviewing, add pending-dev
+        W-->>D: exit 0 (no E2E or fan-out)
+    else HEAD changed or snapshot failed
+        W->>GH: remove reviewing, add pending-review
+        W-->>D: exit 0 (no stale-HEAD evidence)
+    else PR closed/merged
+        W->>GH: remove reviewing only (INV-54)
+        W-->>D: exit 0
+    end
     W->>GH: extract preview URL (if E2E_MODE=browser)
     opt REVIEW_SMOKE_ENABLED (Phase A.5, INV-64)
         W->>L: smoke_agent per REVIEW_AGENTS_LIST member (parallel)
@@ -97,7 +116,7 @@ sequenceDiagram
                 W->>GH: remove autonomous and reviewing, add approved
                 Note over W,GH: GitHub auto-closes issue via 'Closes #N' (INV-33; wrapper does NOT call gh issue close)
             else merge failed (INV-33)
-                W->>GH: gh pr comment 'Auto-merge failed: ... Re-dispatching dev'
+                W->>GH: gh pr comment 'Auto-merge failed: ...' + current-HEAD auto-merge-failure marker
                 W->>GH: remove reviewing, add pending-dev (autonomous KEPT)
             end
         end
@@ -138,6 +157,75 @@ If discovery yields no PR **or** the linkage guard fails → comment "Review fai
 
 This is one of the legitimate ways the wrapper can transition to `pending-dev` even though the agent never ran. The dispatcher's Step 4a retry counter does NOT count this as a dev-failure — only `Agent Session Report (Dev)` comments and the dispatcher's own crash regex feed the counter.
 
+## Mergeability preflight (INV-147)
+
+After PR resolution and linkage verification, the wrapper captures the
+provider-normalized PR state, full HEAD, and branch, polls `chp_mergeable`
+using the existing bounded `MERGEABLE_RETRIES` semantics, then re-reads the
+same snapshot fields. This preflight completes before preview extraction and
+before either INV-46 E2E lane can start.
+
+| Stable decision | Action |
+|---|---|
+| `MERGEABLE` | Emit no disposition and continue through INV-46 and fan-out. |
+| `CONFLICTING` | Skip E2E/fan-out and invoke the canonical conflict route below. |
+| Persistent `UNKNOWN` or empty | Persist `result=mergeable-unknown` plus `failed-non-substantive cause=mergeable-unknown`, then route through `pending-dev` for the existing bounded review-aware retry. No `Auto-merge failed:` marker is emitted. |
+| PR no longer OPEN | Reuse INV-54 remove-only cleanup. Do not emit a disposition, conflict marker, or `pending-dev`. |
+| HEAD changed | Emit no stale-HEAD disposition; route non-substantively to `pending-review` with `cause=head-changed`. |
+| Either snapshot unreadable | The HEAD cannot be pinned safely. Emit no disposition and retry non-substantively through `pending-review`. |
+
+The pre-fan-out machine evidence is an exact whole-comment marker:
+
+```text
+<!-- review-disposition: issue=<N> head=<full-lowercase-head> phase=pre-fanout result=<conflict-rebase|mergeable-unknown> -->
+```
+
+`lib-review-disposition.sh` owns rendering and parsing. It requires a strict
+self-authored normalized comment, the active issue number, a 40-hex provider
+HEAD, the literal phase, and one allow-listed result. Human lookalikes, quoted
+or malformed markers, abbreviated SHAs, wrong-issue markers, and trailing text
+are ignored. This does not redefine `Reviewed HEAD:`: that INV-04 trailer still
+means fan-out produced a verdict.
+
+The `CONFLICTING` action and post-fan-out INV-44 use the same
+`_review_route_conflict` helper. Both require the blocking issue finding naming
+`BASE_BRANCH`, an idempotent HEAD-bound PR comment beginning
+`Auto-merge failed:` and ending with the exact canonical marker, a
+`failed-substantive dev-actionable=true head=<full-head>` trailer,
+best-effort native request changes, and `reviewing -> pending-dev`. Preflight
+additionally writes `result=conflict-rebase`.
+
+The finding, disposition, PR marker, and verdict trailer are required writes.
+Post-fan-out also repairs a missing strict-self `Reviewed HEAD:` anchor before
+the verdict. Return codes are checked and `pending-dev` is unreachable until
+all required writes succeed. A partial-write retry deduplicates canonical
+existing markers and retries only the missing write; quoted PR-marker history
+does not suppress the canonical write. A required-write failure requeues to
+`pending-review` with `cause=preflight-write-failed`; a final transition failure
+leaves `RESULT_PARSED` unset so cleanup can retry the intended `pending-dev`
+movement. Because the required HEAD-bound verdict is already durable at that
+point, cleanup suppresses its generic crash verdict and retries only the state
+transition.
+
+Disposition and Reviewed-HEAD anchors are write-once per tuple. A force-push
+sequence A -> B -> A reuses the existing A anchor through current-head
+filtering. The required verdict remains cycle-fresh: it must occur after the
+newest routing evidence of any head and after any same-head INV-85
+`no-progress-substantive-attempt:<head>` marker, and its `head=` token must
+equal the affected full HEAD. This avoids duplicate semantic markers and
+prevents an identical verdict for an intervening HEAD from satisfying the
+freshness check, while the completed-session classifier still observes the
+ordinary verdict class and applies the one-dev-attempt bound. Candidate and
+freshness indices come from one malformed-row-filtered strict-self timeline,
+and the authenticated trailer grammar permits each optional key only once.
+
+The post-fan-out INV-44 gate remains mandatory. It closes the race where the
+base branch changes after a clean preflight while E2E or fan-out is running.
+After polling, `review_validate_pinned_pr` re-reads state, full HEAD, and branch
+against `PR_HEAD_SHA`; a closed PR takes INV-54 cleanup, while a changed HEAD
+or provider-read failure requeues `pending-review` without stale conflict
+evidence.
+
 ## E2E mode dispatch (issue #161)
 
 The review wrapper supports three E2E modes via `E2E_MODE` in `autonomous.conf`:
@@ -172,7 +260,16 @@ For the project-side contract (`E2E_COMMAND` semantics, evidence-block format, p
 
 ## Sequential E2E lane (INV-46)
 
-When `E2E_MODE` is active (`browser` or `command`), the wrapper runs the project E2E **exactly once per review round** in a dedicated lane that completes **before** the review fan-out, then gates on the result. This replaces the pre-#182 design where the E2E execution block was injected into every review agent's prompt — so `AGENT_REVIEW_AGENTS` with N CLIs ran the full E2E N times (N× `E2E_COMMAND_PRE_HOOKS` container builds, N× verify, N× evidence, racing on shared stage state). See [INV-46](invariants.md#inv-46-e2e-runs-once-in-a-dedicated-lane-before-the-review-fan-out--gated-not-per-agent).
+When `E2E_MODE` is active (`browser` or `command`), a stable-MERGEABLE
+[INV-147](invariants.md#inv-147-a-head-pinned-mergeability-preflight-routes-known-conflicts-before-e2e-and-produces-strict-durable-disposition-evidence)
+preflight first permits the wrapper to run the project E2E **exactly once per
+review round** in a dedicated lane that completes **before** the review fan-out,
+then gates on the result. This replaces the pre-#182 design where the E2E
+execution block was injected into every review agent's prompt — so
+`AGENT_REVIEW_AGENTS` with N CLIs ran the full E2E N times (N×
+`E2E_COMMAND_PRE_HOOKS` container builds, N× verify, N× evidence, racing on
+shared stage state). See
+[INV-46](invariants.md#inv-46-e2e-runs-once-in-a-dedicated-lane-before-the-review-fan-out--gated-not-per-agent).
 
 ```
 E2E_ACTIVE == true:
@@ -224,7 +321,7 @@ E2E_ACTIVE == false → no lane, no gate (E2E_GATE=inactive); straight to fan-ou
 - **Same-HEAD circuit breaker on repeated `gate == fail` ([INV-122](invariants.md#inv-122-a-same-head-repeated-e2e-gate-failure-an-inv-46-fail-verdict-against-an-unchanged-head_sha-e2e_lane_rc-fingerprint-gate_fail_stall_threshold-consecutive-rounds-is-detected-and-halted--the-breaker-transitions-reviewing--stalled-then-posts-one-structured-reasonsame-head-gate-failure-report-gated-on-an-already-stalled-skip-deliberately-not-the-dispatcher-side-may_stall_now-live-pid-pre-gate--see-rationale-below), #453).** Runs INSIDE the `gate == fail` branch, BEFORE the existing `pending-dev` routing. A REPEATED `fail` against an UNCHANGED `(head_sha, e2e_lane_rc)` fingerprint (≥`GATE_FAIL_STALL_THRESHOLD`, default 2) transitions `reviewing → stalled` instead of re-queuing — the fixed-point-repetition sibling of [INV-105]'s divergent-findings convergence breaker, for the case where the E2E gate itself never lets a review agent run at all. State is a `dispatcher-gate-fail-breaker` HTML-comment marker (unbounded full-history scan); the fingerprint resets on either a new commit OR a different `rc` on the same head, so an unrelated transient failure followed by a genuinely new bug never misclassifies as a stuck loop. **Deliberately does NOT call `may_stall_now`** (codex review round 2 [P1]): that shared INV-105 predicate's dispatch-marker-freshness check exists for the DISPATCHER to ask whether some EXTERNAL process might still be alive for this issue before mutating labels from outside; this breaker instead runs synchronously inside the very review wrapper the dispatcher just launched, so it would always see its own fresh `review`-mode dispatch marker and defer for the marker's full TTL (default 600s) — silently defeating the breaker for any E2E failure completing within that window, the common case. The `reviewing`-label single-writer invariant already provides the liveness guarantee `may_stall_now` exists to add. **Mention-target (issue #495):** the trip report calls `resolve_escalation_mention "$ISSUE_NUMBER" "$PR_NUMBER"` ([INV-138] — issue author first, PR author second, three-state operator fallback), not a bare `@${REPO_OWNER}` — per [dispatcher-flow.md's escalation-comment mention-target policy](dispatcher-flow.md#escalation-comment-mention-target-policy-issue-495).
 - **Review agents are PURE code reviewers.** `build_review_prompt` no longer contains any E2E execution block; the prompt tells each agent to READ the wrapper-posted evidence comment as input and cross-check it against the acceptance criteria. They do not run E2E.
 - **Structured AC-coverage double-check ([INV-49](invariants.md#inv-49-command-mode-e2e-may-feed-the-review-fan-out-a-structured-ac-coverage-artifact--optional-fail-safe), #183).** Command-mode only: when the evidence parser emits the optional `ac-coverage:begin … ac-coverage:end` JSON fence, the lane jq-validates it (fail-safe — malformed → empty, fall back to free-form; never fail-open) and writes it to `E2E_AC_COVERAGE_FILE`. When that per-round sidecar is non-empty, `build_review_prompt` PREFERS the deterministic map over LLM-parsing the free-form markdown table; an empty/absent sidecar yields the exact post-#182 free-form double-check. The artifact is a review aid only — the E2E hard gate is unchanged.
-- **Composition**: `final PASS ≡ (E2E_ACTIVE==false OR gate==pass) AND review-unanimity-pass`. Because a gate fail/block exits before the fan-out, only `gate ∈ {pass, inactive}` ever reaches the review aggregation — the AND is enforced by the short-circuit. The E2E gate runs before the [INV-44](invariants.md#inv-44-mergeable-hard-gate--a-conflicting-pr-can-never-reach-approved) mergeable block.
+- **Composition**: `final PASS ≡ preflight-proceed AND (E2E_ACTIVE==false OR gate==pass) AND review-unanimity-pass AND post-fan-out-INV-44-proceed`. A known preflight conflict/UNKNOWN exits before E2E, and an E2E gate fail/block exits before fan-out. Only a stable-MERGEABLE preflight and `gate ∈ {pass, inactive}` reach review aggregation; the retained [INV-44](invariants.md#inv-44-mergeable-hard-gate--a-conflicting-pr-can-never-reach-approved) poll then catches mergeability changes introduced during E2E/fan-out.
 - **PR-open guard on the block exits ([INV-54](invariants.md#inv-54-the-pr-still-open-guard-gates-all-pass-chain-exits-not-just-pass) extension, #195).** A `fail`/`block-nonsubstantive` gate re-checks `gh pr view --json state` (via the reused `_pr_open_gate` helper) before writing `−reviewing +pending-dev`; if the PR was merged/closed WHILE the lane ran, it removes `reviewing` only and exits — never re-queues a merged PR's issue to `pending-dev`. The check is wedged after `_classify_e2e_gate` and before the block cascade, so the `pass`/`inactive` fall-through is unaffected. See [§ PR-open guard (INV-54)](#pr-open-guard-inv-54).
 - **Lane registry tagging ([Lane-GC PR-2](dev-agent-flow.md#lane-registry-mint-lane-gc-pr-2-lib-lanesh-inv-109inv-110), [INV-110](invariants.md#inv-110-adt_lane_id-is-exported-before-any-child-spawn-and-every-_run_with_timeout-spawn-appends-its-pgid-to-the-durable-registry)):** the command-mode lane's `_run_command_e2e_verify` records its own PGID into `${ADT_LANE_DIR}/pgids` directly (it bypasses `_run_with_timeout`, being a pure shell subshell). The browser-mode lane exports `ADT_LANE_ROLE=e2e:browser` before its `run_agent` call (PGID recorded via the shared `_run_with_timeout` chokepoint) and redirects `TMPDIR` to `${ADT_LANE_DIR}/tmp` before launch — Chrome's `--user-data-dir` (which defaults under `$TMPDIR`) then carries a lane-unique path, recorded as `CHROME_PROFILE_HINT` in the lane file, since Chrome mains clobber their own environ post-launch and cannot otherwise be env-tag-matched.
 
@@ -828,19 +925,24 @@ Reviewed HEAD: `<sha>` (issue #N, session `<id>`)
 
 The trailing parenthesised metadata also carries `agent` / `model` for forensic attribution. Per [INV-58](invariants.md#inv-58-agy-quotaauth-unavailable-drops-surface-a-distinct-reason-fan-out--reviewed-head-model-labels-are-per-agent) these render the **representative** (first) fan-out agent's name (`_REVIEW_HEAD_AGENT`) and its **per-agent RESOLVED** model (`_REVIEW_HEAD_MODEL` via `_resolve_review_agent_model_label`), not the shared `${AGENT_CMD}` / `${AGENT_REVIEW_MODEL}` defaults — so for a per-agent-overridden fleet the trailer attributes the model the agent actually reviewed with. **agy honesty (#220):** when the representative agent is `agy` and its resolved id is dropped by [INV-50](invariants.md#inv-50-agy---model-is-validated-against-agy-models-before-forwarding) (agy runs its `settings.json` default), `_REVIEW_HEAD_MODEL` renders `agy default (settings.json)` (or generic `agy default`), not the dropped id — the same honest label the INV-60 verdict comment and the INV-58 fan-out line use, via the shared `_resolve_review_agent_model_label`. `SESSION_ID` is already the first agent's session, so session/agent/model now describe ONE agent consistently. The dispatcher parser anchors only on the leading `Reviewed HEAD: \`<sha>\``, so this metadata change is purely human-attribution.
 
-The dispatcher's Step 5b reads the most recent trailer matching `Reviewed HEAD: \`<sha>\`` and compares it to the current `PR.headRefOid`. If they match, the dispatcher sends the issue back to `pending-dev` ("no new commits since last review") instead of bouncing it through review again — see [`dispatcher-flow.md` § Step 5b in-progress](dispatcher-flow.md#dead--in-progress) and [#53](https://github.com/zxkane/autonomous-dev-team/issues/53).
+The dispatcher's Step 5b continues to read the most recent trailer matching `Reviewed HEAD: \`<sha>\`` and compares it to the current `PR.headRefOid`. If they match, the dispatcher sends the issue back to `pending-dev` ("no new commits since last review") instead of bouncing it through review again — see [`dispatcher-flow.md` § Step 5b in-progress](dispatcher-flow.md#dead--in-progress) and [#53](https://github.com/zxkane/autonomous-dev-team/issues/53). INV-147 adds a separate routing-evidence consumer for Step 4 without changing `last_reviewed_head` or any existing INV-04 consumer.
 
 If the trailer post fails (token expiry, 403, rate limit), the wrapper logs `WARNING: Failed to post Reviewed HEAD trailer` and continues — the failed trailer means the dispatcher cannot detect SHA-match, but the empty-trailer fallthrough routes to `pending-review` ([INV-07](invariants.md#inv-07-empty-reviewed-head-trailer-routes-to-pending-review)) which is the safe default.
 
 ## PR-open guard (INV-54)
 
-The PR-still-open check ([INV-54](invariants.md#inv-54-the-pr-still-open-guard-gates-all-pass-chain-exits-not-just-pass)) runs before any wrapper-level block gate writes a `reviewing → pending-dev` transition, and skips the `pending-dev` add when the PR is no longer OPEN. It is applied at **two** points, each delegating to the same `lib-review-mergeable.sh::_pr_open_gate` helper.
+The PR-still-open check ([INV-54](invariants.md#inv-54-the-pr-still-open-guard-gates-all-pass-chain-exits-not-just-pass)) runs before any wrapper-level block gate writes a `reviewing → pending-dev` transition, and skips the `pending-dev` add when the PR is no longer OPEN. It is applied at **four** checkpoints, each delegating to the same `lib-review-mergeable.sh::_pr_open_gate` helper: the INV-147 preflight snapshots, the INV-46 E2E block exits, the PASS-chain top, and the post-fan-out mergeability validation.
+
+**(preflight) Before INV-46** — both provider-normalized snapshots must be
+OPEN before a HEAD-bound decision can be taken. A closed/merged snapshot
+selects INV-54 remove-only cleanup immediately, with no disposition or
+`pending-dev` route.
 
 **(a) Top of the `PASSED_VERDICT == true` chain** — before the mergeable gate, before any block-branch label flip. The check used to live only in the PASS path (step 1 below), AFTER the mergeable gate, so a PR merged out-of-band (manual merge, or the #191 agent self-merge) that then took an INV-44 block branch flipped its already-closed issue to `pending-dev`. Hoisting it makes all three PASS-chain exits (block-substantive, block-nonsubstantive, PASS) honor it with one query.
 
 ```
 if PASSED_VERDICT == true:
-  PR_STATE = gh pr view --json state  (failed query → "UNKNOWN" sentinel)
+  PR_STATE = chp_pr_view <pr> state  (failed query → "UNKNOWN" sentinel)
   if _pr_open_gate "$PR_STATE" == "skip":     # lib-review-mergeable.sh
       # PR no longer OPEN — merged/closed out-of-band, or state in doubt
       −reviewing  (NO +pending-dev) ; exit 0
@@ -853,20 +955,22 @@ if PASSED_VERDICT == true:
 if E2E_ACTIVE:
   E2E_GATE = _classify_e2e_gate "$rc" "$evidence_present"     # lib-review-e2e.sh
   if E2E_GATE in {fail, block-nonsubstantive}:
-    E2E_PR_STATE = gh pr view --json state  (failed query → "UNKNOWN" sentinel)
+    E2E_PR_STATE = chp_pr_view <pr> state  (failed query → "UNKNOWN" sentinel)
     if _pr_open_gate "$E2E_PR_STATE" == "skip":   # lib-review-mergeable.sh (reused)
         # PR merged/closed while the E2E lane ran, or state in doubt
         −reviewing  (NO +pending-dev) ; exit 0
   # else (pass/inactive) → fall through to the review fan-out (UNCHANGED)
 ```
 
-- The ONLY value that proceeds is a case-insensitive `OPEN` — the exact inverse of the old PASS-branch `!= OPEN` test. `MERGED`/`CLOSED`/`UNKNOWN`/empty/any other token → `skip` → clean `−reviewing` exit, never `+pending-dev`. Fail-closed toward "do not re-queue dev on a merged PR".
-- DRY: check (a) **replaces** the old PASS-branch duplicate (step 1 below is now a no-op — by the time the PASS path runs, the PR is guaranteed open); check (b) guards both E2E block exits with a single pre-cascade query. The wrapper holds **exactly two** `gh pr view --json state` calls — one per gate — and neither gate's block branches re-query.
+**(c) After the post-fan-out mergeability poll** — `review_validate_pinned_pr` re-reads provider-normalized state and full HEAD before INV-44 can emit a conflict route. A closed/merged PR takes the same INV-54 remove-only cleanup; a changed or unreadable HEAD requeues non-substantively without stale conflict evidence.
+
+- The ONLY recognized state that proceeds is a case-insensitive `OPEN`. `MERGED`/`CLOSED` selects clean `−reviewing` exit, never `+pending-dev`. The preflight and post-fan-out snapshot helpers distinguish read/shape failures from confirmed closure and route those failures to `pending-review`.
+- DRY: every checkpoint uses `_pr_open_gate`; the preflight and post-fan-out phases additionally share `_review_pr_snapshot` / `review_validate_pinned_pr` so state and full-HEAD decisions stay pinned. The PASS-chain and E2E block checks retain their single provider reads.
 - The E2E check (b) runs only on the block paths (`fail`/`block-nonsubstantive`); the gate's `pass`/`inactive` outcomes fall through to the fan-out before the check is reached, so the happy path costs no extra `gh` call.
 
 ## Mergeable hard gate (INV-44)
 
-After the PR-open guard ([INV-54](invariants.md#inv-54-the-pr-still-open-guard-gates-all-pass-chain-exits-not-just-pass)) confirms the PR is OPEN, and **before** the wrapper acts on the PASS, a wrapper-enforced gate re-checks the PR's `mergeable` status — so a CONFLICTING PR can never reach `approved`, regardless of whether the review agent ran its Step-0 pre-review rebase prompt ([INV-44](invariants.md#inv-44-mergeable-hard-gate--a-conflicting-pr-can-never-reach-approved)). This is the mechanical counterpart to the agent's best-effort Step 0; the prompt step still rebases clean conflicts up-front, the gate is the safety net for when it is skipped.
+After the PR-open guard ([INV-54](invariants.md#inv-54-the-pr-still-open-guard-gates-all-pass-chain-exits-not-just-pass)) confirms the PR is OPEN, and **before** the wrapper acts on the PASS, the retained wrapper-enforced gate re-checks the PR's `mergeable` status — so a CONFLICTING PR can never reach `approved`, including when the base branch changed after the pre-fan-out INV-147 decision ([INV-44](invariants.md#inv-44-mergeable-hard-gate--a-conflicting-pr-can-never-reach-approved)). This post-fan-out poll is the race-closing authority; the earlier preflight prevents known conflicts from spending E2E/fan-out resources.
 
 **This is a merge-conflict gate, not a CI-status gate.** `mergeable` reflects structural mergeability with the base branch — it says nothing about whether the PR's CI checks are green. The CI-status counterpart is the sibling [CI-rollup hard gate (INV-134)](#ci-rollup-hard-gate-inv-134), which runs immediately after this gate proceeds.
 
@@ -878,11 +982,13 @@ if PASSED_VERDICT == true:
   gate = _classify_mergeable_gate "$MERGEABLE_STATUS"   # lib-review-mergeable.sh
     MERGEABLE   → proceed → fall through to the PASS path below (UNCHANGED)
     CONFLICTING → block-substantive:
-        issue comment "Review findings: ... [BLOCKING] Merge conflict with ${BASE_BRANCH} ... rebase steps"
-        PR    comment "Auto-merge failed: PR is CONFLICTING ... Re-dispatching dev agent to rebase onto ${BASE_BRANCH}."
-        emit_verdict_trailer failed-substantive
-        submit_request_changes <PR> "<merge-conflict body>"  # INV-52, best-effort (CONFLICTING is substantive)
-        −reviewing +pending-dev ; exit 0
+        _review_route_conflict ... post-fanout
+          ensure strict-self "Reviewed HEAD: <sha>" routing anchor
+          required issue comment "Review findings: ... [BLOCKING] Merge conflict with ${BASE_BRANCH} ... rebase steps"
+          PR comment "Auto-merge failed: ..." bound to the affected HEAD
+          emit_verdict_trailer failed-substantive dev-actionable=true
+          submit_request_changes <PR> "<merge-conflict body>"  # INV-52, best-effort
+          −reviewing +pending-dev ; exit 0
     UNKNOWN/empty/other → block-nonsubstantive:
         issue comment "Review held: mergeable is UNKNOWN ... will be re-reviewed next tick"
         emit_verdict_trailer failed-non-substantive cause=mergeable-unknown
@@ -890,7 +996,7 @@ if PASSED_VERDICT == true:
 ```
 
 - The ONLY value that proceeds is a case-insensitive `MERGEABLE`. An empty string (failed `gh` call), a literal `UNKNOWN` that survived the retry budget, or any unexpected token all **block** — fail-closed. This closes the stale-`UNKNOWN` pass-through (the prior prompt-side "after 3 retries treat as MERGEABLE" shortcut).
-- **CONFLICTING** reuses the `Auto-merge failed:` PR marker so the dev-resume branch ([§ Auto-merge failure → dev re-dispatch](#auto-merge-failure--dev-re-dispatch-inv-33)) prepends its mandatory rebase pre-step — giving the conflict a deterministic owner. It is a substantive blocking finding, so the wrapper also submits `--request-changes` ([INV-52](invariants.md#inv-52-the-review-wrapper-owns-the-github-native-pr-reviewmerge-action-the-agent-posts-verdicts-only); `reviewDecision=CHANGES_REQUESTED`).
+- **CONFLICTING** uses the same canonical route as INV-147 preflight, including the HEAD-bound `Auto-merge failed:` PR marker that makes the dev-resume branch ([§ Auto-merge failure → dev re-dispatch](#auto-merge-failure--dev-re-dispatch-inv-33)) prepend its mandatory rebase pre-step. It is a substantive blocking finding, so the wrapper also submits `--request-changes` best-effort ([INV-52](invariants.md#inv-52-the-review-wrapper-owns-the-github-native-pr-reviewmerge-action-the-agent-posts-verdicts-only); `reviewDecision=CHANGES_REQUESTED`). The post-fan-out path intentionally omits the pre-fan-out disposition marker because INV-04 fan-out evidence already exists.
 - **UNKNOWN** posts no PR marker (no confirmed conflict ⇒ no forced rebase) and does NOT submit `--request-changes` ([INV-52](invariants.md#inv-52-the-review-wrapper-owns-the-github-native-pr-reviewmerge-action-the-agent-posts-verdicts-only): a transient re-queue is not a dev-actionable blocking finding); the `failed-non-substantive` trailer makes the dispatcher flip the issue back to `pending-review` (re-review) under the `REVIEW_RETRY_LIMIT` cap ([INV-35](invariants.md#inv-35-review-aware-resume-routing-for-completed-sessions)).
 - Happy path (`MERGEABLE`) is byte-for-byte today's behavior plus one `gh pr view --json mergeable` call.
 
@@ -1030,6 +1136,7 @@ unavailability and leaves approval routing unchanged.
        (issue auto-closes via GitHub's `Closes #N` resolution — wrapper does NOT call `gh issue close`, INV-33)
      else (auto-merge failed — INV-33):
        PR comment "Auto-merge failed: <stderr-excerpt>. Re-dispatching dev agent to rebase onto ${BASE_BRANCH}."
+         + "<!-- auto-merge-failure: issue=<N> head=<full-reviewed-head> -->"
        −reviewing +pending-dev (autonomous retained)
        (next dispatcher tick re-dispatches dev; dev resume detects the marker and rebases first)
 ```
@@ -1053,11 +1160,24 @@ this pipeline now follows.
 When `gh pr merge` returns non-zero, the wrapper:
 
 1. Captures `MERGE_OUT` (combined stdout+stderr, truncated to 500 chars for the comment).
-2. Posts a comment on the **PR** (not the issue) with prefix `Auto-merge failed:` followed by the captured excerpt and the directive `Re-dispatching dev agent to rebase onto ${BASE_BRANCH}.` (`BASE_BRANCH` is the wrapper's resolved base branch, default `main`, [INV-131](invariants.md#inv-131-the-pipelines-base-branch-is-a-resolved-exported-validated-conf-value--never-a-hardcoded-main-literal-in-a-prompt-hook-or-provider-argv)).
-3. Does NOT call `gh issue close`. Does NOT add `+approved`. Does NOT remove `autonomous` (the dispatcher's `list_pending_dev` selector gates on `autonomous`).
-4. Edits the issue: `−reviewing +pending-dev`.
+2. Posts a comment on the **PR** (not the issue) with prefix `Auto-merge failed:` followed by the captured excerpt, the directive `Re-dispatching dev agent to rebase onto ${BASE_BRANCH}.`, and `<!-- auto-merge-failure: issue=<N> head=<full-reviewed-head> -->`. The shared renderer normalizes and validates the full `PR_HEAD_SHA`; this generic INV-33 marker is deliberately distinct from INV-147's confirmed-conflict marker. `BASE_BRANCH` is the wrapper's resolved base branch, default `main` ([INV-131](invariants.md#inv-131-the-pipelines-base-branch-is-a-resolved-exported-validated-conf-value--never-a-hardcoded-main-literal-in-a-prompt-hook-or-provider-argv)).
+3. If that required marker write fails, requeues `reviewing -> pending-review`
+   non-substantively; it never dispatches dev without the rebase context.
+4. Does NOT call `gh issue close`. Does NOT add `+approved`. Does NOT remove `autonomous` (the dispatcher's `list_pending_dev` selector gates on `autonomous`).
+5. Edits the issue: `−reviewing +pending-dev`.
 
-The dev wrapper's resume branch detects the marker by querying PR-issue comments for one whose body starts with `Auto-merge failed:`, and prepends a `## Pre-implementation: rebase` section to the resume prompt instructing `git fetch origin && git rebase origin/${BASE_BRANCH} && git push --force-with-lease`. Once the rebase succeeds, the dev wrapper trap transitions back to `+pending-review`, the next dispatcher tick re-dispatches review, and the merge succeeds — at which point GitHub closes the issue via the PR's `Closes #N` keyword.
+Every dev mode queries the complete normalized PR comments and accepts a body
+beginning `Auto-merge failed:` only when its exact final line is either this
+generic marker or INV-147's confirmed-conflict marker for the current issue and
+full HEAD. A marker-free legacy INV-33 comment remains accepted only when no
+case-insensitive marker lookalike appears in the body. Stale, malformed,
+terminal-newline, wrong-issue, and quoted canonical markers are ignored. A match
+prepends a `## Pre-implementation: rebase` section instructing
+`git fetch origin && git rebase origin/${BASE_BRANCH} && git push
+--force-with-lease`. Once the rebase succeeds, the dev wrapper trap transitions
+back to `+pending-review`, the next dispatcher tick re-dispatches review, and
+the merge succeeds, at which point GitHub closes the issue via the PR's
+`Closes #N` keyword.
 
 If the rebase has unresolvable conflicts, the dev agent posts a `needs human` comment and exits cleanly. The dispatcher's MAX_RETRIES gate eventually transitions the issue to `stalled` if the loop fails to converge.
 

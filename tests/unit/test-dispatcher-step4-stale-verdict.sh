@@ -47,13 +47,13 @@ export MAX_CONCURRENT=5
 # ---------------------------------------------------------------------------
 # Mocks — overridden per test case.
 #
-# We intercept gh/fetch_pr_for_issue/last_reviewed_head/label_swap and
+# We intercept gh/fetch_pr_for_issue/_latest_review_routing_head/label_swap and
 # track which side effects fire so each assertion can verify exactly the
 # expected behavior (notice posted exactly once / label swapped / both /
 # neither).
 # ---------------------------------------------------------------------------
 _MOCK_PR_INFO=""           # JSON returned by fetch_pr_for_issue, or "" for no PR
-_MOCK_LAST_REVIEWED=""     # last_reviewed_head return value
+_MOCK_LAST_REVIEWED=""     # _latest_review_routing_head return value
 _MOCK_NOTICE_PRESENT="0"   # "0" (no prior notice) or "1" (already present)
 _MOCK_LAST_COMMENT_BODY="" # last gh issue comment --body argument
 _MOCK_COMMENT_COUNT=0      # how many gh issue comment calls fired
@@ -63,7 +63,7 @@ fetch_pr_for_issue() {
   printf '%s' "$_MOCK_PR_INFO"
 }
 
-last_reviewed_head() {
+_latest_review_routing_head() {
   printf '%s' "$_MOCK_LAST_REVIEWED"
 }
 
@@ -126,12 +126,12 @@ source "$LIB"
 set +e
 
 # Re-define mocks AFTER sourcing the lib so they shadow lib's real
-# implementations of fetch_pr_for_issue/last_reviewed_head/label_swap.
+# implementations of fetch_pr_for_issue/_latest_review_routing_head/label_swap.
 fetch_pr_for_issue() {
   printf '%s' "$_MOCK_PR_INFO"
 }
 
-last_reviewed_head() {
+_latest_review_routing_head() {
   printf '%s' "$_MOCK_LAST_REVIEWED"
 }
 

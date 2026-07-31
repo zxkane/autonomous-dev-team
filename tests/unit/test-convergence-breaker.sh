@@ -120,6 +120,7 @@ fetch_pr_for_issue() {
   printf '{"number":%s,"headRefOid":"%s"}\n' "$_MOCK_PR_NUMBER" "$_MOCK_PR_HEAD"
 }
 last_reviewed_head() { printf '%s' "$_MOCK_LAST_REVIEWED_HEAD"; }
+_latest_review_routing_head() { printf '%s' "$_MOCK_LAST_REVIEWED_HEAD"; }
 dev_report_bot_unfixable() { return "$_MOCK_BOT_UNFIXABLE"; }
 recent_review_verdict_body() { printf '%s' "$_MOCK_VERDICT_BODY"; }
 
@@ -1077,10 +1078,6 @@ _rrvb_result5=$(recent_review_verdict_body "42" "$_RRVB_SESSION_END")
 assert_eq "RRVB-007: BOT_LOGIN empty — a human comment merely MENTIONING the prefix mid-sentence is rejected (empty)" \
   "" "$_rrvb_result5"
 BOT_LOGIN="$_saved_bot_login"
-
-# Restore the routing-side mock for any test that might run after this section
-# (source-order safety; this section is currently last).
-recent_review_verdict_body() { printf '%s' "$_MOCK_VERDICT_BODY"; }
 
 # ===========================================================================
 echo ""

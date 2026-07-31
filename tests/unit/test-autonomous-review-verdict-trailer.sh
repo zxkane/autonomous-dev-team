@@ -227,6 +227,38 @@ assert_contains "non-false dev-actionable value → bare trailer (treated true)"
 
 # ---------------------------------------------------------------------------
 echo ""
+echo "=== INV-147: required verdicts bind one full normalized HEAD ==="
+# ---------------------------------------------------------------------------
+
+FULL_HEAD="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+reset
+emit_verdict_trailer_required \
+  540 "zxkane/autonomous-dev-team" "failed-substantive" "" "true" "$FULL_HEAD"
+assert_eq "required substantive verdict preserves provider write success" "0" "$?"
+assert_eq "required substantive verdict is HEAD-bound" \
+  "<!-- review-verdict: failed-substantive head=${FULL_HEAD} -->" \
+  "$_MOCK_LAST_COMMENT_BODY"
+
+reset
+emit_verdict_trailer_required \
+  540 "zxkane/autonomous-dev-team" "failed-non-substantive" \
+  "mergeable-unknown" "true" "$FULL_HEAD"
+assert_eq "required non-substantive verdict keeps cause before HEAD" \
+  "<!-- review-verdict: failed-non-substantive cause=mergeable-unknown head=${FULL_HEAD} -->" \
+  "$_MOCK_LAST_COMMENT_BODY"
+
+for invalid_head in "" "aaaaaaa" "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"; do
+  reset
+  emit_verdict_trailer_required \
+    540 "zxkane/autonomous-dev-team" "failed-substantive" "" "true" \
+    "$invalid_head"
+  assert_eq "required verdict rejects non-normalized HEAD '${invalid_head:-empty}'" \
+    "1|0" "$?|$_MOCK_COMMENT_COUNT"
+done
+
+# ---------------------------------------------------------------------------
+echo ""
 echo "=== Summary ==="
 echo "  PASS: $PASS"
 echo "  FAIL: $FAIL"

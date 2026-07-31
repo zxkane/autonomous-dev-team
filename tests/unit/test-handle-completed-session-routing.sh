@@ -214,6 +214,9 @@ fetch_pr_for_issue() {
 last_reviewed_head() {
   printf '%s' "$_MOCK_LAST_REVIEWED_HEAD"
 }
+_latest_review_routing_head() {
+  printf '%s' "$_MOCK_LAST_REVIEWED_HEAD"
+}
 dev_report_bot_unfixable() {
   return "$_MOCK_BOT_UNFIXABLE"
 }
@@ -1144,6 +1147,7 @@ _d4_sete_probe() {
     log() { :; }
     fetch_pr_for_issue() { printf "%s" "{\"number\":777,\"headRefOid\":\"cafef00d\"}"; }
     last_reviewed_head() { printf "%s" "cafef00d"; }
+    _latest_review_routing_head() { printf "%s" "cafef00d"; }
     dev_report_bot_unfixable() { return 1; }
     classify_recent_review_verdict() {
       local _v="$3" _c="$4" _da="${5:-}"

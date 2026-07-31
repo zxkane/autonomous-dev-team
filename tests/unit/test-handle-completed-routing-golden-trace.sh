@@ -8,9 +8,9 @@
 # itp_post_comment (every comment incl. the INV-85 no-progress attempt marker),
 # itp_transition_state (the label move, via label_swap), and chp_find_pr_for_issue
 # (via the fetch_pr_for_issue same-named delegate shim) — interleaved with NON-host
-# ops that stay caller-side (classify_recent_review_verdict, last_reviewed_head,
-# dev_report_bot_unfixable, count_review_aware_flips, the `: > log` truncate,
-# post_dispatch_token, dispatch dev-new).
+# ops that stay caller-side (classify_recent_review_verdict,
+# last_reviewed_head, dev_report_bot_unfixable, count_review_aware_flips,
+# the `: > log` truncate, post_dispatch_token, dispatch dev-new).
 #
 # This is the golden-trace gate #283 deferred (provider-spec.md §7.2). It stubs the
 # VERB LAYER (not the `gh` binary) and asserts byte-identical verb argv on each
@@ -249,25 +249,27 @@ echo
 echo "=== TC-HCGT-006..008: failed-substantive Branches A/B/C ==="
 
 # TC-HCGT-006 — Branch A bot-unfixable (head==last, dev_report_bot_unfixable true).
-_reset_mocks; _MOCK_VERDICT="failed-substantive"; _MOCK_CURRENT_HEAD="head9"; _MOCK_LAST_HEAD="head9"; _MOCK_BOT_UNFIXABLE=0
+_reset_mocks; _MOCK_VERDICT="failed-substantive"; _MOCK_CURRENT_HEAD="9999999"; _MOCK_LAST_HEAD="9999999"; _MOCK_BOT_UNFIXABLE=0
 handle_completed_session_routing 306 sidB "2026-06-28T00:00:00Z" >/dev/null 2>&1
 assert_eq     "TC-HCGT-006 Branch A verb order = fetch,chp_find,list,post,mark_stalled" \
               "fetch_pr_for_issue,chp_find_pr_for_issue,itp_list_comments,itp_post_comment,mark_stalled" "$(_trace_verbs | paste -sd, -)"
-assert_match  "TC-HCGT-006 Branch A notice carries no-progress-substantive:<head>" "no-progress-substantive:head9" "$(_trace_nth itp_post_comment 1)"
+assert_match  "TC-HCGT-006 Branch A notice carries no-progress-substantive:<head>" "no-progress-substantive:9999999" "$(_trace_nth itp_post_comment 1)"
 
 # TC-HCGT-007 — Branch B no-progress (head==last, NOT bot-unfixable, attempt marker present).
-_reset_mocks; _MOCK_VERDICT="failed-substantive"; _MOCK_CURRENT_HEAD="head9"; _MOCK_LAST_HEAD="head9"; _MOCK_BOT_UNFIXABLE=1; _MOCK_ATTEMPT_PRESENT=1
+_reset_mocks; _MOCK_VERDICT="failed-substantive"; _MOCK_CURRENT_HEAD="9999999"; _MOCK_LAST_HEAD="9999999"; _MOCK_BOT_UNFIXABLE=1; _MOCK_ATTEMPT_PRESENT=1
 handle_completed_session_routing 307 sidB "2026-06-28T00:00:00Z" >/dev/null 2>&1
-# fetch (head), then list (attempt-marker presence), then list (notice dedup), then post, then mark_stalled.
+# fetch (head), list (attempt-marker presence), list (notice dedup), then post,
+# then mark_stalled.
 assert_eq     "TC-HCGT-007 Branch B verb order = fetch,chp_find,list,list,post,mark_stalled" \
               "fetch_pr_for_issue,chp_find_pr_for_issue,itp_list_comments,itp_list_comments,itp_post_comment,mark_stalled" "$(_trace_verbs | paste -sd, -)"
 assert_match  "TC-HCGT-007 Branch B notice mentions unchanged HEAD" "unchanged since the last review" "$(_trace_nth itp_post_comment 1)"
 
 # TC-HCGT-008 — Branch C fresh dev-new (head moved / no attempt marker).
-_reset_mocks; _MOCK_VERDICT="failed-substantive"; _MOCK_CURRENT_HEAD="headNEW"; _MOCK_LAST_HEAD="headOLD"; _MOCK_BOT_UNFIXABLE=1; _MOCK_SID="sidC"
+_reset_mocks; _MOCK_VERDICT="failed-substantive"; _MOCK_CURRENT_HEAD="bbbbbbb"; _MOCK_LAST_HEAD="aaaaaaa"; _MOCK_BOT_UNFIXABLE=1; _MOCK_SID="sidC"
 handle_completed_session_routing 308 sidC "2026-06-28T00:00:00Z" >/dev/null 2>&1
-# fetch, list (fresh-dev dedup), post (INV-35-fresh-dev), transition pending-dev→in-progress,
-# post_dispatch_token, dispatch, then list-free attempt-marker post.
+# fetch, list (fresh-dev dedup), post (INV-35-fresh-dev), transition
+# pending-dev→in-progress, post_dispatch_token, dispatch, then list-free
+# attempt-marker post.
 assert_eq     "TC-HCGT-008 Branch C verb order = fetch,chp_find,list,post,transition,post_dispatch_token,dispatch,post" \
               "fetch_pr_for_issue,chp_find_pr_for_issue,itp_list_comments,itp_post_comment,itp_transition_state,post_dispatch_token,dispatch,itp_post_comment" "$(_trace_verbs | paste -sd, -)"
 assert_eq     "TC-HCGT-008 Branch C transition argv = issue,pending-dev,in-progress" "itp_transition_state${US}308${US}pending-dev${US}in-progress" "$(_trace_nth itp_transition_state 1)"
@@ -298,7 +300,7 @@ echo "=== TC-HCGT-010..011: #148 + #274/INV-85 anchors ==="
 #       MUST still include `body` (#148 anchor). NO `-q` crosses the seam
 #       under the W1c1 abstract contract (the resolution jq runs caller-side
 #       over the normalized array).
-_reset_mocks; _MOCK_VERDICT="failed-substantive"; _MOCK_CURRENT_HEAD="headNEW"; _MOCK_LAST_HEAD="headOLD"; _MOCK_SID="sidC"
+_reset_mocks; _MOCK_VERDICT="failed-substantive"; _MOCK_CURRENT_HEAD="bbbbbbb"; _MOCK_LAST_HEAD="aaaaaaa"; _MOCK_SID="sidC"
 handle_completed_session_routing 310 sidC "2026-06-28T00:00:00Z" >/dev/null 2>&1
 assert_eq     "TC-HCGT-010a fetch_pr_for_issue (orchestrator's direct call) FIELDS = number,headRefOid,body (#274 source-pin)" \
               "fetch_pr_for_issue${US}310${US}number,headRefOid,body" "$(_trace_nth fetch_pr_for_issue 1)"
@@ -320,9 +322,9 @@ fi
 # TC-HCGT-011 — #274/INV-85 anchor: Branch C's attempt-marker post carries the
 # EXACT token no-progress-substantive-attempt:<head> via itp_post_comment.
 attempt_post=$(_trace_nth itp_post_comment 2)
-assert_match  "TC-HCGT-011 attempt marker token = no-progress-substantive-attempt:headNEW (#274/INV-85)" \
-              "no-progress-substantive-attempt:headNEW" "$attempt_post"
-assert_match  "TC-HCGT-011 attempt marker is an HTML comment" "<!-- no-progress-substantive-attempt:headNEW session=sidC -->" "$attempt_post"
+assert_match  "TC-HCGT-011 attempt marker token = no-progress-substantive-attempt:bbbbbbb (#274/INV-85)" \
+              "no-progress-substantive-attempt:bbbbbbb" "$attempt_post"
+assert_match  "TC-HCGT-011 attempt marker is an HTML comment" "<!-- no-progress-substantive-attempt:bbbbbbb session=sidC -->" "$attempt_post"
 
 # ===================================================================
 echo
@@ -357,7 +359,7 @@ assert_no_match "TC-HCGT-014 handle_completed body has NO itp_caps/chp_caps bran
 # edit_comment fallbacks live in the verb IMPLs). Our verb recorders override the
 # seam regardless of ISSUE_PROVIDER, so selecting the degraded provider must not
 # change the recorded sequence.
-_reset_mocks; _MOCK_VERDICT="failed-substantive"; _MOCK_CURRENT_HEAD="headNEW"; _MOCK_LAST_HEAD="headOLD"; _MOCK_SID="sidC"
+_reset_mocks; _MOCK_VERDICT="failed-substantive"; _MOCK_CURRENT_HEAD="bbbbbbb"; _MOCK_LAST_HEAD="aaaaaaa"; _MOCK_SID="sidC"
 ISSUE_PROVIDER=degraded CODE_HOST=degraded \
   handle_completed_session_routing 315 sidC "2026-06-28T00:00:00Z" >/dev/null 2>&1
 assert_eq     "TC-HCGT-015 degraded provider → IDENTICAL Branch C verb sequence" \

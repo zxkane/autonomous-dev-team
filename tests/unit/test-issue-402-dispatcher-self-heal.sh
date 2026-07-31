@@ -62,7 +62,7 @@ itp_list_comments()   { _rec itp_list_comments "$@"; printf '%s\n' '[{"body":"ba
 itp_post_comment()    { _rec itp_post_comment "$@"; }
 itp_transition_state(){ _rec itp_transition_state "$@"; }
 fetch_pr_for_issue()   { _rec fetch_pr_for_issue "$@"; printf '%s' '{"number":42,"headRefOid":"sha-A"}'; }
-last_reviewed_head()   { printf '%s' 'sha-A'; }
+_latest_review_routing_head() { printf '%s' 'sha-A'; }
 extract_dev_session_id() { printf '%s' ''; }
 is_session_completed() { return 1; }
 may_stall_now()         { return 0; }   # 0 = eligible (no live wrapper) — matches lib-dispatch.sh's contract

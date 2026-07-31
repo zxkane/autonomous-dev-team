@@ -108,9 +108,10 @@ itp_transition_state(){ _rec itp_transition_state "$@"; }
 # and the router (fields "number,headRefOid,body"). Echo an object carrying the
 # configured current head so both `.headRefOid` reads resolve.
 fetch_pr_for_issue()  { _rec fetch_pr_for_issue "$@"; printf '%s' "$_MOCK_PR_INFO"; }
-# last_reviewed_head: the helper AND the router both call this single mock, so
-# one knob (_MOCK_LAST_REVIEWED) drives both branch selections and they stay
-# aligned by construction.
+# The pending-dev helper uses strict routing evidence while the completed-session
+# router preserves INV-04's last_reviewed_head consumer. One knob keeps both
+# branch selections aligned.
+_latest_review_routing_head() { printf '%s' "$_MOCK_LAST_REVIEWED"; }
 last_reviewed_head()  { printf '%s' "$_MOCK_LAST_REVIEWED"; }
 extract_dev_session_id() { printf '%s' "$_MOCK_SESSION_ID"; }
 # is_session_completed <issue> [reason_var] [end_ts_var] — write the reason

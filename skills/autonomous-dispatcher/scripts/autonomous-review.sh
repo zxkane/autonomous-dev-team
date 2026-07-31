@@ -46,6 +46,10 @@ source "${LIB_DIR}/lib-provider-prompts.sh"
 source "${LIB_DIR}/lib-review-bots.sh"
 # shellcheck source=lib-review-verdict.sh
 source "${LIB_DIR}/lib-review-verdict.sh"
+# shellcheck source=lib-review-disposition.sh
+# INV-147: strict HEAD-bound pre-fan-out disposition evidence shared with the
+# dispatcher. lib-review-mergeable.sh consumes the renderer for required writes.
+source "${LIB_DIR}/lib-review-disposition.sh"
 # shellcheck source=lib-review-aggregate.sh
 # INV-40 (#166): unanimous-PASS aggregation over multiple verdict-reaching
 # agents. Inert for the single-agent default; only consumed when
@@ -69,8 +73,9 @@ source "${LIB_DIR}/lib-review-poll.sh"
 # aggregation and before acting on a PASS, the wrapper re-checks the PR's
 # `mergeable` status; a CONFLICTING (or persistently-UNKNOWN) PR can never reach
 # `approved`, regardless of whether the review agent ran its Step-0 pre-review
-# rebase prompt. _classify_mergeable_gate is the pure decision half (the
-# chp_mergeable verb call + UNKNOWN-retry loop stays in the wrapper). Inert on FAIL.
+# rebase prompt. The library owns the classifiers, bounded provider polling,
+# HEAD validation, and canonical conflict writes; this wrapper selects the
+# preflight and post-fan-out phases. The post-fan-out gate remains inert on FAIL.
 source "${LIB_DIR}/lib-review-mergeable.sh"
 # shellcheck source=lib-review-ci-rollup.sh
 # INV-134 (#489): reviewed-HEAD CI-rollup hard gate. Runs immediately after
@@ -926,6 +931,12 @@ _append_run_footer_to_file() {
 
 # Track whether normal result parsing completed (set at end of script)
 RESULT_PARSED=false
+# INV-147 can select a non-substantive pending-review cleanup target before an
+# explicit transition attempt. If that transition fails, cleanup retries the
+# same target instead of manufacturing an evidence-free pending-dev route.
+REVIEW_CRASH_RETRY_STATE="pending-dev"
+REVIEW_CRASH_RETRY_CAUSE=""
+REVIEW_CRASH_RETRY_EMIT_VERDICT="true"
 
 cleanup() {
   local exit_code=$?
@@ -1062,18 +1073,34 @@ cleanup() {
       fi
     fi
 
-    _teardown_call itp_post_comment "$ISSUE_NUMBER" \
-      "Review process crashed (exit code: ${exit_code}). Moving back to development for retry.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
-    # INV-35: emit verdict trailer so dispatcher Step 4b.5.1 routes a
-    # completed-session crash to the substantive recovery path (a wrapper
-    # crash isn't a transient bot/CI/transport blip — it requires a fresh
-    # dev session, not a re-review).
-    # INV-92 (#298): a wrapper crash is ALWAYS dev-actionable (fail-open) — a
-    # fresh dev session is the right recovery, never an escalation.
-    _teardown_call emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-substantive" "" "true" 2>/dev/null || true
-    _teardown_call terminal_intent_cleanup_transition "$ISSUE_NUMBER" "reviewing" "reviewing" "pending-dev" 2>/dev/null || true
+    if [[ "$REVIEW_CRASH_RETRY_STATE" == "pending-review" ]]; then
+      # Cleanup diagnostics are best-effort; the guarded transition below owns recovery.
+      _teardown_call itp_post_comment "$ISSUE_NUMBER" \
+        "Review preflight retry transition failed (exit code: ${exit_code}). Retrying the non-substantive pending-review route; no pending-dev route is permitted without complete HEAD-bound evidence.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
+      # The retry trailer is advisory when teardown transport is unavailable.
+      _teardown_call emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" \
+        "failed-non-substantive" "${REVIEW_CRASH_RETRY_CAUSE:-preflight-write-failed}" \
+        2>/dev/null || true
+      # Terminal intent may override this best-effort cleanup movement.
+      _teardown_call terminal_intent_cleanup_transition \
+        "$ISSUE_NUMBER" "reviewing" "reviewing" "pending-review" \
+        2>/dev/null || true
+      log "Issue #${ISSUE_NUMBER} re-queued to pending-review after a preflight retry transition failure."
+    else
+      _teardown_call itp_post_comment "$ISSUE_NUMBER" \
+        "Review process crashed (exit code: ${exit_code}). Moving back to development for retry.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
+      # Normal wrapper crashes remain substantive/dev-actionable. INV-147 may
+      # override this intent after a durable mergeable-unknown route whose
+      # pending-dev transition alone failed.
+      if [[ "$REVIEW_CRASH_RETRY_EMIT_VERDICT" == "true" ]]; then
+        _teardown_call emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" \
+          "failed-substantive" "$REVIEW_CRASH_RETRY_CAUSE" "true" \
+          2>/dev/null || true
+      fi
+      _teardown_call terminal_intent_cleanup_transition "$ISSUE_NUMBER" "reviewing" "reviewing" "pending-dev" 2>/dev/null || true
 
-    log "Issue #${ISSUE_NUMBER} moved to pending-dev due to crash."
+      log "Issue #${ISSUE_NUMBER} moved to pending-dev due to crash."
+    fi
   fi
 
   cleanup_github_auth
@@ -1230,6 +1257,127 @@ fi
 log "Found PR #${PR_NUMBER} for issue #${ISSUE_NUMBER}"
 
 # ---------------------------------------------------------------------------
+# Mergeability preflight (INV-147, issue #540)
+# ---------------------------------------------------------------------------
+# Pin one open provider-normalized HEAD around the bounded mergeability poll.
+# Confirmed conflicts and persistent UNKNOWN/empty results are handled before
+# either INV-46 E2E lane can start. INV-44 remains after fan-out to close races.
+_review_finish_required_pending_dev_route() {
+  local route_rc="$1" success_message="$2" write_failure_message="$3"
+
+  case "$route_rc" in
+    0)
+      log "$success_message"
+      RESULT_PARSED=true
+      return 0
+      ;;
+    20)
+      REVIEW_CRASH_RETRY_STATE="pending-review"
+      REVIEW_CRASH_RETRY_CAUSE="preflight-write-failed"
+      if _review_requeue_preflight \
+          "$ISSUE_NUMBER" "preflight-write-failed" "$write_failure_message"; then
+        RESULT_PARSED=true
+        return 0
+      fi
+      return 1
+      ;;
+    21)
+      # All routing evidence is durable; cleanup may retry only the intended
+      # pending-dev transition and must not emit a second verdict.
+      REVIEW_CRASH_RETRY_STATE="pending-dev"
+      REVIEW_CRASH_RETRY_CAUSE=""
+      REVIEW_CRASH_RETRY_EMIT_VERDICT="false"
+      return 1
+      ;;
+    *)
+      log "ERROR: required pending-dev route returned unexpected rc=${route_rc}"
+      REVIEW_CRASH_RETRY_STATE="pending-review"
+      REVIEW_CRASH_RETRY_CAUSE="preflight-write-failed"
+      return 1
+      ;;
+  esac
+}
+
+PR_STATE=""
+PR_BRANCH=""
+PR_HEAD_SHA=""
+PREFLIGHT_MERGEABLE=""
+PREFLIGHT_ACTION=""
+review_mergeability_preflight "$PR_NUMBER" \
+  PR_STATE PR_HEAD_SHA PR_BRANCH PREFLIGHT_MERGEABLE PREFLIGHT_ACTION
+log "Mergeability preflight: PR #${PR_NUMBER} state=${PR_STATE:-UNKNOWN} head=${PR_HEAD_SHA:0:7} mergeable=${PREFLIGHT_MERGEABLE:-<empty>} action=${PREFLIGHT_ACTION}"
+
+case "$PREFLIGHT_ACTION" in
+  proceed)
+    ;;
+  closed)
+    log "PR #${PR_NUMBER} closed or merged during mergeability preflight; applying INV-54 remove-only cleanup."
+    # Best-effort INV-54 cleanup: the PR is already terminal, so no retry route is added.
+    itp_transition_state "$ISSUE_NUMBER" "reviewing" "" 2>/dev/null || true
+    RESULT_PARSED=true
+    exit 0
+    ;;
+  head-changed|read-failed)
+    _preflight_retry_cause="mergeable-read-failed"
+    _preflight_retry_message="Review preflight could not obtain two stable PR state/HEAD snapshots; re-queuing non-substantively without emitting stale-HEAD disposition evidence."
+    if [[ "$PREFLIGHT_ACTION" == "head-changed" ]]; then
+      _preflight_retry_cause="head-changed"
+      _preflight_retry_message="PR #${PR_NUMBER} HEAD changed during mergeability preflight; re-queuing review so the new HEAD is evaluated without stale evidence."
+    fi
+    REVIEW_CRASH_RETRY_STATE="pending-review"
+    REVIEW_CRASH_RETRY_CAUSE="$_preflight_retry_cause"
+    if _review_requeue_preflight \
+        "$ISSUE_NUMBER" "$_preflight_retry_cause" "$_preflight_retry_message"; then
+      RESULT_PARSED=true
+      exit 0
+    fi
+    # RESULT_PARSED remains false so cleanup retries the selected pending-review
+    # target. No HEAD-bound routing evidence exists, so pending-dev would
+    # recreate the issue #540 orphan.
+    exit 1
+    ;;
+  conflict-rebase)
+    # Fail-safe before the first durable write. An abrupt exit between writes
+    # must retry review, never let cleanup manufacture partial pending-dev
+    # routing evidence.
+    REVIEW_CRASH_RETRY_STATE="pending-review"
+    REVIEW_CRASH_RETRY_CAUSE="preflight-write-failed"
+    _preflight_route_rc=0
+    _review_route_conflict \
+      "$ISSUE_NUMBER" "$PR_NUMBER" "$PR_HEAD_SHA" "$PR_BRANCH" "$BASE_BRANCH" \
+      "pre-fanout" || _preflight_route_rc=$?
+    if _review_finish_required_pending_dev_route \
+        "$_preflight_route_rc" \
+        "Issue #${ISSUE_NUMBER} moved to pending-dev for conflict rebase before E2E/fan-out." \
+        "Conflict preflight could not persist every required routing input; re-queuing review to retry the missing idempotent write."; then
+      exit 0
+    fi
+    exit 1
+    ;;
+  mergeable-unknown)
+    # Arm the safe retry target before either required write starts.
+    REVIEW_CRASH_RETRY_STATE="pending-review"
+    REVIEW_CRASH_RETRY_CAUSE="preflight-write-failed"
+    _preflight_route_rc=0
+    _review_route_mergeable_unknown "$ISSUE_NUMBER" "$PR_HEAD_SHA" \
+      || _preflight_route_rc=$?
+    if _review_finish_required_pending_dev_route \
+        "$_preflight_route_rc" \
+        "Issue #${ISSUE_NUMBER} moved to pending-dev after persistent preflight UNKNOWN; dispatcher retry caps own convergence." \
+        "Mergeability preflight could not persist every required UNKNOWN routing input; re-queuing review to retry the missing idempotent write."; then
+      exit 0
+    fi
+    exit 1
+    ;;
+  *)
+    log "ERROR: mergeability preflight returned unknown action '${PREFLIGHT_ACTION}'"
+    exit 1
+    ;;
+esac
+
+log "PR branch: ${PR_BRANCH:-UNKNOWN} (HEAD: ${PR_HEAD_SHA:0:7})"
+
+# ---------------------------------------------------------------------------
 # Extract PR preview URL (conditional on E2E config)
 # ---------------------------------------------------------------------------
 PREVIEW_URL=""
@@ -1276,11 +1424,9 @@ fi
 # ---------------------------------------------------------------------------
 # Build review prompt
 # ---------------------------------------------------------------------------
-# [INV-87]/[W1c2]: normalized-shape contract per #398 — chp_pr_view <PR>
-# "<field>" returns `{<field>: <value>}`; caller runs plain jq to project.
-PR_BRANCH=$(chp_pr_view "$PR_NUMBER" "headRefName" 2>/dev/null | jq -r '.headRefName' 2>/dev/null || true)
-PR_HEAD_SHA=$(chp_pr_view "$PR_NUMBER" "headRefOid" 2>/dev/null | jq -r '.headRefOid' 2>/dev/null || true)
-log "PR branch: ${PR_BRANCH:-UNKNOWN} (HEAD: ${PR_HEAD_SHA:0:7})"
+# PR state, branch, and full HEAD were resolved and pinned by INV-147 before
+# preview/E2E setup. Do not refresh them here: all downstream evidence belongs
+# to that preflight-confirmed HEAD.
 
 # ---------------------------------------------------------------------------
 # Issue #449 (R1), redefined head-agnostic by issue #475 [INV-129]:
@@ -4675,69 +4821,67 @@ Findings->Decision Gate: 1 blocking finding(s) -- FAIL.
   # non-substantive re-queue, closing the stale-UNKNOWN pass-through.
   MERGEABLE_RETRIES="${MERGEABLE_RETRIES:-3}"
   MERGEABLE_STATUS=""
-  for _mg_attempt in $(seq 1 "$MERGEABLE_RETRIES"); do
-    # [INV-87] W1d (#399): chp_mergeable now owns the `gh pr view --json
-    # mergeable` argv AND the `-q '.mergeable'` projection — the leaf returns
-    # exactly one normalized token `MERGEABLE|CONFLICTING|UNKNOWN` (byte-
-    # identical to GitHub's raw values, so `_classify_mergeable_gate` /
-    # `_pr_open_gate` (INV-44/INV-54, lib-review-mergeable.sh) ship byte-
-    # unchanged). The `|| echo ""` failure wrapper stays here — a leaf rc≠0
-    # maps to the classifier's empty-string branch → `block-nonsubstantive`.
-    MERGEABLE_STATUS=$(chp_mergeable "$PR_NUMBER" 2>/dev/null || echo "")
-    [[ "${MERGEABLE_STATUS^^}" != "UNKNOWN" && -n "$MERGEABLE_STATUS" ]] && break
-    # Only sleep when another attempt will follow — no point waiting after the
-    # final probe (the loop is about to exit and classify the settled value).
-    if [[ "$_mg_attempt" -lt "$MERGEABLE_RETRIES" ]]; then
-      log "PR #${PR_NUMBER} mergeable status is '${MERGEABLE_STATUS:-<empty>}' (attempt ${_mg_attempt}/${MERGEABLE_RETRIES}); waiting for GitHub to settle..."
-      sleep 10
-    fi
-  done
+  _review_poll_mergeable "$PR_NUMBER" MERGEABLE_STATUS
+
+  POST_MERGEABLE_STATE=""
+  POST_MERGEABLE_HEAD=""
+  POST_MERGEABLE_BRANCH=""
+  POST_MERGEABLE_ACTION=""
+  review_validate_pinned_pr "$PR_NUMBER" "$PR_HEAD_SHA" \
+    POST_MERGEABLE_STATE POST_MERGEABLE_HEAD POST_MERGEABLE_BRANCH \
+    POST_MERGEABLE_ACTION
+  case "$POST_MERGEABLE_ACTION" in
+    proceed)
+      PR_BRANCH="$POST_MERGEABLE_BRANCH"
+      ;;
+    closed)
+      log "PR #${PR_NUMBER} closed or merged during the post-fan-out mergeability poll; applying INV-54 remove-only cleanup."
+      # Best-effort INV-54 cleanup: the PR is already terminal, so no retry route is added.
+      itp_transition_state "$ISSUE_NUMBER" "reviewing" "" 2>/dev/null || true
+      RESULT_PARSED=true
+      exit 0
+      ;;
+    head-changed|read-failed)
+      _post_mergeable_cause="mergeable-read-failed"
+      _post_mergeable_message="Post-fan-out mergeability gate could not re-read the pinned PR state and HEAD; re-queuing review without emitting conflict evidence."
+      if [[ "$POST_MERGEABLE_ACTION" == "head-changed" ]]; then
+        _post_mergeable_cause="head-changed"
+        _post_mergeable_message="PR #${PR_NUMBER} HEAD changed during the post-fan-out mergeability poll; re-queuing review without binding conflict evidence to the stale reviewed HEAD."
+      fi
+      REVIEW_CRASH_RETRY_STATE="pending-review"
+      REVIEW_CRASH_RETRY_CAUSE="$_post_mergeable_cause"
+      if _review_requeue_preflight \
+          "$ISSUE_NUMBER" "$_post_mergeable_cause" "$_post_mergeable_message"; then
+        RESULT_PARSED=true
+        exit 0
+      fi
+      exit 1
+      ;;
+    *)
+      log "ERROR: post-fan-out mergeability HEAD validation returned unknown action '${POST_MERGEABLE_ACTION}'"
+      exit 1
+      ;;
+  esac
 
   MERGEABLE_GATE=$(_classify_mergeable_gate "$MERGEABLE_STATUS")
   log "Mergeable hard gate: PR #${PR_NUMBER} mergeable='${MERGEABLE_STATUS:-<empty>}' → gate=${MERGEABLE_GATE}"
 
   if [[ "$MERGEABLE_GATE" == "block-substantive" ]]; then
-    # Real conflict — the unanimous-PASS verdict is overridden. Dev must rebase.
+    # Real conflict — use the same required-write route as the preflight.
     log "BLOCKING: PR #${PR_NUMBER} is CONFLICTING — overriding PASS verdict, routing to pending-dev for rebase."
-
-    # [BLOCKING] finding on the ISSUE with dev-actionable rebase instructions
-    # (mirrors references/merge-conflict-resolution.md).
-    itp_post_comment "$ISSUE_NUMBER" \
-      "Review findings:
-
-Findings->Decision Gate: 1 blocking finding(s) -- FAIL.
-
-1. **[BLOCKING] Merge conflict with ${BASE_BRANCH}** — PR #${PR_NUMBER} (\`${PR_BRANCH:-the PR branch}\`) is \`CONFLICTING\` with the base branch and cannot be merged. The review agent's PASS verdict is overridden by the wrapper-enforced mergeable gate (INV-44, a merge-conflict gate — not a CI-status gate; see INV-134 for the CI-rollup counterpart).
-   - Dev agent must rebase before re-review:
-     1. \`git fetch origin ${BASE_BRANCH}\`
-     2. \`git rebase origin/${BASE_BRANCH}\`
-     3. Resolve conflicts, then \`git rebase --continue\`
-     4. \`git push --force-with-lease origin ${PR_BRANCH:-<PR_BRANCH>}\`$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
-
-    # Reuse the dev-resume rebase hook: autonomous-dev.sh greps issue-level PR
-    # comments for a body starting "Auto-merge failed:" and prepends a
-    # mandatory rebase pre-step to the resume prompt. Posting the marker here
-    # gives the conflict a deterministic owner (the next dev session) instead
-    # of letting it fall through the cracks.
-    chp_pr_comment "$PR_NUMBER" \
-      --body "Auto-merge failed: PR is CONFLICTING with ${BASE_BRANCH} (mergeable gate, INV-44 — merge-conflict, not CI). Re-dispatching dev agent to rebase onto ${BASE_BRANCH}.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
-
-    # INV-35: a merge conflict is a real, dev-actionable finding — substantive.
-    # INV-92 (#298): a rebase is exactly what the dev agent does — dev-actionable.
-    emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-substantive" "" "true" 2>/dev/null || true
-
-    # INV-52: a CONFLICTING PR is a blocking finding — assert it on the PR's
-    # GitHub-native state too (reviewDecision → CHANGES_REQUESTED) so the
-    # blocking state is authoritative, not just an issue comment. Best-effort.
-    submit_request_changes "$PR_NUMBER" \
-      "Merge conflict with ${BASE_BRANCH}: PR \`${PR_BRANCH:-the PR branch}\` is CONFLICTING with the base branch and cannot be merged (mergeable hard gate, INV-44). Rebase onto ${BASE_BRANCH} before re-review — see the \`Review findings:\` comment on issue #${ISSUE_NUMBER} for the step-by-step rebase instructions (INV-52)." \
-      || log "WARNING: submit_request_changes returned non-zero (unexpected — helper is best-effort); continuing the FAIL route."
-
-    itp_transition_state "$ISSUE_NUMBER" "reviewing" "pending-dev" 2>/dev/null || true
-
-    log "Issue #${ISSUE_NUMBER} moved to pending-dev (merge conflict — dev must rebase)."
-    RESULT_PARSED=true
-    exit 0
+    REVIEW_CRASH_RETRY_STATE="pending-review"
+    REVIEW_CRASH_RETRY_CAUSE="preflight-write-failed"
+    _conflict_route_rc=0
+    _review_route_conflict \
+      "$ISSUE_NUMBER" "$PR_NUMBER" "$POST_MERGEABLE_HEAD" "$PR_BRANCH" "$BASE_BRANCH" \
+      "post-fanout" || _conflict_route_rc=$?
+    if _review_finish_required_pending_dev_route \
+        "$_conflict_route_rc" \
+        "Issue #${ISSUE_NUMBER} moved to pending-dev (merge conflict — dev must rebase)." \
+        "Post-fan-out conflict gate could not persist every required routing input; re-queuing review to retry the missing idempotent write."; then
+      exit 0
+    fi
+    exit 1
   elif [[ "$MERGEABLE_GATE" == "block-nonsubstantive" ]]; then
     # mergeable never settled out of UNKNOWN (or the gh query failed). Do NOT
     # auto-approve — GitHub may still be computing, and an actual conflict that
@@ -5170,11 +5314,30 @@ if [[ "$PASSED_VERDICT" == "true" ]]; then
         metrics_emit merge "result=failure" failure_class=infra "pr=${PR_NUMBER:-}" "issue=${ISSUE_NUMBER:-}" "run_id=${RUN_ID:-}" || true
       fi
 
+      _auto_merge_failure_marker=""
+      if ! _auto_merge_failure_marker=$(
+        _review_auto_merge_failure_marker "$ISSUE_NUMBER" "$PR_HEAD_SHA"
+      ); then
+        log "ERROR: Cannot render the INV-33 auto-merge-failure marker for issue #${ISSUE_NUMBER} at HEAD '${PR_HEAD_SHA:-<empty>}'; refusing to route an unbound rebase attempt."
+        exit 1
+      fi
+
       if ! _comment_err=$(chp_pr_comment "$PR_NUMBER" \
         --body "Auto-merge failed: ${_err_excerpt}
 
-Re-dispatching dev agent to rebase onto ${BASE_BRANCH}.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>&1 >/dev/null); then
-        log "WARNING: Failed to post auto-merge-failure marker on PR #${PR_NUMBER} (non-fatal — label transition still proceeds): ${_comment_err}"
+Re-dispatching dev agent to rebase onto ${BASE_BRANCH}.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)
+
+${_auto_merge_failure_marker}" 2>&1 >/dev/null); then
+        log "WARNING: Failed to post the required auto-merge-failure marker on PR #${PR_NUMBER}; re-queuing review instead of dispatching dev without rebase context: ${_comment_err}"
+        REVIEW_CRASH_RETRY_STATE="pending-review"
+        REVIEW_CRASH_RETRY_CAUSE="auto-merge-marker-write-failed"
+        if _review_requeue_preflight "$ISSUE_NUMBER" \
+            "auto-merge-marker-write-failed" \
+            "Auto-merge failed, but the required current-HEAD PR recovery marker could not be persisted; re-queuing review to retry the write before any dev rebase dispatch."; then
+          RESULT_PARSED=true
+          exit 0
+        fi
+        exit 1
       fi
       # INV-35: auto-merge-failure is a non-substantive cause; the dev
       # session's code is fine, only the merge step couldn't complete.

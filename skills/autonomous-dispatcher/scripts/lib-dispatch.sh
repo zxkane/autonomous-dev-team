@@ -60,6 +60,18 @@ if ! declare -F itp_list_comments >/dev/null 2>&1; then
   unset _ld_self _ld_dir
 fi
 
+# [INV-147] Strict pre-fan-out disposition evidence shares one renderer/parser
+# between the review producer and dispatcher consumer.
+if ! declare -F latest_review_routing_evidence >/dev/null 2>&1; then
+  _ld_self="${BASH_SOURCE[0]:-$0}"
+  _ld_dir="$(cd "$(dirname "$(readlink -f "$_ld_self")")" && pwd 2>/dev/null)" || _ld_dir=""
+  if [ -n "$_ld_dir" ] && [ -r "${_ld_dir}/lib-review-disposition.sh" ]; then
+    # shellcheck source=lib-review-disposition.sh
+    source "${_ld_dir}/lib-review-disposition.sh"
+  fi
+  unset _ld_self _ld_dir
+fi
+
 # [INV-141] Shared token-budget admission. Standalone lib-dispatch tests source
 # this file directly, so resolve the accounting and terminal dependencies here
 # as well as in dispatcher-tick.sh. Every source is inert.
@@ -1226,7 +1238,8 @@ classify_recent_review_verdict() {
   # stall):
   #   1. EXACT grammar, not `[^>]*`: verdict is whitelisted
   #      (passed|failed-substantive|failed-non-substantive) and only the
-  #      known `cause=`/`dev-actionable=` tokens may follow — mirroring
+  #      one each of the known `cause=`/`dev-actionable=`/INV-147 `head=`
+  #      tokens may follow in renderer order — mirroring
   #      the downstream trailer_line grep, so under this branch neither
   #      the legacy no-trailer fallback nor the unknown-verdict `case *)`
   #      arm is reachable (an anchored-but-unknown body never becomes a
@@ -1250,7 +1263,7 @@ classify_recent_review_verdict() {
   #      removes. Token-mode residual (a human posting a byte-for-byte
   #      bare trailer as their whole comment) is the same documented,
   #      accepted exposure as at the breaker's call sites.
-  local _anchored_trailer_re='^<!--[ \t]*review-verdict:[ \t]*(passed|failed-substantive|failed-non-substantive)([ \t]+(cause=[a-zA-Z0-9_-]+|dev-actionable=[a-z]+))*[ \t]*-->[[:space:]]*$'
+  local _anchored_trailer_re='^<!--[ \t]*review-verdict:[ \t]*(passed|failed-substantive|failed-non-substantive)([ \t]+cause=[a-zA-Z0-9_-]+)?([ \t]+dev-actionable=[a-z]+)?([ \t]+head=[0-9a-f]{40})?[ \t]*-->[[:space:]]*$'
   local actor_predicate
   if [ -n "${BOT_LOGIN:-}" ]; then
     actor_predicate=".author == \"${BOT_LOGIN}\""
@@ -1308,11 +1321,12 @@ classify_recent_review_verdict() {
   # INV-92 (#298): the optional `dev-actionable=true|false` token rides the
   # failed-substantive trailer. The regex now tolerates EITHER optional token
   # (`cause=…` for failed-non-substantive, `dev-actionable=…` for
-  # failed-substantive) in the post-verdict span. The verdict + each token are
-  # extracted independently below, so a legacy `cause`-only trailer and a new
-  # `dev-actionable`-only trailer both parse.
+  # failed-substantive, or INV-147's full `head=…` binding) in the post-verdict
+  # span, each at most once and in renderer order. Verdict semantics ignore the
+  # HEAD token; it exists only to bind the required durable write to one review
+  # target.
   local trailer_line
-  trailer_line=$(printf '%s' "$newest_body" | grep -oE '<!--[[:space:]]*review-verdict:[[:space:]]*[a-z-]+([[:space:]]+(cause=[a-zA-Z0-9_-]+|dev-actionable=[a-z]+))*[[:space:]]*-->' | head -1)
+  trailer_line=$(printf '%s' "$newest_body" | grep -oE '<!--[[:blank:]]*review-verdict:[[:blank:]]*[a-z-]+([[:blank:]]+cause=[a-zA-Z0-9_-]+)?([[:blank:]]+dev-actionable=[a-z]+)?([[:blank:]]+head=[0-9a-f]{40})?[[:blank:]]*-->' | head -1)
 
   if [ -z "$trailer_line" ]; then
     # Legacy: bot-authored comment with no trailer is conservatively
@@ -1706,7 +1720,7 @@ recent_review_verdict_body() {
 # INV-35 Step 4b.5.1: review-aware routing for `completed` sessions.
 # ---------------------------------------------------------------------------
 #
-# handle_completed_session_routing <issue_num> <session_id> <session_end_iso>
+# handle_completed_session_routing <issue_num> <session_id> <session_end_iso> [routing_head]
 #
 # Returns 0 always (caller `continue`s after this branch).
 #
@@ -1727,11 +1741,39 @@ handle_completed_session_routing() {
   local issue_num="$1"
   local session_id="$2"
   local session_end_iso="$3"
+  local routing_head="${4:-}"
+  local _routing_pr_info="" _routing_pr_rc=0 _routing_current_head=""
 
   # INV-92 (#298): capture the optional dev-actionable signal (5th out-param).
   # Defaults to "true" when the trailer carries no token — today's behavior.
   local _verdict="" _cause="" _dev_actionable="true"
   classify_recent_review_verdict "$issue_num" "$session_end_iso" _verdict _cause _dev_actionable
+
+  # INV-147: handle_pending_dev_pr_exists pins the routing evidence it matched.
+  # Re-read the PR before applying that evidence so a force-push between the
+  # outer comparison and this router cannot dispatch or stall dev against the
+  # new HEAD. Reuse this snapshot in the substantive branch below.
+  if [[ -n "$routing_head" ]]; then
+    _routing_pr_info=$(fetch_pr_for_issue \
+      "$issue_num" "number,headRefOid,body") || _routing_pr_rc=$?
+    if [[ "$_routing_pr_rc" -eq 0 && -n "$_routing_pr_info" ]]; then
+      _routing_current_head=$(jq -r \
+        '.headRefOid // empty' <<<"$_routing_pr_info" 2>/dev/null)
+    fi
+    if [[ "$_routing_pr_rc" -ne 0 || -z "$_routing_current_head" \
+          || "$_routing_current_head" != "$routing_head" ]]; then
+      log "  issue #${issue_num} routing HEAD changed or became unreadable before verdict action (${routing_head} -> ${_routing_current_head:-unknown}) — re-queuing review"
+      # Best-effort notice: the pending-review label transition below is the
+      # authoritative retry action and must still run if comment delivery fails.
+      itp_post_comment "$issue_num" \
+        "PR HEAD changed or became unreadable before the pending-dev verdict route could act. Re-queuing review so the current HEAD is evaluated without stale routing evidence." \
+        2>/dev/null || true
+      if ! label_swap "$issue_num" "pending-dev" "pending-review"; then
+        return 2
+      fi
+      return 0
+    fi
+  fi
 
   case "$_verdict" in
     none)
@@ -1880,12 +1922,20 @@ handle_completed_session_routing() {
       # `closingIssuesReferences` — NOT a `.body | test("#N")` mention — so
       # `body` is no longer load-bearing for the resolution that returns this
       # object. The unit tests mock fetch_pr_for_issue.
-      _np_pr_info=$(fetch_pr_for_issue "$issue_num" "number,headRefOid,body")
+      if [[ -n "$_routing_pr_info" ]]; then
+        _np_pr_info="$_routing_pr_info"
+      else
+        _np_pr_info=$(fetch_pr_for_issue "$issue_num" "number,headRefOid,body")
+      fi
       _np_current_head=$(jq -r '.headRefOid // empty' <<<"$_np_pr_info" 2>/dev/null)
       # [INV-105] (#297): the PR number for the convergence report's evidence line.
       local _np_pr_number
       _np_pr_number=$(jq -r '.number // empty' <<<"$_np_pr_info" 2>/dev/null)
-      _np_last_head=$(last_reviewed_head "$issue_num")
+      if [[ -n "$routing_head" ]]; then
+        _np_last_head="$routing_head"
+      else
+        _np_last_head=$(last_reviewed_head "$issue_num")
+      fi
       local _np_notice_marker="no-progress-substantive:${_np_current_head}"
 
       # Branch A — bot-unfixable: the dev agent reported a 403 on a PR-metadata
@@ -3365,6 +3415,22 @@ last_reviewed_head() {
     | jq -r '[.[].body | capture("Reviewed HEAD: `(?<sha>[0-9a-f]{7,40})`"; "g") | .sha] | last // empty'
 }
 
+# INV-147: echoes the newest machine-authored routing-evidence HEAD across the
+# fan-out Reviewed HEAD contract and pre-fan-out disposition contract. A strict
+# provider read failure returns nonzero so callers can distinguish it from a
+# successful read with no strict-self evidence. Human-authored Reviewed HEAD
+# lookalikes therefore cannot trigger same-HEAD recovery, while an operational
+# read failure cannot masquerade as a first review.
+_latest_review_routing_head() {
+  local issue_num="$1" current_head="${2:-}"
+  local evidence_head="" evidence_kind="" evidence_result=""
+  declare -F latest_review_routing_evidence >/dev/null 2>&1 || return 1
+  latest_review_routing_evidence \
+    "$issue_num" evidence_head evidence_kind evidence_result "$current_head" \
+    || return 1
+  printf '%s' "$evidence_head"
+}
+
 # INV-136 (#488) D4: echoes the newest `inv92-matched-patterns:` marker's
 # space-separated pattern list posted by the review wrapper's non-actionable
 # findings comment (autonomous-review.sh), or empty if no such marker exists
@@ -4111,6 +4177,9 @@ _same_head_verdict_aware_recovery() {
 #   1 — no PR for this issue, OR the same-HEAD session hit `prompt_too_long`
 #       (caller falls through to session/dispatch logic — the tick's INV-12
 #       PTL branch owns PTL recovery; see the same-HEAD block below).
+#   3 — strict routing-evidence read failed; caller leaves `pending-dev`
+#       unchanged and does not add JUST_DISPATCHED so INV-128 can bound a
+#       persistent operational defer.
 #
 # Side effects (only when returning 0):
 #   - HEAD differs OR no prior review → flips pending-dev → pending-review
@@ -4144,7 +4213,15 @@ handle_pending_dev_pr_exists() {
   current_head=$(jq -r '.headRefOid // empty' <<<"$pr_info")
   pr_ref="${pr_num:+#${pr_num}}"
   pr_ref="${pr_ref:-(number unknown)}"
-  last_head=$(last_reviewed_head "$issue_num")
+  # INV-147 dispositions are terminal review evidence even though fan-out did
+  # not run and therefore no Reviewed HEAD trailer exists.
+  local _routing_evidence_rc=0
+  last_head=$(_latest_review_routing_head "$issue_num" "$current_head") \
+    || _routing_evidence_rc=$?
+  if [[ "$_routing_evidence_rc" -ne 0 ]]; then
+    log "  issue #${issue_num} strict review routing-evidence read failed — leaving pending-dev unchanged for bounded operational retry"
+    return 3
+  fi
 
   if [ -n "$last_head" ] && [ -n "$current_head" ] && [ "$current_head" = "$last_head" ]; then
     # Same HEAD already reviewed — verdict was FAILED (otherwise the issue
@@ -4177,7 +4254,7 @@ handle_pending_dev_pr_exists() {
       # _term_reason == "completed" (the only other rc=0 case). Route the
       # verdict to the dev/review side via the shared INV-35 router.
       local _completed_route_rc=0
-      handle_completed_session_routing "$issue_num" "$_sid" "$_end_iso" \
+      handle_completed_session_routing "$issue_num" "$_sid" "$_end_iso" "$last_head" \
         || _completed_route_rc=$?
       [[ "$_completed_route_rc" -eq 0 ]] || return 2
       return 0
@@ -4224,6 +4301,30 @@ handle_pending_dev_pr_exists() {
     local _recovery_cause="crashed-session"
     [ -z "$_sid" ] && _recovery_cause="self-heal"
     if may_stall_now "$issue_num"; then
+      # The routing-evidence comparison above and may_stall_now can span enough
+      # time for a force-push. Re-pin the PR before acting so the no-session and
+      # unconfirmed-session recovery paths have the same stale-HEAD protection
+      # as handle_completed_session_routing.
+      local _recovery_pr_info="" _recovery_pr_rc=0 _recovery_current_head=""
+      _recovery_pr_info=$(fetch_pr_for_issue \
+        "$issue_num" "number,headRefOid,body") || _recovery_pr_rc=$?
+      if [[ "$_recovery_pr_rc" -eq 0 && -n "$_recovery_pr_info" ]]; then
+        _recovery_current_head=$(jq -r \
+          '.headRefOid // empty' <<<"$_recovery_pr_info" 2>/dev/null)
+      fi
+      if [[ "$_recovery_pr_rc" -ne 0 || -z "$_recovery_current_head" \
+            || "$_recovery_current_head" != "$current_head" ]]; then
+        log "  issue #${issue_num} ${_recovery_cause} routing HEAD changed or became unreadable before verdict action (${current_head} -> ${_recovery_current_head:-unknown}) — re-queuing review"
+        # Best-effort notice: the pending-review transition below owns the retry.
+        itp_post_comment "$issue_num" \
+          "PR HEAD changed or became unreadable before the pending-dev verdict route could act. Re-queuing review so the current HEAD is evaluated without stale routing evidence." \
+          2>/dev/null || true
+        if ! label_swap "$issue_num" "pending-dev" "pending-review"; then
+          return 2
+        fi
+        return 0
+      fi
+
       local _same_head_recovery_rc=0
       _same_head_verdict_aware_recovery \
         "$issue_num" "$pr_ref" "$current_head" "$_recovery_cause" "$pr_num" \

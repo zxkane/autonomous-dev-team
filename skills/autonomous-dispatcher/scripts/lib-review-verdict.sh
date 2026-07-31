@@ -45,6 +45,9 @@ fi
 #             `false` (including absent/empty/`true`/garbage) OMITS the token ⇒
 #             the dispatcher's default `true` (today's behavior). Omitting the
 #             token entirely is the zero-regression default.
+#   head    — internal renderer-only optional binding for INV-147 required
+#             writes. When present it must be one full lowercase provider HEAD.
+#             Ordinary emit_verdict_trailer callers never supply it.
 #
 # Returns 0 on success, 1 on rejection (unknown verdict).
 #
@@ -55,12 +58,11 @@ fi
 # can guarantee the trailer's content even if the agent's verdict comment
 # format drifts; classify_recent_review_verdict picks the newest matching
 # bot comment so a later trailer-only comment shadows any earlier one.
-emit_verdict_trailer() {
-  local issue_num="$1"
-  local repo="$2"
-  local verdict="$3"
-  local cause="${4:-}"
-  local dev_actionable="${5:-}"
+_render_review_verdict_trailer() {
+  local verdict="$1"
+  local cause="${2:-}"
+  local dev_actionable="${3:-}"
+  local head="${4:-}"
 
   case "$verdict" in
     passed|failed-substantive|failed-non-substantive)
@@ -96,9 +98,47 @@ emit_verdict_trailer() {
     body="<!-- review-verdict: ${verdict} -->"
   fi
 
+  if [[ -n "$head" ]]; then
+    [[ "$head" =~ ^[0-9a-f]{40}$ ]] || return 1
+    body="${body% -->} head=${head} -->"
+  fi
+
+  printf '%s' "$body"
+}
+
+emit_verdict_trailer() {
+  local issue_num="$1"
+  local repo="$2"
+  local verdict="$3"
+  local cause="${4:-}"
+  local dev_actionable="${5:-}"
+  local body
+
+  body="$(_render_review_verdict_trailer "$verdict" "$cause" "$dev_actionable")" \
+    || return 1
+
   # [INV-89] Route through the marker choke-point. `itp_github_post_comment` posts
   # to the global $REPO; every caller passes $repo == $REPO (the wrapper's repo),
   # so the emitted `gh issue comment … --body "$body"` is byte-identical.
   itp_post_comment "$issue_num" "$body" >/dev/null 2>&1 || true
   return 0
+}
+
+# Required-write variant used by INV-147. Unlike emit_verdict_trailer, the
+# provider write status is preserved and the trailer is bound to one full HEAD,
+# so pending-dev is unreachable until the correct routing trailer is durable.
+emit_verdict_trailer_required() {
+  local issue_num="$1"
+  local repo="$2"
+  local verdict="$3"
+  local cause="${4:-}"
+  local dev_actionable="${5:-}"
+  local head="${6:-}"
+  local body
+
+  [[ "$head" =~ ^[0-9a-f]{40}$ ]] || return 1
+  body="$(_render_review_verdict_trailer \
+    "$verdict" "$cause" "$dev_actionable" "$head")" \
+    || return 1
+  itp_post_comment "$issue_num" "$body" >/dev/null 2>&1
 }

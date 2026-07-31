@@ -231,17 +231,82 @@
       "note": "autonomous retained so dispatcher Step 4 re-dispatches dev to rebase."
     },
     {
+      "id": "review-preflight-conflicting",
+      "from": "reviewing",
+      "to": "pending_dev",
+      "event": "review-preflight-stable-conflicting",
+      "actor": "review-wrapper",
+      "guards": ["preflight-stable-conflicting", "preflight-routing-writes-durable"],
+      "actions": ["comment:blocking-merge-conflict-finding", "comment:review-disposition-conflict-rebase", "comment:auto-merge-failed-head-bound", "comment:review-verdict-failed-substantive-head-bound", "request-changes", "remove-label:reviewing", "add-label:pending-dev"],
+      "code_site": "lib-review-mergeable.sh canonical pre-fan-out conflict route: required writes before reviewing to pending-dev",
+      "mermaid": "reviewing --> pending_dev: Stable pre-fan-out CONFLICTING HEAD skips E2E/fan-out and requests rebase [INV-147]",
+      "inv_refs": ["INV-44", "INV-52", "INV-54", "INV-147"],
+      "note": "The HEAD-bound disposition, PR Auto-merge failed marker, and failed-substantive/dev-actionable trailer must all be durable before the transition. Native request-changes is best-effort."
+    },
+    {
+      "id": "review-preflight-mergeable-unknown",
+      "from": "reviewing",
+      "to": "pending_dev",
+      "event": "review-preflight-stable-mergeable-unknown",
+      "actor": "review-wrapper",
+      "guards": ["preflight-stable-mergeable-unknown", "preflight-routing-writes-durable"],
+      "actions": ["comment:review-disposition-mergeable-unknown", "comment:review-verdict-failed-non-substantive-head-bound", "remove-label:reviewing", "add-label:pending-dev"],
+      "code_site": "lib-review-mergeable.sh persistent UNKNOWN route: required writes before reviewing to pending-dev",
+      "mermaid": "reviewing --> pending_dev: Stable pre-fan-out mergeability UNKNOWN skips E2E/fan-out for bounded re-review [INV-147]",
+      "inv_refs": ["INV-35", "INV-54", "INV-147"],
+      "note": "No Auto-merge failed marker and no request-changes action are emitted. The dispatcher consumes the disposition and matching failed-non-substantive trailer through the existing bounded retry router."
+    },
+    {
+      "id": "review-preflight-head-changed",
+      "from": "reviewing",
+      "to": "pending_review",
+      "event": "review-mergeability-head-changed",
+      "actor": "review-wrapper",
+      "guards": ["mergeability-head-changed"],
+      "actions": ["comment:review-held-head-changed", "comment:review-verdict-failed-non-substantive", "remove-label:reviewing", "add-label:pending-review"],
+      "code_site": "lib-review-mergeable.sh non-substantive mergeability requeue for changed HEAD",
+      "mermaid": "reviewing --> pending_review: HEAD changed during preflight or post-fan-out mergeability polling [INV-147]",
+      "inv_refs": ["INV-98", "INV-147"],
+      "note": "Both mergeability phases re-read the pinned HEAD before terminal action. No stale-head disposition or conflict evidence is emitted."
+    },
+    {
+      "id": "review-preflight-read-failed",
+      "from": "reviewing",
+      "to": "pending_review",
+      "event": "review-mergeability-snapshot-read-failed",
+      "actor": "review-wrapper",
+      "guards": ["mergeability-read-failed"],
+      "actions": ["comment:review-held-preflight-read-failed", "comment:review-verdict-failed-non-substantive", "remove-label:reviewing", "add-label:pending-review"],
+      "code_site": "lib-review-mergeable.sh non-substantive mergeability requeue for snapshot read failure",
+      "mermaid": "reviewing --> pending_review: Mergeability decision could not revalidate pinned state and HEAD [INV-147]",
+      "inv_refs": ["INV-147"],
+      "note": "Without stable state and HEAD snapshots the wrapper emits no HEAD-bound disposition or conflict evidence."
+    },
+    {
+      "id": "review-preflight-write-failed",
+      "from": "reviewing",
+      "to": "pending_review",
+      "event": "review-conflict-required-write-failed",
+      "actor": "review-wrapper",
+      "guards": ["conflict-required-write-failed"],
+      "actions": ["comment:review-held-preflight-write-failed", "comment:review-verdict-failed-non-substantive", "remove-label:reviewing", "add-label:pending-review"],
+      "code_site": "lib-review-mergeable.sh non-substantive conflict requeue after a required routing write failure",
+      "mermaid": "reviewing --> pending_review: Required conflict-routing write failed; retry idempotently [INV-147]",
+      "inv_refs": ["INV-147"],
+      "note": "Applies to preflight and post-fan-out canonical conflict routes; pending-dev is unreachable until every required routing input is durable."
+    },
+    {
       "id": "review-pass-conflicting",
       "from": "reviewing",
       "to": "pending_dev",
       "event": "review-pass-but-mergeable-conflicting",
       "actor": "review-wrapper",
       "guards": ["verdict-pass", "pr-still-open", "mergeable-conflicting"],
-      "actions": ["remove-label:reviewing", "add-label:pending-dev", "request-changes", "comment:merge-conflict-rebase"],
-      "code_site": "autonomous-review.sh mergeable-gate CONFLICTING: --remove-label reviewing --add-label pending-dev",
+      "actions": ["comment:reviewed-head", "comment:blocking-merge-conflict-finding", "comment:auto-merge-failed-head-bound", "comment:review-verdict-failed-substantive-head-bound", "request-changes", "remove-label:reviewing", "add-label:pending-dev"],
+      "code_site": "lib-review-mergeable.sh canonical post-fan-out conflict route: required writes before reviewing to pending-dev",
       "mermaid": "reviewing --> pending_dev: Review wrapper PASS but PR CONFLICTING (mergeable gate, INV-44)",
-      "inv_refs": ["INV-44", "INV-52", "INV-54"],
-      "note": "_classify_mergeable_gate → block-substantive. Hoisted PR-open guard runs first (INV-54)."
+      "inv_refs": ["INV-44", "INV-52", "INV-54", "INV-147"],
+      "note": "_classify_mergeable_gate → block-substantive. Hoisted PR-open guard runs first (INV-54). The shared INV-147 route keeps the post-fan-out gate as the race-closing authority."
     },
     {
       "id": "review-pass-mergeable-unknown",
@@ -539,8 +604,8 @@
       "actions": ["remove-label:reviewing"],
       "code_site": "autonomous-review.sh _pr_open_gate → skip: --remove-label reviewing (no add)",
       "mermaid": "reviewing --> reviewing: Concurrent merge — PR no longer OPEN, silent −reviewing (INV-54)",
-      "inv_refs": ["INV-54", "INV-08"],
-      "note": "Hoisted PR-open guard at the PASS-chain top AND the E2E hard gate. Remove-only (no add) — another review/merge wrote approved or merged first. Self-loop in the diagram = no net active-state add."
+      "inv_refs": ["INV-08", "INV-44", "INV-54", "INV-147"],
+      "note": "The shared guard covers the preflight snapshots, E2E hard-gate exits, PASS-chain top, and post-fan-out mergeability validation. Remove-only (no add) — another review/merge wrote approved or merged first. No stale conflict/disposition evidence is emitted. Self-loop in the diagram = no net active-state add."
     },
     {
       "id": "review-smoke-config-error",
