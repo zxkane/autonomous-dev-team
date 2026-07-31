@@ -1703,6 +1703,8 @@ MARKER_BLOCK
 # ---------------------------------------------------------------------------
 PR_NUM=""
 DEV_PR_HEAD_SHA=""
+DEV_CONFLICT_CONTEXT_HEAD_SHA=""
+DEV_CONFLICT_CONTEXT_HEAD_SOURCE=""
 AUTO_MERGE_FAILURE_MARKER=""
 DEV_CONFLICT_CONTEXT_READ_FAILED="false"
 _dev_pr_info=""
@@ -1719,6 +1721,10 @@ elif [[ -n "$_dev_pr_info" ]]; then
     DEV_PR_HEAD_SHA=$(jq -r '.headRefOid' <<<"$_dev_pr_info")
     DEV_PR_HEAD_SHA="$(_review_normalize_full_head "$DEV_PR_HEAD_SHA")" \
       || DEV_CONFLICT_CONTEXT_READ_FAILED="true"
+    if [[ -n "$DEV_PR_HEAD_SHA" ]]; then
+      DEV_CONFLICT_CONTEXT_HEAD_SHA="$DEV_PR_HEAD_SHA"
+      DEV_CONFLICT_CONTEXT_HEAD_SOURCE="provider-resolved PR"
+    fi
   else
     DEV_CONFLICT_CONTEXT_READ_FAILED="true"
   fi
@@ -1739,6 +1745,29 @@ if [[ "$DEV_CONFLICT_CONTEXT_READ_FAILED" == "false" \
     DEV_CONFLICT_CONTEXT_READ_FAILED="true"
   fi
   unset _dev_pr_comments
+fi
+
+if [[ "$DEV_CONFLICT_CONTEXT_READ_FAILED" == "true" \
+      && -z "$DEV_CONFLICT_CONTEXT_HEAD_SHA" ]]; then
+  _dev_routing_head=""
+  _dev_routing_kind=""
+  _dev_routing_result=""
+  if latest_review_routing_evidence \
+       "$ISSUE_NUMBER" _dev_routing_head _dev_routing_kind \
+       _dev_routing_result; then
+    case "${_dev_routing_kind}:${_dev_routing_result}" in
+      reviewed-head:|disposition:conflict-rebase)
+        if DEV_CONFLICT_CONTEXT_HEAD_SHA=$(
+          _review_normalize_full_head "$_dev_routing_head"
+        ); then
+          DEV_CONFLICT_CONTEXT_HEAD_SOURCE="strict issue routing evidence"
+        else
+          DEV_CONFLICT_CONTEXT_HEAD_SHA=""
+        fi
+        ;;
+    esac
+  fi
+  unset _dev_routing_head _dev_routing_kind _dev_routing_result
 fi
 
 DEV_SAFE_REBASE_PROCEDURE="$(cat <<EOF
@@ -1795,13 +1824,43 @@ present, perform the mandatory rebase onto \`${BASE_BRANCH}\` using the safe
 procedure below. If the provider context still cannot be read, report that
 failure with this protocol so repeated attempts remain visible to INV-128:
 
-1. Run \`git rev-parse HEAD\` and require its full lowercase 40-character SHA.
-2. Post this exact marker as the entire issue comment, replacing the placeholder:
-   \`<!-- dev-conflict-context-read-failed: issue=${ISSUE_NUMBER} head=<full-lowercase-40-char-sha> -->\`
+EOF
+  if [[ -n "$DEV_CONFLICT_CONTEXT_HEAD_SHA" ]]; then
+    cat <<EOF
+1. Use the wrapper-pinned reviewed HEAD
+   \`${DEV_CONFLICT_CONTEXT_HEAD_SHA}\` from ${DEV_CONFLICT_CONTEXT_HEAD_SOURCE}.
+   Do not derive this marker from the current \`PROJECT_DIR\` checkout.
+2. Post this exact marker as the entire issue comment:
+   \`<!-- dev-conflict-context-read-failed: issue=${ISSUE_NUMBER} head=${DEV_CONFLICT_CONTEXT_HEAD_SHA} -->\`
 3. Do not add prose before or after the marker. If that exact issue/HEAD marker
    already exists, do not post a duplicate.
 4. Exit without changing code so the recovery attempt is never mistaken for
    ordinary implementation work.
+
+EOF
+  else
+    cat <<EOF
+1. No trusted full routing HEAD was recoverable from the provider or strict
+   issue evidence. Do not derive a marker from the current \`PROJECT_DIR\`
+   checkout.
+2. Enter an existing worktree whose checked-out branch is bound to issue
+   #${ISSUE_NUMBER} (\`feat/issue-${ISSUE_NUMBER}*\` or
+   \`fix/issue-${ISSUE_NUMBER}*\`) and verify that worktree.
+3. Run \`git -C <validated-pr-worktree> rev-parse HEAD\` and require its full
+   lowercase 40-character SHA.
+4. Post this exact marker as the entire issue comment, replacing the placeholder
+   with that validated worktree HEAD:
+   \`<!-- dev-conflict-context-read-failed: issue=${ISSUE_NUMBER} head=<validated-pr-worktree-full-head> -->\`
+   Do not add surrounding prose or post a duplicate.
+5. If no such PR worktree can be validated while the provider remains
+   unavailable, report the provider failure without a marker and exit. A marker
+   with a guessed or base-checkout HEAD is unsafe and must not be posted.
+6. Exit without changing code so the recovery attempt is never mistaken for
+   ordinary implementation work.
+
+EOF
+  fi
+  cat <<EOF
 
 Rebase procedure after confirming the current-HEAD marker:
 ${DEV_SAFE_REBASE_PROCEDURE}

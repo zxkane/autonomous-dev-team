@@ -9524,8 +9524,16 @@ a mandatory fail-closed recovery block instead: the agent must re-read the
 current context before implementation. If the read remains unavailable, it
 posts exactly one whole-body
 `<!-- dev-conflict-context-read-failed: issue=<N> head=<40-lowercase-hex> -->`
-comment for its local HEAD, with no surrounding prose, and exits without
-changing code.
+comment, with no surrounding prose, and exits without changing code. The
+marker HEAD is pinned first to the provider-resolved PR HEAD, then to the newest
+strict machine-authored issue routing evidence (`conflict-rebase` disposition
+or `Reviewed HEAD`) when PR resolution itself failed. It is never derived from
+bare `git rev-parse HEAD` in `PROJECT_DIR`, because that checkout ordinarily
+points at the base branch. If neither trusted source supplies a full HEAD, the
+agent must enter and validate an issue-bound PR worktree; without one it reports
+the provider failure without a marker rather than guessing. After validating
+one, it scopes `git rev-parse HEAD` to that worktree and posts the resulting full
+SHA in the canonical marker.
 
 The dispatcher trusts that marker only when it follows the latest trusted dev
 dispatch token and matches the unchanged reviewed full HEAD. On a
@@ -9554,7 +9562,7 @@ the first known-conflict handler.
 
 **Test**:
 `docs/test-cases/e2e-conflict-preflight.md` maps
-`TC-E2E-REBASE-001..069` across strict marker parsing, the complete preflight
+`TC-E2E-REBASE-001..071` across strict marker parsing, the complete preflight
 matrix, required-write faults/idempotency, canonical conflict parity,
 dispatcher convergence, GitHub/GitLab provider fixtures, and retained
 INV-44/INV-46/INV-98/INV-122 regressions.

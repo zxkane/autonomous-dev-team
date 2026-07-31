@@ -36,6 +36,15 @@ assert_contains() {
     echo "      missing=[$needle]"
   fi
 }
+assert_not_contains() {
+  local desc="$1" needle="$2" file="$3"
+  if grep -Fq -- "$needle" "$file"; then
+    bad "$desc"
+    echo "      unexpected=[$needle]"
+  else
+    ok "$desc"
+  fi
+}
 
 TMP=$(mktemp -d)
 trap 'pkill -9 -f "$TMP" 2>/dev/null || true; rm -rf "$TMP"' EXIT
@@ -224,17 +233,37 @@ EOF
 
 cat >"$BIN/claude" <<'EOF'
 #!/bin/bash
+post_context_failure_marker() {
+  local marker="$1" id
+  grep -Fq -- "$marker" "$PREFLIGHT_FIXTURE_STATE/comments.jsonl" && return 0
+  id=$(( $(wc -l <"$PREFLIGHT_FIXTURE_STATE/comments.jsonl") + 1 ))
+  jq -cn --argjson id "$id" --arg body "$marker" \
+    --arg ts "2026-07-30T00:20:$(printf '%02d' "$id")Z" \
+    '{id:$id,author:"dev-app[bot]",authorKind:"bot",
+      body:$body,createdAt:$ts}' >>"$PREFLIGHT_FIXTURE_STATE/comments.jsonl"
+}
+
 printf 'agent\n' >>"$PREFLIGHT_FIXTURE_STATE/agent-count"
 cat >"$PREFLIGHT_FIXTURE_STATE/dev-prompt"
 case "${PREFLIGHT_DEV_SCENARIO:-}" in
   context-read-failed)
-    id=$(( $(wc -l <"$PREFLIGHT_FIXTURE_STATE/comments.jsonl") + 1 ))
-    head=$(cat "$PREFLIGHT_FIXTURE_STATE/head")
-    jq -cn --argjson id "$id" --arg head "$head" \
-      --arg ts "2026-07-30T00:20:$(printf '%02d' "$id")Z" \
-      '{id:$id,author:"dev-app[bot]",authorKind:"bot",
-        body:("<!-- dev-conflict-context-read-failed: issue=540 head=" + $head + " -->"),
-        createdAt:$ts}' >>"$PREFLIGHT_FIXTURE_STATE/comments.jsonl"
+    marker=$(grep -Eo \
+      '<!-- dev-conflict-context-read-failed: issue=540 head=[0-9a-f]{40} -->' \
+      "$PREFLIGHT_FIXTURE_STATE/dev-prompt" | head -1)
+    [[ -n "$marker" ]] || exit 1
+    post_context_failure_marker "$marker"
+    ;;
+  context-read-failed-worktree)
+    grep -Fq -- \
+      'git -C <validated-pr-worktree> rev-parse HEAD' \
+      "$PREFLIGHT_FIXTURE_STATE/dev-prompt" || exit 1
+    grep -Fq -- \
+      '<!-- dev-conflict-context-read-failed: issue=540 head=<validated-pr-worktree-full-head> -->' \
+      "$PREFLIGHT_FIXTURE_STATE/dev-prompt" || exit 1
+    head=$(git -C "$PREFLIGHT_DEV_WORKTREE" rev-parse HEAD) || exit 1
+    [[ "$head" =~ ^[0-9a-f]{40}$ ]] || exit 1
+    post_context_failure_marker \
+      "<!-- dev-conflict-context-read-failed: issue=540 head=${head} -->"
     ;;
   success)
     printf '%s\n' "fetch origin main" >>"$PREFLIGHT_FIXTURE_STATE/git-actions"
@@ -408,7 +437,6 @@ timeout 30 env \
   PATH="$BIN:$PATH" \
   GH_TOKEN="fixture-token" \
   PREFLIGHT_FIXTURE_STATE="$STATE" \
-  PREFLIGHT_DEV_SCENARIO="context-read-failed" \
   AUTONOMOUS_CONF="$WRAPPER_SCRIPTS/autonomous.conf" \
   bash "$WRAPPER_SCRIPTS/autonomous-dev.sh" \
     --issue 540 --mode new \
@@ -437,6 +465,7 @@ timeout 30 env \
   PATH="$BIN:$PATH" \
   GH_TOKEN="fixture-token" \
   PREFLIGHT_FIXTURE_STATE="$STATE" \
+  PREFLIGHT_DEV_SCENARIO="context-read-failed" \
   AUTONOMOUS_CONF="$WRAPPER_SCRIPTS/autonomous.conf" \
   bash "$WRAPPER_SCRIPTS/autonomous-dev.sh" \
     --issue 540 --mode new \
@@ -446,9 +475,11 @@ assert_contains "TC-E2E-REBASE-049 comment-read failure emits mandatory context 
   "Conflict routing context could not be verified" "$STATE/dev-prompt"
 assert_contains "TC-E2E-REBASE-049 guarded prompt forbids ordinary implementation first" \
   "Do not begin implementation or review-finding work" "$STATE/dev-prompt"
-assert_contains "TC-E2E-REBASE-064 guarded prompt requires the exact HEAD-bound failure marker" \
-  "<!-- dev-conflict-context-read-failed: issue=540 head=<full-lowercase-40-char-sha> -->" \
+assert_contains "TC-E2E-REBASE-070 guarded prompt pins the reviewed HEAD" \
+  "<!-- dev-conflict-context-read-failed: issue=540 head=${HEAD_OLD} -->" \
   "$STATE/dev-prompt"
+assert_not_contains "TC-E2E-REBASE-070 guarded prompt never derives the marker from PROJECT_DIR" \
+  "Run \`git rev-parse HEAD\`" "$STATE/dev-prompt"
 assert_contains "TC-E2E-REBASE-064 guarded prompt makes the failure marker whole-body and idempotent" \
   "entire issue comment" "$STATE/dev-prompt"
 assert_contains "TC-E2E-REBASE-065 real guarded agent posts the current-HEAD failure marker" \
@@ -464,6 +495,7 @@ timeout 30 env \
   PATH="$BIN:$PATH" \
   GH_TOKEN="fixture-token" \
   PREFLIGHT_FIXTURE_STATE="$STATE" \
+  PREFLIGHT_DEV_SCENARIO="context-read-failed" \
   AUTONOMOUS_CONF="$WRAPPER_SCRIPTS/autonomous.conf" \
   bash "$WRAPPER_SCRIPTS/autonomous-dev.sh" \
     --issue 540 --mode new \
@@ -471,10 +503,52 @@ timeout 30 env \
 assert_eq "TC-E2E-REBASE-049 PR-resolution failure still launches guarded prompt" "0" "$?"
 assert_contains "TC-E2E-REBASE-049 PR-resolution failure emits mandatory context recovery" \
   "Conflict routing context could not be verified" "$STATE/dev-prompt"
-assert_contains "TC-E2E-REBASE-064 repeated provider failure carries the same canonical marker contract" \
-  "<!-- dev-conflict-context-read-failed: issue=540 head=<full-lowercase-40-char-sha> -->" \
+assert_contains "TC-E2E-REBASE-070 routing evidence survives PR-resolution failure" \
+  "<!-- dev-conflict-context-read-failed: issue=540 head=${HEAD_OLD} -->" \
   "$STATE/dev-prompt"
+assert_eq "TC-E2E-REBASE-070 repeated guarded attempts keep one HEAD-bound marker" \
+  "1" "$(grep -Fc "<!-- dev-conflict-context-read-failed: issue=540 head=${HEAD_OLD} -->" \
+    "$STATE/comments.jsonl" || true)"
 rm -f "$STATE/fail-find-pr"
+
+cp "$STATE/comments.jsonl" "$STATE/comments.routing-evidence"
+: >"$STATE/comments.jsonl"
+: >"$STATE/dev-prompt"
+FALLBACK_WORKTREE="$TMP/fallback-worktree"
+git init -q -b fix/issue-540-fallback "$FALLBACK_WORKTREE"
+git -C "$FALLBACK_WORKTREE" config user.name fixture
+git -C "$FALLBACK_WORKTREE" config user.email fixture@example.com
+printf '%s\n' fallback >"$FALLBACK_WORKTREE/fallback.txt"
+git -C "$FALLBACK_WORKTREE" add fallback.txt
+git -C "$FALLBACK_WORKTREE" commit -qm fallback
+fallback_worktree_head=$(git -C "$FALLBACK_WORKTREE" rev-parse HEAD)
+base_checkout_head=$(git -C "$PROJECT_ROOT" rev-parse HEAD)
+touch "$STATE/fail-find-pr"
+timeout 30 env \
+  PATH="$BIN:$PATH" \
+  GH_TOKEN="fixture-token" \
+  PREFLIGHT_FIXTURE_STATE="$STATE" \
+  PREFLIGHT_DEV_SCENARIO="context-read-failed-worktree" \
+  PREFLIGHT_DEV_WORKTREE="$FALLBACK_WORKTREE" \
+  AUTONOMOUS_CONF="$WRAPPER_SCRIPTS/autonomous.conf" \
+  bash "$WRAPPER_SCRIPTS/autonomous-dev.sh" \
+    --issue 540 --mode new \
+    >"$STATE/dev-no-trusted-head.out" 2>&1
+assert_eq "TC-E2E-REBASE-071 no trusted HEAD still launches fail-closed prompt" \
+  "0" "$?"
+assert_contains "TC-E2E-REBASE-071 no trusted HEAD requires an issue worktree" \
+  "Enter an existing worktree whose checked-out branch is bound to issue" \
+  "$STATE/dev-prompt"
+assert_contains "TC-E2E-REBASE-071 validated worktree receives a scoped HEAD command" \
+  "git -C <validated-pr-worktree> rev-parse HEAD" "$STATE/dev-prompt"
+assert_contains "TC-E2E-REBASE-071 validated worktree HEAD becomes the marker" \
+  "<!-- dev-conflict-context-read-failed: issue=540 head=${fallback_worktree_head} -->" \
+  "$STATE/comments.jsonl"
+assert_not_contains "TC-E2E-REBASE-071 base checkout HEAD is never posted" \
+  "<!-- dev-conflict-context-read-failed: issue=540 head=${base_checkout_head} -->" \
+  "$STATE/comments.jsonl"
+rm -f "$STATE/fail-find-pr"
+cp "$STATE/comments.routing-evidence" "$STATE/comments.jsonl"
 
 source "$LIVENESS_LIB"
 context_failure_marker="<!-- dev-conflict-context-read-failed: issue=540 head=${HEAD_OLD} -->"

@@ -71,7 +71,7 @@ provider.
 | TC-TERMCTRL-060 | Intent process exits before transition | A fresh process reads the durable comment and stalls the issue |
 | TC-TERMCTRL-061 | Fresh process completes cleanup | Final labels are exactly `autonomous,stalled`; read is empty after consume |
 | TC-TERMCTRL-070 | Wrapper source wiring | Every cleanup-to-pending call is guarded through terminal control |
-| TC-TERMCTRL-071 | Existing retry exhaustion | `mark_stalled` body and all production call sites match pre-feature checksums |
+| TC-TERMCTRL-071 | Existing retry exhaustion | `mark_stalled` body and the reviewed production call-site inventory match approved checksums |
 | TC-TERMCTRL-072 | Provider neutrality | New library contains no raw `gh`, `glab`, REST, or GraphQL call |
 | TC-TERMCTRL-073 | Branch coverage | Source-derived decision-site coverage of the new library is greater than 80 percent |
 | TC-TERMCTRL-074 | Executable state-machine coverage | All four owner-aware `-> stalled` movements are declared, code-site mapped, scanned from `lib-terminal-control.sh`, and guarded by its actual already-stalled predicate |

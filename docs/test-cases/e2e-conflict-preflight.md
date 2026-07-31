@@ -80,6 +80,8 @@
 | TC-E2E-REBASE-067 | The matching marker predates the latest trusted dev dispatch token, or no trusted token exists | The out-of-attempt marker cannot stall the new attempt; ordinary bounded routing continues |
 | TC-E2E-REBASE-068 | An unconfirmed Codex session posts the current-attempt marker for the unchanged reviewed HEAD | Dispatcher transitions directly to `stalled` without a crash-recovery `dev-new` |
 | TC-E2E-REBASE-069 | A dispatch token and its later failure marker share one provider timestamp second | The normalized monotone comment ID breaks the tie and the marker remains current-attempt evidence |
+| TC-E2E-REBASE-070 | Dev conflict-context reads fail while `PROJECT_DIR` points at a different base checkout HEAD | The guarded prompt binds the failure marker to strict issue routing evidence for the reviewed PR HEAD; the agent never derives it from bare `git rev-parse HEAD` in `PROJECT_DIR` |
+| TC-E2E-REBASE-071 | Provider context and strict issue routing evidence both lack a full HEAD | The guarded prompt requires an issue-bound PR worktree, scopes `rev-parse` to that validated worktree, posts its full HEAD in the canonical marker, and never posts the base checkout HEAD |
 
 ## Dispatcher And Wrapper Convergence
 

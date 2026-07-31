@@ -173,8 +173,14 @@ work. If any provider read needed to establish that context fails, the prompt
 instead starts with a mandatory context-recovery block:
 ordinary implementation is forbidden until the current HEAD and marker can be
 re-read. If the read still fails, the agent posts the exact whole-body marker
-`<!-- dev-conflict-context-read-failed: issue=<N> head=<full-lowercase-sha> -->`
-once for the local HEAD and exits without changing code. The dispatcher accepts
+`<!-- dev-conflict-context-read-failed: issue=<N> head=<full-lowercase-sha> -->`.
+The wrapper renders the exact reviewed HEAD from a successful PR read or the
+newest strict issue routing evidence; it never asks the agent to derive the
+marker from the base checkout's `git rev-parse HEAD`. The agent posts it once
+and exits without changing code. If neither trusted source supplies a full
+HEAD, the agent may post only after validating an issue-bound PR worktree and
+running `git -C <validated-pr-worktree> rev-parse HEAD`; without that validation
+it exits without a marker rather than guessing. The dispatcher accepts
 that marker only after the latest trusted dev dispatch token and only for the
 unchanged reviewed full HEAD. A completed or completion-unprovable attempt with
 that evidence transitions directly from `pending-dev` to `stalled` without

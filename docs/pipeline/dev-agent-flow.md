@@ -368,15 +368,24 @@ aborted with `git rebase --abort`; semantic resolution is never forced.
 If linked-PR resolution, full-HEAD normalization, or comment reading fails,
 the prompt instead starts with a mandatory fail-closed context-recovery block.
 Ordinary work cannot begin until the current HEAD and canonical marker are
-re-read. If the provider read still fails, the agent resolves its local full
-lowercase 40-character HEAD and posts exactly one whole-body issue marker:
+re-read. If the provider read still fails, the wrapper pins the marker HEAD to
+the already-resolved provider PR HEAD, or falls back to the newest strict
+machine-authored issue routing evidence (`conflict-rebase` disposition or
+`Reviewed HEAD`). The agent posts exactly one whole-body issue marker:
 
 ```text
 <!-- dev-conflict-context-read-failed: issue=<N> head=<full-lowercase-40-char-sha> -->
 ```
 
 No surrounding prose or duplicate marker is allowed, and the agent exits
-without changing code. The dispatcher accepts the signal only when it is newer
+without changing code. The agent never derives this marker from bare
+`git rev-parse HEAD` in `PROJECT_DIR`, because that checkout normally points at
+the base branch rather than the PR. If neither trusted provider nor issue
+evidence supplies a full HEAD, the prompt requires entering and validating an
+issue-bound PR worktree; without one, the agent reports the provider failure
+without a marker rather than guessing. After validating one, the agent scopes
+`git rev-parse HEAD` to that worktree and posts the resulting full SHA in the
+same canonical marker. The dispatcher accepts the signal only when it is newer
 than the latest trusted dev dispatch token and matches the unchanged reviewed
 HEAD. That current-attempt evidence routes both completed and
 completion-unprovable sessions directly to `stalled`; for a completed session,
