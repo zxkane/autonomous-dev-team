@@ -478,6 +478,19 @@
       "note": "#466: a resolved dev session id whose `is_session_completed` check returned false (non-terminal stop reason such as api_error, non-claude dev CLI, or unreadable log) with no live wrapper — the shared _same_head_verdict_aware_recovery helper's OTHER disjoint precondition from dispatch-pending-dev-selfheal-lost-session (session id resolved vs. empty). Shares the SAME per-HEAD dev-new budget (self-heal-lost-session:<head> OR crashed-session-retry:<head>, either blocks the other) so neither cause can double-spend the one bounded retry; a spent budget escalates to mark_stalled instead of the residual park."
     },
     {
+      "id": "dispatch-stalled-dev-conflict-context",
+      "from": "pending_dev",
+      "to": "stalled",
+      "event": "dispatcher-step4-dev-conflict-context-read-failed",
+      "actor": "dispatcher",
+      "guards": ["verdict-fail-substantive", "head-equals-reviewed", "dev-conflict-context-failed-current-attempt"],
+      "actions": ["remove-label:pending-dev", "add-label:stalled", "comment:dev-conflict-context-stalled"],
+      "code_site": "lib-dispatch.sh _stall_dev_conflict_context_failure(): mark_stalled after current-attempt strict marker match",
+      "mermaid": "pending_dev --> stalled: Step 4 current dev attempt cannot read conflict context on unchanged reviewed HEAD [INV-147]",
+      "inv_refs": ["INV-147", "INV-128", "INV-125"],
+      "note": "INV-147: after a failed-substantive conflict-rebase attempt, a strict whole-body dev-conflict-context-read-failed marker is accepted only for the current issue/full HEAD and only after the latest trusted dev dispatch token, with normalized comment IDs breaking timestamp ties. Completed and completion-unprovable session routes both stall directly without another dev-new; the completed route uses the strict conflict-rebase disposition when the pre-session verdict is outside the normal classifier window. A stale-attempt marker is ignored. This specific route is load-bearing because the wrapper session report changes INV-128's generic fingerprint."
+    },
+    {
       "id": "dispatch-stalled-retries",
       "from": "pending_dev",
       "to": "stalled",

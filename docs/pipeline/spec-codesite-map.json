@@ -18,6 +18,7 @@
     "dispatch-pending-dev-pr-exists":        {"file": "lib-dispatch.sh",     "anchor": "handle_pending_dev_pr_exists()"},
     "dispatch-pending-dev-selfheal-lost-session": {"file": "lib-dispatch.sh", "anchor": "_same_head_verdict_aware_recovery() {"},
     "dispatch-pending-dev-crashed-session-retry": {"file": "lib-dispatch.sh", "anchor": "reviewed FAILED (${cause}) with no live wrapper"},
+    "dispatch-stalled-dev-conflict-context": {"file": "lib-dispatch.sh", "anchor": "_stall_dev_conflict_context_failure() {"},
     "dispatch-stalled-retries":              {"file": "lib-dispatch.sh",     "anchor": "mark_stalled()"},
     "dispatch-stalled-review-cap":           {"file": "lib-dispatch.sh",     "anchor": "mark_stalled()"},
     "dispatch-stalled-noprogress-substantive": {"file": "lib-dispatch.sh",   "anchor": "mark_stalled()"},

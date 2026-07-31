@@ -115,6 +115,12 @@ if ! declare -F emit_verdict_trailer_required >/dev/null 2>&1; then
     source "${_lrm_dir}/lib-review-verdict.sh"
   fi
 fi
+if ! declare -F _review_round_marker >/dev/null 2>&1; then
+  if [[ -n "$_lrm_dir" && -r "${_lrm_dir}/lib-review-round.sh" ]]; then
+    # shellcheck source=lib-review-round.sh
+    source "${_lrm_dir}/lib-review-round.sh"
+  fi
+fi
 unset _lrm_self _lrm_dir
 
 _review_optional_run_footer() {
@@ -472,18 +478,25 @@ _review_route_mergeable_unknown() {
   _review_ensure_required_verdict \
     "$issue" "$head" "mergeable-unknown" "pre-fanout" \
     "failed-non-substantive" "mergeable-unknown" || return 20
+  # INV-129 channel 3: reset even if the verdict cutoff later becomes unreadable.
+  itp_post_comment "$issue" "$(_review_round_marker "$issue" "$head" 0)" \
+    >/dev/null 2>&1 || true
   itp_transition_state "$issue" "reviewing" "pending-dev" >/dev/null 2>&1 \
     || return 21
 }
 
 _review_requeue_preflight() {
   local issue="$1" cause="$2" message="$3"
+  local head="${4:-${PR_HEAD_SHA:-}}"
   # Retry diagnostics are best-effort; the state transition is authoritative.
   itp_post_comment "$issue" \
     "${message}$(_review_optional_run_footer)" \
     >/dev/null 2>&1 || true
   # A trailer outage must not replace this safe pending-review retry with a crash.
   emit_verdict_trailer "$issue" "${REPO:-}" "failed-non-substantive" "$cause" \
+    >/dev/null 2>&1 || true
+  # INV-129 channel 3 is independent of the best-effort trailer cutoff.
+  itp_post_comment "$issue" "$(_review_round_marker "$issue" "$head" 0)" \
     >/dev/null 2>&1 || true
   itp_transition_state "$issue" "reviewing" "pending-review" >/dev/null 2>&1
 }

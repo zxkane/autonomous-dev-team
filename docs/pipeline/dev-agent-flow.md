@@ -368,8 +368,26 @@ aborted with `git rebase --abort`; semantic resolution is never forced.
 If linked-PR resolution, full-HEAD normalization, or comment reading fails,
 the prompt instead starts with a mandatory fail-closed context-recovery block.
 Ordinary work cannot begin until the current HEAD and canonical marker are
-re-read, and a repeated provider failure must be reported without changing
-code. `BASE_BRANCH` is the wrapper's resolved base branch
+re-read. If the provider read still fails, the agent resolves its local full
+lowercase 40-character HEAD and posts exactly one whole-body issue marker:
+
+```text
+<!-- dev-conflict-context-read-failed: issue=<N> head=<full-lowercase-40-char-sha> -->
+```
+
+No surrounding prose or duplicate marker is allowed, and the agent exits
+without changing code. The dispatcher accepts the signal only when it is newer
+than the latest trusted dev dispatch token and matches the unchanged reviewed
+HEAD. That current-attempt evidence routes both completed and
+completion-unprovable sessions directly to `stalled`; for a completed session,
+the strict current-HEAD `conflict-rebase` disposition preserves this route even
+though its required verdict predates the dev session and is outside the normal
+post-session classifier window. A marker from an older attempt cannot stall a
+later recovery. Timestamp ties use the provider-normalized monotone comment ID.
+The marker is registered with INV-128's idempotent grammar roster, but the
+direct route is the actual bound because wrapper session reports change the
+generic liveness fingerprint.
+`BASE_BRANCH` is the wrapper's resolved base branch
 ([INV-131](invariants.md#inv-131-the-pipelines-base-branch-is-a-resolved-exported-validated-conf-value--never-a-hardcoded-main-literal-in-a-prompt-hook-or-provider-argv),
 default `main`).
 

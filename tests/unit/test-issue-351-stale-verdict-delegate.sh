@@ -58,6 +58,7 @@ _MOCK_CURRENT_HEAD='sha-A'      # .headRefOid echoed by the router's fetch
 _MOCK_BOT_UNFIXABLE=1
 _MOCK_NOTICE_PRESENT=0          # generic dedup marker present (0/1)
 _MOCK_ATTEMPT_PRESENT=0         # branch-B attempt marker present (0/1)
+_MOCK_CONTEXT_FAILURE=0         # current-attempt strict INV-147 dev marker present
 
 # ---------------------------------------------------------------------------
 # Verb-layer recorder → TRACE FILE (subshell-safe: the router's dedup reads
@@ -100,7 +101,21 @@ itp_list_comments() {
   [ "$_MOCK_ATTEMPT_PRESENT" = "1" ] && body+=" no-progress-substantive-attempt:${_MOCK_CURRENT_HEAD}"
   [ "$_MOCK_SELF_HEAL_PRESENT" = "1" ] && body+=" self-heal-lost-session:${_MOCK_CURRENT_HEAD}"
   [ "$_MOCK_SELF_HEAL_NONSUB_PRESENT" = "1" ] && body+=" self-heal-non-substantive:${_MOCK_CURRENT_HEAD}"
-  printf '%s\n' "[{\"body\":\"${body}\"}]"
+  local rows
+  rows=$(jq -cn --arg body "$body" \
+    '[{id:1,body:$body,authorKind:"bot",createdAt:"2026-07-30T00:00:00Z"}]')
+  if [ "$_MOCK_CONTEXT_FAILURE" = "1" ]; then
+    rows=$(jq -cn --argjson rows "$rows" --arg head "$_MOCK_CURRENT_HEAD" \
+      '$rows + [
+        {id:2,body:"<!-- dispatcher-token: context-fixture at 2026-07-30T00:01:00Z mode=dev-new run=context-fixture -->\nDispatching autonomous development...",
+         authorKind:"bot",createdAt:"2026-07-30T00:01:00Z"},
+        {id:3,body:("<!-- dev-conflict-context-read-failed: issue=99 head=" + $head + " -->"),
+         authorKind:"bot",createdAt:"2026-07-30T00:02:00Z"},
+        {id:4,body:"**Agent Session Report (Dev)**\n- Dev Session ID: `context-fixture`\n- Exit code: 0",
+         authorKind:"bot",createdAt:"2026-07-30T00:03:00Z"}
+      ]')
+  fi
+  printf '%s\n' "$rows"
 }
 itp_post_comment()    { _rec itp_post_comment "$@"; }
 itp_transition_state(){ _rec itp_transition_state "$@"; }
@@ -182,6 +197,7 @@ _reset() {
   _MOCK_VERDICT='none'; _MOCK_CAUSE=''; _MOCK_DEV_ACTIONABLE='true'
   _MOCK_FLIP_COUNT=0; _MOCK_CURRENT_HEAD='sha-A'
   _MOCK_BOT_UNFIXABLE=1; _MOCK_NOTICE_PRESENT=0; _MOCK_ATTEMPT_PRESENT=0
+  _MOCK_CONTEXT_FAILURE=0
   _MOCK_MAY_STALL_NOW=0; _MOCK_SELF_HEAL_PRESENT=0; _MOCK_SELF_HEAL_NONSUB_PRESENT=0
 }
 
@@ -459,6 +475,24 @@ rc=$?
 assert_eq   "TC-351-DELEG-7b-RECOVER returns 0" "0" "$rc"
 assert_match "TC-351-DELEG-7b-RECOVER dispatched exactly one crashed-session-retry dev-new" "^dispatch${US}dev-new${US}99$" "$(_trace_all)"
 assert_match "TC-351-DELEG-7b-RECOVER posts crashed-session-retry marker" "crashed-session-retry:sha-A" "$(_trace_all)"
+
+# ===================================================================
+echo
+echo "=== TC-E2E-REBASE-068: unconfirmed Codex session + current context-read marker → stalled ==="
+_reset
+_MOCK_CURRENT_HEAD='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+_MOCK_PR_INFO="{\"number\":42,\"headRefOid\":\"${_MOCK_CURRENT_HEAD}\"}"
+_MOCK_LAST_REVIEWED="$_MOCK_CURRENT_HEAD"
+_MOCK_SESSION_ID='sid-codex-context'
+_MOCK_COMPLETED_RC=1
+_MOCK_VERDICT='failed-substantive'
+_MOCK_CONTEXT_FAILURE=1
+handle_pending_dev_pr_exists 99
+rc=$?
+assert_eq "TC-E2E-REBASE-068 returns 0" "0" "$rc"
+assert_match "TC-E2E-REBASE-068 unconfirmed session stalls directly" "^mark_stalled" "$(_trace_all)"
+assert_eq "TC-E2E-REBASE-068 dispatches no crash-recovery dev-new" "0" "$(_trace_verbs | grep -c '^dispatch$')"
+assert_match "TC-E2E-REBASE-068 emits context-specific terminal notice" "conflict-routing context remained unreadable" "$(_trace_all)"
 assert_no_match "TC-351-DELEG-7b-RECOVER NO stale-verdict park" "stale-verdict:" "$(_trace_all)"
 
 # ===================================================================

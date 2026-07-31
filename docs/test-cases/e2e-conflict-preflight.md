@@ -73,6 +73,13 @@
 | TC-E2E-REBASE-060 | Routing history is A disposition/verdict, then B disposition with the same verdict class, then A becomes current again | B's full-HEAD-bound verdict cannot satisfy A's freshness check; one fresh `head=A` required trailer is emitted and shared classification preserves its verdict/cause |
 | TC-E2E-REBASE-061 | A -> B -> A routing history also contains strict-self provider rows with null or missing timestamps | Malformed rows are excluded from the shared ordered timeline and cannot shift the freshness boundary to reuse A's stale verdict |
 | TC-E2E-REBASE-062 | A bare verdict trailer repeats `head`, `cause`, or `dev-actionable` | The structurally authenticated grammar rejects duplicate optional keys, including contradictory full-HEAD bindings |
+| TC-E2E-REBASE-063 | A preflight helper exits `failed-non-substantive` | The verdict is followed immediately by INV-129 `round=0`, then the state transition |
+| TC-E2E-REBASE-064 | Dev conflict-context provider reads fail repeatedly | Every guarded prompt requires one strict issue/full-HEAD whole-body marker and forbids surrounding prose or duplicates |
+| TC-E2E-REBASE-065 | The real guarded dev wrapper posts its marker and cleanup session report | The marker is idempotent, but the session report changes INV-128's generic fingerprint, proving a direct bound is required |
+| TC-E2E-REBASE-066 | A completed current attempt posts the strict marker for the unchanged reviewed HEAD; its required conflict verdict predates the dev session | The real post-session classifier returns `none`, but the strict current-HEAD `conflict-rebase` disposition preserves the direct `stalled` route with no further `dev-new` |
+| TC-E2E-REBASE-067 | The matching marker predates the latest trusted dev dispatch token, or no trusted token exists | The out-of-attempt marker cannot stall the new attempt; ordinary bounded routing continues |
+| TC-E2E-REBASE-068 | An unconfirmed Codex session posts the current-attempt marker for the unchanged reviewed HEAD | Dispatcher transitions directly to `stalled` without a crash-recovery `dev-new` |
+| TC-E2E-REBASE-069 | A dispatch token and its later failure marker share one provider timestamp second | The normalized monotone comment ID breaks the tie and the marker remains current-attempt evidence |
 
 ## Dispatcher And Wrapper Convergence
 
@@ -106,6 +113,7 @@
 | Strict current-issue/full-head/machine marker contract | 001-009, 029-031, 052-053, 055-057 |
 | Required writes prevent orphan pending-dev and retry idempotently | 020-025, 040-042, 059 |
 | Successful/unsafe rebase convergence | 033-034, 045-046 |
-| UNKNOWN/empty/head-change bounded non-substantive routing | 012-016, 028, 047, 050 |
+| UNKNOWN/empty/head-change bounded non-substantive routing | 012-016, 028, 047, 050, 063 |
+| Persistent dev context-read failure remains bounded | 049, 064-069 |
 | GitHub/GitLab equivalent provider decisions | 035-037 |
 | Existing gates and repository checks remain green | 019, 038-039 |

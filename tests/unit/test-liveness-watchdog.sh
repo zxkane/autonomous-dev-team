@@ -1210,6 +1210,26 @@ GATEBREAK094
 assert_eq "TC-LIVENESS-094 genuine full-body dispatcher-gate-fail-breaker: registers in the digest" "dispatcher-gate-fail-breaker:" \
   "$(_liveness_marker_digest "$(jq -n --arg b "$gatebreak_body094" '[{"authorKind":"bot","createdAt":"t","body":$b}]')")"
 
+# A dev agent may report the same provider-side conflict-context outage on
+# every retry. Its canonical marker must be idempotent in both fingerprint
+# components, while prose/quoted lookalikes remain observable progress.
+context_head095="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+context_marker095="<!-- dev-conflict-context-read-failed: issue=540 head=${context_head095} -->"
+context_once095=$(jq -n --arg b "$context_marker095" \
+  '[{"authorKind":"bot","createdAt":"t1","body":$b}]')
+context_twice095=$(jq -n --arg b "$context_marker095" \
+  '[{"authorKind":"bot","createdAt":"t1","body":$b},
+    {"authorKind":"bot","createdAt":"t2","body":$b}]')
+assert_eq "TC-LIVENESS-095 canonical conflict-context failure is idempotent" \
+  "0|dev-conflict-context-read-failed:" \
+  "$(_liveness_non_idempotent_count "$context_once095")|$(_liveness_marker_digest "$context_once095")"
+assert_eq "TC-LIVENESS-095 duplicate conflict-context failures keep the same fingerprint inputs" \
+  "0|dev-conflict-context-read-failed:" \
+  "$(_liveness_non_idempotent_count "$context_twice095")|$(_liveness_marker_digest "$context_twice095")"
+assert_eq "TC-LIVENESS-095 quoted conflict-context marker remains real progress" \
+  "1|" \
+  "$(_liveness_non_idempotent_count "$(jq -n --arg b "quoted ${context_marker095}" '[{authorKind:"bot",body:$b}]')")|$(_liveness_marker_digest "$(jq -n --arg b "quoted ${context_marker095}" '[{authorKind:"bot",createdAt:"t",body:$b}]')")"
+
 echo
 echo "=== Summary ==="
 echo "Passed: $PASS"

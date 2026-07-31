@@ -108,6 +108,9 @@ gh() {
 # shellcheck source=../../skills/autonomous-dispatcher/scripts/lib-dispatch.sh
 source "$LIB"
 set +e
+_REAL_CLASSIFY_RECENT_REVIEW_VERDICT_DEF=$(
+  declare -f classify_recent_review_verdict
+)
 
 # Re-define mocks AFTER sourcing.
 log() { :; }
@@ -201,6 +204,7 @@ _MOCK_MATCHED_PATTERNS_HEAD=""    # (codex review round-2, PR #498) head= field 
                                    # marker carries; defaults to _MOCK_PR_HEAD (the SAME head as
                                    # the reviewed PR) — set to a DIFFERENT sha to simulate a STALE
                                    # marker left over from an earlier, unrelated round.
+_MOCK_CONTEXT_FAILURE="0"         # current|stale|orphan|pre-session|same-second INV-147 fixtures
 
 fetch_pr_for_issue() {
   # [INV-123] (#461): a nonzero return simulates a resolve_pr_for_issue
@@ -241,6 +245,29 @@ chp_pr_view() {
 # (any session id → emit a body containing both literals when present).
 itp_list_comments() {
   local _bodies=()
+  if [[ "${_MOCK_CONTEXT_FAILURE:-0}" == "pre-session" ]]; then
+    _bodies+=("<!-- review-disposition: issue=100 head=${_MOCK_PR_HEAD} phase=pre-fanout result=conflict-rebase -->")
+    _bodies+=("<!-- review-verdict: failed-substantive head=${_MOCK_PR_HEAD} -->")
+  fi
+  if [[ "${_MOCK_CONTEXT_FAILURE:-0}" == "stale" \
+        || "${_MOCK_CONTEXT_FAILURE:-0}" == "orphan" ]]; then
+    _bodies+=("<!-- dev-conflict-context-read-failed: issue=100 head=${_MOCK_PR_HEAD} -->")
+  fi
+  if [[ "${_MOCK_CONTEXT_FAILURE:-0}" == "current" \
+        || "${_MOCK_CONTEXT_FAILURE:-0}" == "pre-session" \
+        || "${_MOCK_CONTEXT_FAILURE:-0}" == "same-second" \
+        || "${_MOCK_CONTEXT_FAILURE:-0}" == "stale" ]]; then
+    _bodies+=("<!-- dispatcher-token: context-fixture at 2026-07-30T00:00:00Z mode=dev-new run=context-fixture -->
+Dispatching autonomous development...")
+  fi
+  if [[ "${_MOCK_CONTEXT_FAILURE:-0}" == "current" \
+        || "${_MOCK_CONTEXT_FAILURE:-0}" == "pre-session" \
+        || "${_MOCK_CONTEXT_FAILURE:-0}" == "same-second" ]]; then
+    _bodies+=("<!-- dev-conflict-context-read-failed: issue=100 head=${_MOCK_PR_HEAD} -->")
+    _bodies+=("**Agent Session Report (Dev)**
+- Dev Session ID: \`context-fixture\`
+- Exit code: 0")
+  fi
   if [[ "${_MOCK_NOPROG_ATTEMPT_PRESENT:-0}" != "0" ]]; then
     _bodies+=("<!-- no-progress-substantive-attempt:${_MOCK_PR_HEAD} -->")
   fi
@@ -273,10 +300,14 @@ itp_list_comments() {
     local _sid="${_MOCK_NOTICE_SESSION:-__no_session__}"
     _bodies+=("INV-12-completed:${_sid} INV-35-fresh-dev:${_sid} INV-12-no-pr-fresh-dev:${_sid} prior notice")
   fi
-  local _json="[]" _ts=0 b
+  local _json="[]" _ts=0 b _created_at
   for b in "${_bodies[@]}"; do
-    _json=$(jq -c --arg b "$b" --argjson t "$_ts" \
-      '. + [{id:(100+$t), author:"my-claw", authorKind:"self", body:$b, createdAt:"2026-06-12T00:00:0\($t)Z"}]' <<<"$_json")
+    _created_at="2026-06-12T00:00:0${_ts}Z"
+    if [[ "${_MOCK_CONTEXT_FAILURE:-0}" == "same-second" ]]; then
+      _created_at="2026-06-12T00:00:00Z"
+    fi
+    _json=$(jq -c --arg b "$b" --arg ts "$_created_at" --argjson t "$_ts" \
+      '. + [{id:(100+$t), author:"my-claw", authorKind:"self", body:$b, createdAt:$ts}]' <<<"$_json")
     _ts=$((_ts + 1))
   done
   printf '%s' "$_json"
@@ -306,6 +337,7 @@ reset_mocks() {
   _MOCK_ATTEMPT_WRITE_TRIES=0
   _MOCK_MATCHED_PATTERNS_MARKER=""
   _MOCK_MATCHED_PATTERNS_HEAD=""
+  _MOCK_CONTEXT_FAILURE="0"
   _MOCK_NOTICE_SESSION=""   # #281: session id the synthesized INV-12/INV-35 marker carries
   _MOCK_PR_LOOKUP_FAILS="0" # [INV-123] (#461): simulate fetch_pr_for_issue transport failure
   _MOCK_PR_AUTHOR='"alice"' # [#495 review finding #3] resolve_pr_author_mention integration mock
@@ -828,6 +860,89 @@ else
   echo -e "  ${RED}FAIL${NC}: NOPROG-008 notice contains the grep token (would false-trigger branch B)"
   FAIL=$((FAIL + 1))
 fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== INV-147 dev conflict-context read failures use a direct same-HEAD bound ==="
+# ---------------------------------------------------------------------------
+
+context_head="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+reset_mocks
+_MOCK_VERDICT="failed-substantive"
+_MOCK_PR_HEAD="$context_head"
+_MOCK_LAST_REVIEWED_HEAD="$context_head"
+_MOCK_CONTEXT_FAILURE="current"
+prepare_log 100
+assert_returns "TC-E2E-REBASE-066 current-attempt context failure returns 0" 0 \
+  handle_completed_session_routing 100 "sid-context-current" "2026-07-30T00:02:00Z"
+assert_eq "TC-E2E-REBASE-066 current-attempt context failure stalls" \
+  "100 " "$_MOCK_MARK_STALLED_CALLS"
+assert_eq "TC-E2E-REBASE-066 current-attempt context failure dispatches no dev-new" \
+  "" "$_MOCK_DISPATCH_CALLS"
+assert_contains "TC-E2E-REBASE-066 context-specific terminal notice is emitted" \
+  "conflict-routing context remained unreadable" "$_MOCK_LAST_COMMENT_BODY"
+
+reset_mocks
+_MOCK_VERDICT="none"
+_MOCK_PR_HEAD="$context_head"
+_MOCK_LAST_REVIEWED_HEAD="$context_head"
+_MOCK_CONTEXT_FAILURE="pre-session"
+prepare_log 100
+_MOCK_CLASSIFY_RECENT_REVIEW_VERDICT_DEF=$(
+  declare -f classify_recent_review_verdict
+)
+eval "$_REAL_CLASSIFY_RECENT_REVIEW_VERDICT_DEF"
+assert_returns "TC-E2E-REBASE-066 pre-session conflict verdict returns 0 with real classifier" 0 \
+  handle_completed_session_routing \
+    100 "sid-context-pre-session" "2026-07-30T00:02:00Z" "$context_head"
+eval "$_MOCK_CLASSIFY_RECENT_REVIEW_VERDICT_DEF"
+assert_eq "TC-E2E-REBASE-066 pre-session conflict verdict still stalls" \
+  "100 " "$_MOCK_MARK_STALLED_CALLS"
+assert_eq "TC-E2E-REBASE-066 pre-session conflict verdict dispatches no dev-new" \
+  "" "$_MOCK_DISPATCH_CALLS"
+assert_not_contains "TC-E2E-REBASE-066 pre-session conflict verdict avoids INV-12 handoff" \
+  "INV-12-completed" "$_MOCK_FULL_COMMENT_LOG"
+
+reset_mocks
+_MOCK_VERDICT="failed-substantive"
+_MOCK_PR_HEAD="$context_head"
+_MOCK_LAST_REVIEWED_HEAD="$context_head"
+_MOCK_CONTEXT_FAILURE="same-second"
+prepare_log 100
+assert_returns "TC-E2E-REBASE-069 same-second marker returns 0" 0 \
+  handle_completed_session_routing 100 "sid-context-same-second" \
+    "2026-07-30T00:02:00Z"
+assert_eq "TC-E2E-REBASE-069 comment-id tie-break accepts current-attempt marker" \
+  "100 " "$_MOCK_MARK_STALLED_CALLS"
+assert_eq "TC-E2E-REBASE-069 same-second marker dispatches no dev-new" \
+  "" "$_MOCK_DISPATCH_CALLS"
+
+reset_mocks
+_MOCK_VERDICT="failed-substantive"
+_MOCK_PR_HEAD="$context_head"
+_MOCK_LAST_REVIEWED_HEAD="$context_head"
+_MOCK_CONTEXT_FAILURE="stale"
+prepare_log 100
+assert_returns "TC-E2E-REBASE-067 stale-attempt context marker returns 0" 0 \
+  handle_completed_session_routing 100 "sid-context-new" "2026-07-30T00:02:00Z"
+assert_eq "TC-E2E-REBASE-067 stale-attempt marker does not stall the new attempt" \
+  "" "$_MOCK_MARK_STALLED_CALLS"
+assert_eq "TC-E2E-REBASE-067 stale-attempt marker preserves normal dev-new routing" \
+  "dev-new:100 " "$_MOCK_DISPATCH_CALLS"
+
+reset_mocks
+_MOCK_VERDICT="failed-substantive"
+_MOCK_PR_HEAD="$context_head"
+_MOCK_LAST_REVIEWED_HEAD="$context_head"
+_MOCK_CONTEXT_FAILURE="orphan"
+prepare_log 100
+assert_returns "TC-E2E-REBASE-067 marker without a trusted attempt returns 0" 0 \
+  handle_completed_session_routing 100 "sid-context-orphan" "2026-07-30T00:02:00Z"
+assert_eq "TC-E2E-REBASE-067 marker without a trusted attempt does not stall" \
+  "" "$_MOCK_MARK_STALLED_CALLS"
+assert_eq "TC-E2E-REBASE-067 marker without a trusted attempt preserves normal routing" \
+  "dev-new:100 " "$_MOCK_DISPATCH_CALLS"
 
 # ---------------------------------------------------------------------------
 echo ""

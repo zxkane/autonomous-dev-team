@@ -56,10 +56,10 @@
 # prefix). This replaces BOTH `_LIVENESS_IDEMPOTENT_PATTERN` and
 # `_LIVENESS_DIGEST_PATTERN` (the per-token alternations every prior round
 # extended) with a single per-producer source of truth: `digest: true` marks
-# the 15 entries eligible for the marker-digest read (every entry except the
+# the 16 entries eligible for the marker-digest read (every entry except the
 # watchdog's own marker and the two liveness reports themselves — same
 # exclusion `_LIVENESS_DIGEST_PATTERN` encoded, see `_liveness_marker_digest`
-# below for why those three are digest-ineligible); ALL 18 entries are
+# below for why those three are digest-ineligible); ALL 19 entries are
 # eligible for the idempotent-count read.
 #
 # `reason=liveness-timeout`'s entry starts with the placeholder
@@ -137,6 +137,11 @@ _LIVENESS_GRAMMARS_JSON=$(cat <<'_LIVENESS_GRAMMARS_JSON_EOF'
   {
     "name": "no-progress-substantive-attempt:",
     "re": "^<!-- no-progress-substantive-attempt:[^\\n]* session=[^\\n]* -->$",
+    "digest": true
+  },
+  {
+    "name": "dev-conflict-context-read-failed:",
+    "re": "^<!-- dev-conflict-context-read-failed: issue=[0-9]+ head=[0-9a-f]{40} -->$",
     "digest": true
   },
   {

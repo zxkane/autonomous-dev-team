@@ -1719,6 +1719,62 @@ recent_review_verdict_body() {
 # ---------------------------------------------------------------------------
 # INV-35 Step 4b.5.1: review-aware routing for `completed` sessions.
 # ---------------------------------------------------------------------------
+
+# INV-147: true only when the current dev attempt posted the strict
+# conflict-context read-failure marker for this exact issue and full PR HEAD.
+# The latest trusted dev dispatch token is the attempt boundary, so an older
+# same-HEAD marker cannot stall a later attempt after the provider recovers.
+_dev_conflict_context_failed_current_attempt() {
+  local issue_num="$1" current_head="$2"
+  local comments_json strict="0" marker
+
+  [[ "$issue_num" =~ ^[0-9]+$ ]] || return 1
+  [[ "$current_head" =~ ^[0-9a-f]{40}$ ]] || return 1
+  comments_json=$(itp_list_comments "$issue_num" 2>/dev/null) || return 1
+  [[ -n "$comments_json" ]] || return 1
+  [[ "${GH_AUTH_MODE:-token}" == "app" ]] && strict="1"
+  marker="<!-- dev-conflict-context-read-failed: issue=${issue_num} head=${current_head} -->"
+
+  jq -e --arg marker "$marker" --arg strict "$strict" '
+    def trusted:
+      (($strict == "0") or ((.authorKind // "human") != "human"));
+    def dev_dispatch:
+      (.body | type == "string")
+      and (.body | test("^<!-- dispatcher-token: [a-zA-Z0-9_-]+ at [0-9TZ:-]+ mode=dev-(new|resume)( run=[^ \\n]+)? -->\\n(Dispatching autonomous development\\.\\.\\.|Resuming autonomous development\\.\\.\\.)$"));
+    ([.[] | select(
+        trusted
+        and dev_dispatch
+        and (.createdAt | type == "string")
+        and (.id | type == "number"))
+      | {createdAt, id}] | sort_by(.createdAt, .id) | last) as $attempt_start
+    | if $attempt_start == null then false
+      else any(.[];
+          trusted
+          and (.createdAt | type == "string")
+          and (.id | type == "number")
+          and ([.createdAt, .id] > [$attempt_start.createdAt, $attempt_start.id])
+          and (.body == $marker))
+      end
+  ' <<<"$comments_json" >/dev/null 2>&1
+}
+
+_stall_dev_conflict_context_failure() {
+  local issue_num="$1" current_head="$2"
+  local notice_marker="dev-conflict-context-stall:${current_head}"
+
+  log "  issue #${issue_num} current dev attempt could not re-read conflict routing context for HEAD ${current_head} — marking stalled without another dev dispatch ([INV-147])"
+  if itp_list_comments "$issue_num" 2>/dev/null \
+      | jq -r --arg marker "$notice_marker" \
+          '[.[].body | select(type == "string") | select(contains($marker))] | length' \
+        2>/dev/null | grep -q '^0$'; then
+    # Best-effort context detail; mark_stalled below remains authoritative.
+    itp_post_comment "$issue_num" \
+      "The dev agent's conflict-routing context remained unreadable after its guarded retry for PR HEAD \`${current_head}\`. Marking stalled without another same-HEAD dev dispatch; restore provider access, then remove \`stalled\` to retry. (\`${notice_marker}\`)" \
+      2>/dev/null || true
+  fi
+  mark_stalled "$issue_num"
+}
+
 #
 # handle_completed_session_routing <issue_num> <session_id> <session_end_iso> [routing_head]
 #
@@ -1771,6 +1827,26 @@ handle_completed_session_routing() {
       if ! label_swap "$issue_num" "pending-dev" "pending-review"; then
         return 2
       fi
+      return 0
+    fi
+  fi
+
+  # A conflict-preflight verdict is intentionally written before the guarded
+  # dev session starts, so the ordinary post-session classifier returns none.
+  # Recover only that strict, current-HEAD disposition here; mergeable-unknown
+  # and ordinary Reviewed HEAD evidence retain their existing routing.
+  if [[ "$_verdict" == "none" && -n "$routing_head" ]]; then
+    local _routing_evidence_head="" _routing_evidence_kind=""
+    local _routing_evidence_result=""
+    if latest_review_routing_evidence \
+         "$issue_num" _routing_evidence_head _routing_evidence_kind \
+         _routing_evidence_result "$routing_head" \
+       && [[ "$_routing_evidence_head" == "$routing_head" \
+             && "$_routing_evidence_kind" == "disposition" \
+             && "$_routing_evidence_result" == "conflict-rebase" ]] \
+       && _dev_conflict_context_failed_current_attempt \
+            "$issue_num" "$routing_head"; then
+      _stall_dev_conflict_context_failure "$issue_num" "$routing_head"
       return 0
     fi
   fi
@@ -1937,6 +2013,17 @@ handle_completed_session_routing() {
         _np_last_head=$(last_reviewed_head "$issue_num")
       fi
       local _np_notice_marker="no-progress-substantive:${_np_current_head}"
+
+      # The wrapper's provider read and the guarded dev attempt both failed.
+      # Bind the terminal decision to this dev attempt and unchanged review
+      # HEAD instead of relying on INV-128's generic fingerprint: the wrapper's
+      # session report and label movement are legitimate progress there.
+      if [ -n "$_np_last_head" ] && [ "$_np_current_head" = "$_np_last_head" ] \
+         && _dev_conflict_context_failed_current_attempt \
+              "$issue_num" "$_np_current_head"; then
+        _stall_dev_conflict_context_failure "$issue_num" "$_np_current_head"
+        return 0
+      fi
 
       # Branch A — bot-unfixable: the dev agent reported a 403 on a PR-metadata
       # edit (its scoped token can't do it) or a maintainer/post-merge-only
@@ -4071,6 +4158,16 @@ _same_head_verdict_aware_recovery() {
         "PR ${pr_ref} HEAD \`${current_head}\` was reviewed with a FAILED verdict that classified every blocking finding as **not resolvable by the autonomous dev agent** (requires a human or a privileged token the agent's scoped token lacks, [INV-92]), and ${_cause_desc}.${_na_pat_sentence} Marking stalled — no \`dev-new\` will be dispatched. $(resolve_escalation_mention "$issue_num" "$pr_num") please apply the change manually. (\`${_na_marker}\`)"
     fi
     mark_stalled "$issue_num"
+    return 0
+  fi
+
+  # A Codex/non-Claude session may post the strict current-attempt marker even
+  # when its local completion record cannot be confirmed. That evidence is
+  # stronger than the generic crashed-session recovery heuristic.
+  if [ "$_verdict" = "failed-substantive" ] \
+     && _dev_conflict_context_failed_current_attempt \
+          "$issue_num" "$current_head"; then
+    _stall_dev_conflict_context_failure "$issue_num" "$current_head"
     return 0
   fi
 

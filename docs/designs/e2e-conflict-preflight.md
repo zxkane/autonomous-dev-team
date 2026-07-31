@@ -19,7 +19,8 @@ fan-out as the race-closing check.
 ```text
 resolve linked PR
   -> capture {state, full head, branch}
-  -> poll chp_mergeable with MERGEABLE_RETRIES
+  -> poll chp_mergeable with MERGEABLE_RETRIES and
+     MERGEABLE_RETRY_DELAY_SECONDS
   -> capture {state, full head, branch} again
      -> not OPEN: INV-54 remove-only cleanup
      -> head changed: failed-non-substantive(head-changed) -> pending-review
@@ -171,4 +172,20 @@ dispatch. A match prepends the mandatory rebase block ahead of implementation
 work. If any provider read needed to establish that context fails, the prompt
 instead starts with a mandatory context-recovery block:
 ordinary implementation is forbidden until the current HEAD and marker can be
-re-read, and a repeated read failure must be reported without changing code.
+re-read. If the read still fails, the agent posts the exact whole-body marker
+`<!-- dev-conflict-context-read-failed: issue=<N> head=<full-lowercase-sha> -->`
+once for the local HEAD and exits without changing code. The dispatcher accepts
+that marker only after the latest trusted dev dispatch token and only for the
+unchanged reviewed full HEAD. A completed or completion-unprovable attempt with
+that evidence transitions directly from `pending-dev` to `stalled` without
+another `dev-new`; the completed route recognizes the strict current-HEAD
+`conflict-rebase` disposition because its required verdict predates the dev
+session and is outside the ordinary post-session verdict window. A stale-attempt
+marker is ignored, and same-second ordering uses the normalized monotone comment
+ID. INV-128 classifies the marker as idempotent for consistency, but is not the
+primary bound because each wrapper attempt's session report legitimately
+changes the generic liveness fingerprint.
+
+Every preflight `failed-non-substantive` exit also posts INV-129's `round=0`
+reset immediately after its verdict and before its state transition. This is a
+second reset channel when the verdict-cutoff write is unavailable.

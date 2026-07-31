@@ -233,6 +233,7 @@ itp_list_comments() { cat "$ISSUE_COMMENTS"; }
 itp_post_comment() {
   local body="$2" kind="finding"
   [[ "$body" == "<!-- review-disposition:"* ]] && kind="disposition"
+  [[ "$body" == "<!-- review-round-counter:"*" round=0 -->" ]] && kind="round-reset"
   [[ "$body" == "Reviewed HEAD:"* ]] && kind="reviewed-head"
   printf 'issue:%s\n' "$kind" >> "$TRACE"
   [[ "$_FAIL_WRITE" != "$kind" ]] || return 1
@@ -270,6 +271,15 @@ emit_verdict_trailer_required() {
   else
     body="<!-- review-verdict: failed-non-substantive cause=${cause} head=${head} -->"
   fi
+  printf 'verdict:%s\n' "$verdict" >> "$TRACE"
+  [[ "$_FAIL_WRITE" != "verdict" ]] || return 1
+  _append_issue_comment "$body"
+}
+emit_verdict_trailer() {
+  local verdict="$3" cause="${4:-}" body
+  body="<!-- review-verdict: ${verdict}"
+  [[ -z "$cause" ]] || body+=" cause=${cause}"
+  body+=" -->"
   printf 'verdict:%s\n' "$verdict" >> "$TRACE"
   [[ "$_FAIL_WRITE" != "verdict" ]] || return 1
   _append_issue_comment "$body"
@@ -469,6 +479,20 @@ assert_eq "TC-E2E-REBASE-012 unknown route reaches pending-dev" "0" "$?"
 assert_not_contains "TC-E2E-REBASE-012 unknown route emits no PR conflict marker" "pr:auto-merge" "$trace"
 assert_eq "TC-E2E-REBASE-012 unknown route persists disposition and trailer" "1|1" \
   "$(jq '[.[] | select(.body | contains("result=mergeable-unknown"))] | length' "$ISSUE_COMMENTS")|$(jq --arg trailer "$UNKNOWN_TRAILER_A" '[.[] | select(.body == $trailer)] | length' "$ISSUE_COMMENTS")"
+assert_eq "TC-E2E-REBASE-063 UNKNOWN resets INV-129 immediately after its verdict" \
+  $'verdict:failed-non-substantive\nissue:round-reset\ntransition:reviewing>pending-dev' \
+  "$(grep -E '^(verdict:failed-non-substantive|issue:round-reset|transition:reviewing>pending-dev)$' "$TRACE")"
+
+for requeue_cause in \
+  head-changed mergeable-read-failed preflight-write-failed \
+  auto-merge-marker-write-failed; do
+  _reset_route
+  _review_requeue_preflight \
+    540 "$requeue_cause" "fixture retry for ${requeue_cause}"
+  assert_eq "TC-E2E-REBASE-063 ${requeue_cause} resets INV-129 before requeue" \
+    $'verdict:failed-non-substantive\nissue:round-reset\ntransition:reviewing>pending-review' \
+    "$(grep -E '^(verdict:failed-non-substantive|issue:round-reset|transition:reviewing>pending-review)$' "$TRACE")"
+done
 
 unknown_case=$(sed -n '/^  mergeable-unknown)/,/^    ;;/p' "$WRAPPER")
 assert_contains "TC-E2E-REBASE-025 UNKNOWN transition failure preserves non-substantive cleanup" \

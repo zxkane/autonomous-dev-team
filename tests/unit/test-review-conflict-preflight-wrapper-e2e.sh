@@ -8,6 +8,7 @@ FAIL=0
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 SCRIPTS="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts"
+LIVENESS_LIB="$SCRIPTS/lib-liveness.sh"
 HEAD_OLD="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 RED='\033[0;31m'
@@ -226,6 +227,15 @@ cat >"$BIN/claude" <<'EOF'
 printf 'agent\n' >>"$PREFLIGHT_FIXTURE_STATE/agent-count"
 cat >"$PREFLIGHT_FIXTURE_STATE/dev-prompt"
 case "${PREFLIGHT_DEV_SCENARIO:-}" in
+  context-read-failed)
+    id=$(( $(wc -l <"$PREFLIGHT_FIXTURE_STATE/comments.jsonl") + 1 ))
+    head=$(cat "$PREFLIGHT_FIXTURE_STATE/head")
+    jq -cn --argjson id "$id" --arg head "$head" \
+      --arg ts "2026-07-30T00:20:$(printf '%02d' "$id")Z" \
+      '{id:$id,author:"dev-app[bot]",authorKind:"bot",
+        body:("<!-- dev-conflict-context-read-failed: issue=540 head=" + $head + " -->"),
+        createdAt:$ts}' >>"$PREFLIGHT_FIXTURE_STATE/comments.jsonl"
+    ;;
   success)
     printf '%s\n' "fetch origin main" >>"$PREFLIGHT_FIXTURE_STATE/git-actions"
     git -C "$PREFLIGHT_DEV_WORKTREE" fetch -q origin main || exit 1
@@ -398,6 +408,7 @@ timeout 30 env \
   PATH="$BIN:$PATH" \
   GH_TOKEN="fixture-token" \
   PREFLIGHT_FIXTURE_STATE="$STATE" \
+  PREFLIGHT_DEV_SCENARIO="context-read-failed" \
   AUTONOMOUS_CONF="$WRAPPER_SCRIPTS/autonomous.conf" \
   bash "$WRAPPER_SCRIPTS/autonomous-dev.sh" \
     --issue 540 --mode new \
@@ -435,6 +446,16 @@ assert_contains "TC-E2E-REBASE-049 comment-read failure emits mandatory context 
   "Conflict routing context could not be verified" "$STATE/dev-prompt"
 assert_contains "TC-E2E-REBASE-049 guarded prompt forbids ordinary implementation first" \
   "Do not begin implementation or review-finding work" "$STATE/dev-prompt"
+assert_contains "TC-E2E-REBASE-064 guarded prompt requires the exact HEAD-bound failure marker" \
+  "<!-- dev-conflict-context-read-failed: issue=540 head=<full-lowercase-40-char-sha> -->" \
+  "$STATE/dev-prompt"
+assert_contains "TC-E2E-REBASE-064 guarded prompt makes the failure marker whole-body and idempotent" \
+  "entire issue comment" "$STATE/dev-prompt"
+assert_contains "TC-E2E-REBASE-065 real guarded agent posts the current-HEAD failure marker" \
+  "<!-- dev-conflict-context-read-failed: issue=540 head=${HEAD_OLD} -->" \
+  "$STATE/comments.jsonl"
+assert_contains "TC-E2E-REBASE-065 wrapper cleanup still posts its session report" \
+  "Agent Session Report (Dev)" "$STATE/comments.jsonl"
 rm -f "$STATE/fail-pr-comments"
 
 : >"$STATE/dev-prompt"
@@ -450,7 +471,37 @@ timeout 30 env \
 assert_eq "TC-E2E-REBASE-049 PR-resolution failure still launches guarded prompt" "0" "$?"
 assert_contains "TC-E2E-REBASE-049 PR-resolution failure emits mandatory context recovery" \
   "Conflict routing context could not be verified" "$STATE/dev-prompt"
+assert_contains "TC-E2E-REBASE-064 repeated provider failure carries the same canonical marker contract" \
+  "<!-- dev-conflict-context-read-failed: issue=540 head=<full-lowercase-40-char-sha> -->" \
+  "$STATE/dev-prompt"
 rm -f "$STATE/fail-find-pr"
+
+source "$LIVENESS_LIB"
+context_failure_marker="<!-- dev-conflict-context-read-failed: issue=540 head=${HEAD_OLD} -->"
+context_failure_once=$(jq -cn --arg body "$context_failure_marker" \
+  '[{authorKind:"bot",createdAt:"2026-07-30T01:00:00Z",body:$body},
+    {authorKind:"bot",createdAt:"2026-07-30T01:01:00Z",
+     body:"**Agent Session Report (Dev)**\n- Dev Session ID: `one`\n- Exit code: 0"}]')
+context_failure_twice=$(jq -cn --arg body "$context_failure_marker" \
+  '[{authorKind:"bot",createdAt:"2026-07-30T01:00:00Z",body:$body},
+    {authorKind:"bot",createdAt:"2026-07-30T01:01:00Z",
+     body:"**Agent Session Report (Dev)**\n- Dev Session ID: `one`\n- Exit code: 0"},
+    {authorKind:"bot",createdAt:"2026-07-30T01:05:00Z",body:$body},
+    {authorKind:"bot",createdAt:"2026-07-30T01:06:00Z",
+     body:"**Agent Session Report (Dev)**\n- Dev Session ID: `two`\n- Exit code: 0"}]')
+context_fp_once=$(_liveness_fingerprint \
+  pending-dev "$HEAD_OLD" \
+  "$(_liveness_non_idempotent_count "$context_failure_once")" \
+  "$(_liveness_marker_digest "$context_failure_once")")
+context_fp_twice=$(_liveness_fingerprint \
+  pending-dev "$HEAD_OLD" \
+  "$(_liveness_non_idempotent_count "$context_failure_twice")" \
+  "$(_liveness_marker_digest "$context_failure_twice")")
+if [[ "$context_fp_once" != "$context_fp_twice" ]]; then
+  ok "TC-E2E-REBASE-065 session reports change generic INV-128 fingerprints"
+else
+  bad "TC-E2E-REBASE-065 session reports change generic INV-128 fingerprints"
+fi
 
 echo
 echo "=== TC-E2E-REBASE-045: real dev wrapper performs successful rebase ==="

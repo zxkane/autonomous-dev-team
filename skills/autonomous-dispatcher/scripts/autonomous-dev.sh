@@ -1793,8 +1793,15 @@ open PR and its current full HEAD, then inspect its comments for the canonical
 confirmed conflict or a failed INV-33 merge attempt. If either marker is
 present, perform the mandatory rebase onto \`${BASE_BRANCH}\` using the safe
 procedure below. If the provider context still cannot be read, report that
-failure and exit without changing code so the recovery attempt is never
-mistaken for ordinary implementation work.
+failure with this protocol so repeated attempts remain visible to INV-128:
+
+1. Run \`git rev-parse HEAD\` and require its full lowercase 40-character SHA.
+2. Post this exact marker as the entire issue comment, replacing the placeholder:
+   \`<!-- dev-conflict-context-read-failed: issue=${ISSUE_NUMBER} head=<full-lowercase-40-char-sha> -->\`
+3. Do not add prose before or after the marker. If that exact issue/HEAD marker
+   already exists, do not post a duplicate.
+4. Exit without changing code so the recovery attempt is never mistaken for
+   ordinary implementation work.
 
 Rebase procedure after confirming the current-HEAD marker:
 ${DEV_SAFE_REBASE_PROCEDURE}

@@ -178,6 +178,12 @@ DEV_BOT_LOGIN=""
 #   BASE_BRANCH="develop"
 BASE_BRANCH=""
 
+# Mergeability polling used by the pre-E2E preflight and retained post-fan-out
+# hard gate (INV-44/INV-147). UNKNOWN/empty values are retried this many times,
+# with this delay between attempts, before routing non-substantively.
+MERGEABLE_RETRIES=3
+MERGEABLE_RETRY_DELAY_SECONDS=10
+
 # === Agent Configuration ===
 # AGENT_CMD: which coding-agent CLI to spawn for dev/review wrappers.
 # First-class support: claude, codex, gemini, kiro, opencode, agy. Other

@@ -81,7 +81,8 @@ The mergeable→action decision is extracted into
 hasn't resolved can never be silently treated as mergeable.
 
 The wrapper does the `gh` query + `UNKNOWN` retry loop (`MERGEABLE_RETRIES`,
-default 3, 10s apart) and calls the helper once on the settled value.
+default 3; `MERGEABLE_RETRY_DELAY_SECONDS`, default 10 seconds) and calls the
+helper once on the settled value.
 
 ### Routing on a block
 

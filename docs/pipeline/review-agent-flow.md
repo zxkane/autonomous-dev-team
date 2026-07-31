@@ -978,7 +978,8 @@ After the PR-open guard ([INV-54](invariants.md#inv-54-the-pr-still-open-guard-g
 if PASSED_VERDICT == true:
   # (PR-open guard already ran here — see § PR-open guard (INV-54))
   MERGEABLE_STATUS = poll `gh pr view --json mergeable` while UNKNOWN/empty,
-                     up to MERGEABLE_RETRIES (default 3, 10s apart)
+                     up to MERGEABLE_RETRIES (default 3), waiting
+                     MERGEABLE_RETRY_DELAY_SECONDS (default 10s)
   gate = _classify_mergeable_gate "$MERGEABLE_STATUS"   # lib-review-mergeable.sh
     MERGEABLE   → proceed → fall through to the PASS path below (UNCHANGED)
     CONFLICTING → block-substantive:
