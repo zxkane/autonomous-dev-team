@@ -1,10 +1,10 @@
 # Test cases — Layer-1 trunk protection scoped by push destination ([INV-148])
 
-Covers `skills/autonomous-common/hooks/block-push-to-main.sh` and the three
+Covers `skills/autonomous-common/hooks/block-push-to-main.sh` and the four
 `lib-push.sh` helpers it added (`parse_push_remote_operand`,
-`canonical_remote_url`, `push_destination_url`).
+`canonical_remote_url`, `push_destination_url`, `anchor_owns_destination`).
 
-Suite: `tests/unit/test-block-push-regex.sh` — 44 assertions, hermetic (throwaway
+Suite: `tests/unit/test-block-push-regex.sh` — 56 assertions, hermetic (throwaway
 repos under `mktemp -d`, no network; a remote URL only has to be *configured*,
 never reachable, because the comparison is textual).
 
@@ -17,13 +17,14 @@ project protects?** Local repository identity cannot answer it — see
 
 Two properties are load-bearing and each has dedicated cases:
 
-- **No false negative** — a push reaching this project's trunk is blocked *however*
-  it is spelled or wherever it is issued from (TC-BP-14..17).
+- **No false negative** — a push reaching this project's trunk is blocked
+  *however* it is spelled or wherever it is issued from (TC-BP-14..17, 26).
 - **No false positive** — a push to a genuinely different repository is allowed,
-  including the wiki, in every command shape (TC-BP-12, 13, 13b, 18).
+  including the wiki, in every parsable command shape (TC-BP-12, 13, 13b, 18, 24).
 
-Fail-closed is the tie-breaker: allowing requires *both* destinations to resolve
-*and* differ (TC-BP-13c).
+Fail-closed is the tie-breaker: an allow requires the target destination to be
+**proven** and the anchor to be **readable and not own it**. Every form of
+uncertainty blocks (TC-BP-13c, 20, 21, 22, 27).
 
 ## Fixtures
 
@@ -101,11 +102,11 @@ itself, and the push is **checked**. The wiki allowance is a capability the
 wrapper grants by exporting the anchor — never an inference drawn from its
 absence.
 
-Uncertainty is not one path but four, and each has its own case below:
+Uncertainty is not one path but five, and each has its own case below:
 unresolvable command context (TC-BP-22), an ambiguous operand (TC-BP-21),
-multiple pushes on one line (TC-BP-20), and a destination that cannot be
-canonicalized at all (`canonical_remote_url` returns non-zero, so the allow gate
-cannot fire).
+multiple pushes on one line (TC-BP-20), an unreadable anchor (TC-BP-27), and a
+destination that cannot be canonicalized at all (`canonical_remote_url` returns
+non-zero, so the allow gate cannot fire).
 
 The important consequence of TC-BP-22 is that **the wiki allowance only applies
 to command shapes `resolve_git_command_cwd` can parse.** A wiki push written as
@@ -134,11 +135,14 @@ a file in the hook's cwd whose path *is* the canonical destination, so without
 Confirmed by neutralizing `set -f` in the hook — the assertion flips to a
 failure, and only that one.
 
-### Adversarial cases (added after review of the first implementation)
+### Adversarial cases (added over two review passes)
 
-Each of these was a **verified bypass or false positive** in the first cut of
-this change, reproduced against `origin/main` to confirm it was a regression and
-not pre-existing. They are kept as regression pins.
+Each of these was a **verified bypass or false positive** in an earlier cut of
+this change, reproduced and compared against `origin/main` to confirm it was a
+regression rather than pre-existing. They are kept as regression pins. TC-BP-24b,
+26, and 27 come from the second pass — which found that the first pass's own
+fixes had introduced new holes, so the pins below are what keep that from
+recurring silently.
 
 | ID | Case | Expected |
 |---|---|---|
@@ -151,6 +155,22 @@ not pre-existing. They are kept as regression pins.
 | TC-BP-23 | `remote.pushDefault` points elsewhere | block (2) |
 | TC-BP-23b | `branch.<b>.pushRemote` points elsewhere | block (2) |
 | TC-BP-24 | a repo whose *path* embeds `@` must not collapse onto another host's | allow (0) |
+| TC-BP-24b | path embeds the project's **own** host+path after an `@` — an unscoped `${url#*@}` would canonicalize it to the project itself | allow (0) |
+| TC-BP-26 | four DNS/path-equivalent spellings of own trunk: trailing-dot host (HTTPS + SSH), `..` and `.` path segments | block (2) ×4 |
+| TC-BP-27 | anchor is not a git repo / has zero remotes → UNKNOWN, not "not mine" | block (2) ×2 |
+| TC-BP-27c | readable anchor that genuinely does not own the destination | allow (0) |
+
+TC-BP-24b is the non-vacuous form of TC-BP-24 — the original fixture passes even
+on the first cut, so only this one pins the host/path split.
+
+TC-BP-26 covers spellings that reach the real repository: a trailing dot on a
+hostname is DNS-equivalent, and `.`/`..` segments resolve server-side.
+
+TC-BP-27 is a class TC-BP-13c cannot reach. A *missing* anchor falls back to the
+cwd (already fail-closed); these are anchors that **exist** but yield no usable
+remote, where conflating "couldn't read it" with "doesn't own it" would turn a
+mis-set anchor into a blanket opt-out. TC-BP-27c is the counter-proof that the
+block is on *unknown*, not on every non-match.
 
 TC-BP-20/21 exist because a single operand cannot describe two destinations, and
 because `read -ra` does not strip quotes — a quoted token canonicalizes to a
@@ -161,17 +181,31 @@ config would otherwise move the protected trunk and silently disable the guard.
 
 ## Red/green evidence
 
-Against PR #539's parent implementation (original hook + `lib-push.sh`, current
-tests): **32 pass / 12 fail**. The 12 red assertions are exactly the two
-wiki-bare-push cases, the three second-clone forms, the five URL spellings, and
-the two positive allowlist cases. On the fixed implementation: **44/44**.
+All counts below were measured, not estimated — by checking out the named
+implementation and running the current suite against it.
 
-The adversarial cases (TC-BP-20..24) are green on the parent too, and that is
-expected: the parent blocks those inputs already, because it never allows on the
-strength of a *resolved* destination. They are red only against the **first cut
-of this change**, which did — each was verified as a live regression there and is
-pinned here so the allow gate can never again be satisfied by a destination that
-was guessed rather than proven.
+**On this implementation: 56/56.**
+
+**Against PR #539's parent (`216a906`): 36 pass / 20 fail.** The 20 red:
+the 2 wiki-bare-push cases, the 3 second-clone forms, the 5 URL spellings, the
+2 positive allowlist cases, the 4 DNS/path-equivalent spellings (TC-BP-26), and
+the 4 wrapper-export statics (TC-BP-25).
+
+**Against the first cut of this change (`2d71c7f`): 42 pass / 14 fail.** Those
+14 are the adversarial pins — each was a *verified live bypass or false positive*
+in that commit, reproduced and compared against `origin/main` to confirm it was a
+regression rather than pre-existing.
+
+The two red sets barely overlap, and that is the point: the parent is red where
+it is too *strict* (wiki, allowlist) or where a local-identity check cannot see
+the destination at all (second clone, spellings); the first cut is red where it
+was too *permissive* (guessed destinations). A pin that only failed on one of the
+two would leave the other failure mode unguarded.
+
+Some cases are green on both — e.g. TC-BP-20..23 pass on the parent, because the
+parent never allows on the strength of a resolved destination and so cannot
+exhibit those bypasses. They are still worth pinning: they constrain this
+implementation's allow gate, not the parent's.
 
 Suites re-run green alongside this change: `test-block-commit-outside-worktree.sh`
 (186), `test-is-git-command-quote-strip.sh` (9), `test-install-git-pre-push.sh`

@@ -470,6 +470,65 @@ setup_repo main
 setup_other_repo atpath "https://gitlab.example.com/group/u@n/repo.git"
 out=$(run_hook_cwd "git -C $TMPDIR/atpath push origin main" "$TMPDIR/repo")
 assert_exit "path-embedded @ repo treated as a different destination" "0" "$out"
+# Non-vacuous variant: the path embeds the PROJECT'S OWN host+path after an `@`.
+# An unscoped `${url#*@}` would strip through it and canonicalize this to the
+# project itself, blocking a legitimate push to an unrelated host.
+setup_other_repo atown "https://example.com/x@github.com/zxkane/autonomous-dev-team.git"
+out=$(run_hook_cwd "git -C $TMPDIR/atown push origin main" "$TMPDIR/repo")
+assert_exit "path embedding the project's own host stays a different destination" "0" "$out"
+
+# ===========================================================================
+# TC-BP-26: DNS/path-equivalent spellings of own trunk are still blocked
+# ===========================================================================
+# A trailing dot on a hostname is DNS-equivalent, and `.`/`..` path segments
+# resolve server-side. Each spelling below reaches this project's real trunk, so
+# treating any of them as "a different destination" is a bypass.
+echo ""
+echo "=== TC-BP-26: trailing-dot host and dot-segment paths still blocked ==="
+setup_repo main
+for _url in \
+  "https://github.com./zxkane/autonomous-dev-team.git" \
+  "git@github.com.:zxkane/autonomous-dev-team.git" \
+  "https://github.com/zxkane/../zxkane/autonomous-dev-team.git" \
+  "https://github.com/./zxkane/autonomous-dev-team.git"; do
+  setup_other_repo equiv "$_url"
+  out=$(run_hook_cwd "git -C $TMPDIR/equiv push origin main" "$TMPDIR/repo")
+  assert_exit "equivalent spelling still blocked: $_url" "2" "$out"
+done
+
+# ===========================================================================
+# TC-BP-27: an unreadable or remote-less anchor is UNKNOWN, not "not mine"
+# ===========================================================================
+# `anchor_owns_destination` must distinguish "read the anchor, it owns no such
+# remote" (allow) from "could not read the anchor at all" (unknown → check).
+# Otherwise a mis-set anchor becomes a blanket opt-out from trunk protection,
+# which is worse than no scoping. Note TC-BP-13c cannot catch this class: a
+# MISSING anchor falls back to the cwd, whereas these are anchors that exist but
+# yield no usable remote.
+echo ""
+echo "=== TC-BP-27: unreadable / remote-less anchor fails closed ==="
+setup_repo main
+mkdir -p "$TMPDIR/anchor-not-a-repo"
+rm -rf "${TMPDIR:?}/anchor-no-remotes"
+mkdir -p "$TMPDIR/anchor-no-remotes"
+git -C "$TMPDIR/anchor-no-remotes" init --quiet --initial-branch=main
+git -C "$TMPDIR/anchor-no-remotes" -c user.email=test@test -c user.name=test \
+  commit --quiet --allow-empty -m init
+run_hook_anchor() {
+  local cmd="$1" anchor="$2"
+  (cd "$TMPDIR/repo" && AUTONOMOUS_PROJECT_DIR="$anchor" \
+    bash "$HOOK" <<<"$(hook_input "$cmd")" >/dev/null 2>&1)
+  echo $?
+}
+out=$(run_hook_anchor "git push origin main" "$TMPDIR/anchor-not-a-repo")
+assert_exit "anchor that is not a git repo fails closed" "2" "$out"
+out=$(run_hook_anchor "git push origin main" "$TMPDIR/anchor-no-remotes")
+assert_exit "anchor with zero remotes fails closed" "2" "$out"
+# Sanity: a readable anchor that genuinely does not own the destination still
+# allows — proving the above block on UNKNOWN, not on every non-match.
+setup_other_repo unrelated "https://github.com/other-owner/other-repo.git"
+out=$(run_hook_cwd "git -C $TMPDIR/unrelated push origin main" "$TMPDIR/repo")
+assert_exit "readable anchor not owning the destination still allows" "0" "$out"
 
 # ===========================================================================
 # TC-BP-25: both wrappers export the project anchor

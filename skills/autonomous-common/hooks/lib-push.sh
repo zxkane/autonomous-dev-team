@@ -314,11 +314,34 @@ canonical_remote_url() {
     host_segment="${host_segment%:*}"
   fi
 
+  # A trailing dot on a hostname is DNS-equivalent (`github.com.` resolves to
+  # `github.com`), so it must not make two spellings compare unequal.
+  while [[ "$host_segment" == *. ]]; do host_segment="${host_segment%.}"; done
+
   # Collapse repeated slashes and strip leading/trailing ones: `//a//b/` and
   # `a/b` address the same repository.
   while [[ "$path" == *//* ]]; do path="${path//\/\//\/}"; done
   while [[ "$path" == /* ]]; do path="${path#/}"; done
   while [[ "$path" == */ ]]; do path="${path%/}"; done
+
+  # Resolve `.` / `..` segments — `a/../a/b` and `a/b` name the same repository
+  # on the server. Pure string work; no filesystem is consulted. A `..` that
+  # would escape the root is dropped rather than retained, so no traversal
+  # remains in the comparison key.
+  if [[ "$path" == *.* ]]; then
+    local -a _segs=() _out=()
+    IFS='/' read -ra _segs <<<"$path"
+    local _s
+    for _s in "${_segs[@]}"; do
+      case "$_s" in
+        .|"") ;;
+        ..) [[ ${#_out[@]} -gt 0 ]] && unset '_out[-1]' ;;
+        *) _out+=("$_s") ;;
+      esac
+    done
+    path=""
+    for _s in ${_out[@]+"${_out[@]}"}; do path="${path:+$path/}$_s"; done
+  fi
 
   # Lowercase BEFORE stripping `.git` so `.GIT` is removed too. `.wiki` is never
   # touched — that is what keeps a wiki a distinct destination ([INV-148]).
@@ -387,18 +410,26 @@ push_destination_url() {
 # anchor_owns_destination <anchor-dir> <canonical-destination>
 #
 # Returns 0 when <canonical-destination> matches ANY remote configured in
-# <anchor-dir> (fetch or push URL), 1 otherwise.
+# <anchor-dir> (fetch or push URL). Returns 1 ONLY when the anchor was read
+# successfully and owns no such remote. Returns 2 when the anchor cannot be
+# read at all — not a git repo, no remotes, unreadable `.git` (cross-user
+# permissions, a `safe.directory` refusal) — which is UNKNOWN, not "not mine".
+# Callers MUST treat 2 as unknown and fail closed: a guard whose protected set
+# is unknown must protect everything, or an unreadable anchor becomes a blanket
+# opt-out ([INV-148]).
 #
 # The anchor's *bare-push* destination alone is not a safe definition of "this
-# project" ([INV-148]): `remote.pushDefault` or `branch.<b>.pushRemote` in the
-# project checkout would silently redefine which trunk is protected and switch
-# the guard off. Checking every remote the project knows about means ordinary
-# local config cannot shrink the protected set.
+# project": `remote.pushDefault` or `branch.<b>.pushRemote` in the project
+# checkout would silently redefine which trunk is protected and switch the guard
+# off. Checking every remote the project knows about means ordinary local config
+# cannot shrink the protected set.
 anchor_owns_destination() {
   local anchor_dir="$1" destination="$2"
-  local name url canon
+  local name url canon remotes seen=0
 
-  [[ -n "$anchor_dir" && -n "$destination" ]] || return 1
+  [[ -n "$anchor_dir" && -n "$destination" ]] || return 2
+
+  remotes=$(git -C "$anchor_dir" remote 2>/dev/null) || return 2
 
   while IFS= read -r name; do
     [[ -n "$name" ]] || continue
@@ -407,9 +438,12 @@ anchor_owns_destination() {
       "$(git -C "$anchor_dir" remote get-url "$name" 2>/dev/null)"; do
       [[ -n "$url" ]] || continue
       canon=$(canonical_remote_url "$url") || continue
+      seen=1
       [[ "$canon" != "$destination" ]] || return 0
     done
-  done < <(git -C "$anchor_dir" remote 2>/dev/null)
+  done <<<"$remotes"
 
+  # Zero readable remote URLs means the protected set is undetermined.
+  (( seen == 1 )) || return 2
   return 1
 }

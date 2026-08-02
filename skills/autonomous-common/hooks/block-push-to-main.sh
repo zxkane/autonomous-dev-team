@@ -71,11 +71,17 @@ if [[ -n "$push_dir" ]] && remote_operand=$(parse_push_remote_operand "$command"
   target_url=$(push_destination_url "$push_dir" "$remote_operand") || target_url=""
 fi
 
-# Out of scope only when the destination is known AND is none of the anchor's
-# remotes. `anchor_owns_destination` (not the anchor's bare-push destination)
-# is what stops local push config from redefining the protected trunk.
-if [[ -n "$target_url" ]] && ! anchor_owns_destination "$anchor_dir" "$target_url"; then
-  exit 0
+# Out of scope only when the destination is known AND the anchor is READABLE and
+# owns no such remote. `anchor_owns_destination` returns 2 for an unreadable or
+# remote-less anchor — distinct from its 1 ("read fine, not mine") — because a
+# guard whose protected set is unknown must protect everything, or an unreadable
+# anchor would become a blanket opt-out.
+if [[ -n "$target_url" ]]; then
+  anchor_owns_rc=0
+  anchor_owns_destination "$anchor_dir" "$target_url" || anchor_owns_rc=$?
+  if (( anchor_owns_rc == 1 )); then
+    exit 0
+  fi
 fi
 
 # Same destination (or an unresolvable one) — the trunk check below applies.

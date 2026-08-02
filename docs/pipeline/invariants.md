@@ -9592,6 +9592,16 @@ Instead `anchor_owns_destination` matches the target against **every** remote th
 anchor knows (fetch and push URLs), so ordinary local config cannot shrink the
 protected set.
 
+`anchor_owns_destination` is **tri-state**, and the distinction is load-bearing:
+`0` owns it, `1` read the anchor fine and it owns no such remote (the only value
+that permits an allow), `2` the anchor could not be read at all — not a git repo,
+no remotes, an unreadable `.git` (cross-user permissions, a `safe.directory`
+refusal). A guard whose protected set is unknown must protect everything;
+collapsing `2` into `1` would make a mis-set anchor a blanket opt-out from trunk
+protection, which is worse than no scoping at all. Note this is a different class
+from a *missing* anchor, which falls back to the hook cwd and is already
+fail-closed.
+
 The **target destination** must be positively established, and each of the
 following reports *unknown* rather than a guess — any unknown leaves the trunk
 check armed:
@@ -9613,12 +9623,17 @@ check armed:
 **Uncertainty never grants a trunk push.**
 
 `canonical_remote_url` normalizes away scheme, userinfo, port, the SSH
-shorthand's `host:path` colon, repeated/leading/trailing slashes in the path, a
-trailing `.git`, and case — so any spelling of the same repository compares
-equal. Host and path are normalized **separately**, so a `@`, `:`, or `//`
-inside the path can never be read as host syntax (which would collapse two
-unrelated repositories onto one canonical value). `.wiki` is never stripped,
-which is what keeps `<project>.wiki.git` distinct from `<project>.git`.
+shorthand's `host:path` colon, a trailing dot on the hostname (DNS-equivalent),
+repeated/leading/trailing slashes, `.`/`..` path segments (resolved as strings —
+no filesystem is consulted), a trailing `.git`, and case. Any spelling that
+reaches the same repository therefore compares equal; each of these was a
+verified bypass when absent. Host and path are normalized **separately**, so a
+`@`, `:`, or `//` inside the path can never be read as host syntax — which would
+collapse two unrelated repositories onto one canonical value and block a
+legitimate push. `.wiki` is never stripped, which is what keeps
+`<project>.wiki.git` distinct from `<project>.git`. It returns non-zero when
+nothing comparable remains, so a caller can tell "canonicalized" from "cannot
+canonicalize".
 
 **Why**: PR #539 fixed a real false positive — a project wiki lives in a
 separate `<project>.wiki.git` repository whose only branch is `main`, so every
@@ -9657,7 +9672,7 @@ normalization, and a listed destination remains subject to Layers 2 and 3.
 
 **Producer**: `lib-push.sh::parse_push_remote_operand`,
 `lib-push.sh::canonical_remote_url`, `lib-push.sh::push_destination_url`,
-`lib-push.sh::anchor_owns_destination`; `autonomous-dev.sh` /
+`lib-push.sh::anchor_owns_destination` (tri-state); `autonomous-dev.sh` /
 `autonomous-review.sh` export `AUTONOMOUS_PROJECT_DIR` (and
 `PUSH_ALLOWED_REMOTE_URLS` when set) at startup, immediately after
 `BASE_BRANCH`.
@@ -9675,24 +9690,31 @@ exported and never parse conf.
 
 **Status**: **ENFORCED**.
 
-**Test**: `tests/unit/test-block-push-regex.sh` (`TC-BP-01..24`, 44 assertions)
-— the 11 pre-existing #64 cases unchanged, plus TC-BP-13b (bare push from inside
+**Test**: `tests/unit/test-block-push-regex.sh` (`TC-BP-01..27`, 56 assertions) —
+the 11 pre-existing #64 cases unchanged, plus TC-BP-13b (bare push from inside
 the wiki), TC-BP-13c (no anchor → fail closed), TC-BP-16 (second clone of this
-project's remote blocked in all three command shapes), TC-BP-17 (five URL
-spellings of the same destination still blocked), TC-BP-18 (`.wiki` never
-normalized away), TC-BP-19 (allowlist match, cross-spelling match, unrelated
-entry, empty value, and a glob-shaped entry pinned **non-vacuously** by planting
-a cwd file the pattern would expand onto). 12 of the 44 are red on PR #539's
-parent implementation.
+project's remote, all three command shapes), TC-BP-17 (five URL spellings),
+TC-BP-18 (`.wiki` never normalized away), TC-BP-19 (allowlist: match,
+cross-spelling match, unrelated entry, empty value, and a glob-shaped entry
+pinned **non-vacuously** by planting a cwd file the pattern would expand onto),
+and TC-BP-25 (both wrappers export the anchor — dropping it is fail-closed, so
+nothing else would catch it).
 
-TC-BP-20..24 pin the fail-closed rule against the ways an earlier cut of this
-change violated it — each was a **verified** bypass or false positive, not a
-hypothetical: chained pushes (TC-BP-20), quoted/expansion operands (TC-BP-21),
-rc=2 grammars evaluated against the wrong repo (TC-BP-22), local push-config
-redirect (TC-BP-23), and path-embedded `@` collapsing distinct hosts (TC-BP-24).
-They are green on the parent too — the parent never allows on the strength of a
-resolved destination, so it cannot exhibit these — which is why they are pinned
-here rather than presented as parent-regressions.
+TC-BP-20..24, 26, 27 pin the fail-closed rule against the ways two earlier cuts
+of this change violated it. Every one was a **verified** bypass or false
+positive, reproduced and diffed against `origin/main`, never a hypothetical:
+chained pushes (20), quoted/expansion operands (21), rc=2 grammars evaluated
+against the wrong repository (22), local push-config redirect (23), path-embedded
+`@` collapsing distinct hosts (24/24b), DNS/path-equivalent spellings of own
+trunk (26), and an unreadable anchor read as "not mine" (27).
+
+Measured red/green: **20 of 56 red on PR #539's parent** (`216a906` — the wiki
+and allowlist allows, the second-clone forms, the URL spellings, the
+DNS-equivalent spellings, the wrapper-export statics) and **14 of 56 red on the
+first cut** (`2d71c7f` — the adversarial pins). The two sets barely overlap: the
+parent is red where it is too strict or blind to the destination, the first cut
+where it was too permissive. A pin failing on only one of the two would leave the
+other failure mode unguarded.
 
 **Cross-references**:
 - [INV-17](#inv-17-trunk-protection-requires-defense-in-depth-across-3-layers) — the 3-layer model this is Layer 1 of; the destination comparison narrows Layer 1's *scope* without widening its *gaps*.
