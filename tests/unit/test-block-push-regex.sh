@@ -641,6 +641,8 @@ out=$(run_remote_parser "git push --signed=if-asked origin main")
 assert_output "--signed=value remains a one-token option" "origin" "$out"
 out=$(run_remote_parser "git push --recurse-submodules origin main")
 assert_output "invalid bare --recurse-submodules is handled conservatively" "origin" "$out"
+out=$(run_remote_parser "git push --recurse-submodules no origin main")
+assert_output "valid mode remains the operand in the bounded parser" "no" "$out"
 
 # ===========================================================================
 # TC-BP-33: --flag=value remains one token
@@ -652,13 +654,13 @@ out=$(run_hook "git push --signed=if-asked origin main")
 assert_exit "--signed=value push to main from feat blocked" "2" "$out"
 
 # ===========================================================================
-# TC-BP-34: invalid bare --recurse-submodules fails closed
+# TC-BP-34: valid mode with no same-name remote fails closed
 # ===========================================================================
 echo ""
-echo "=== TC-BP-34: bare --recurse-submodules before main -> block ==="
+echo "=== TC-BP-34: --recurse-submodules no with no 'no' remote -> block ==="
 setup_repo feat/x
-out=$(run_hook "git push --recurse-submodules origin main")
-assert_exit "bare --recurse-submodules cannot shift the remote boundary" "2" "$out"
+out=$(run_hook "git push --recurse-submodules no origin main")
+assert_exit "unresolved mode-named destination leaves the trunk check armed" "2" "$out"
 
 # ===========================================================================
 # Summary

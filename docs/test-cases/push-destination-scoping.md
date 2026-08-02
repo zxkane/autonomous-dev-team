@@ -4,7 +4,7 @@ Covers `skills/autonomous-common/hooks/block-push-to-main.sh` and the four
 `lib-push.sh` helpers it added (`parse_push_remote_operand`,
 `canonical_remote_url`, `push_destination_url`, `anchor_owns_destination`).
 
-Suite: `tests/unit/test-block-push-regex.sh` — 73 assertions, hermetic (throwaway
+Suite: `tests/unit/test-block-push-regex.sh` — 74 assertions, hermetic (throwaway
 repos under `mktemp -d`, no network; a remote URL only has to be *configured*,
 never reachable, because the comparison is textual).
 
@@ -67,9 +67,20 @@ does consume a repository value, but a later positional repository overrides
 it. `-o` / `--push-option`, `--receive-pack`, and `--exec` continue to consume a
 separate value, while `--flag=value` forms remain one token.
 
-Git rejects bare `--recurse-submodules` followed by a remote as an invalid mode.
-Layer 1 handles that unsupported form conservatively as one token so it cannot
-shift the parsed remote boundary.
+Git also accepts a separate value after bare `--recurse-submodules` when it is a
+valid mode (`check`, `on-demand`, `only`, `no`, or `false`). Layer 1 deliberately
+does not model that value-dependent arity under [INV-146]'s bounded grammar; both
+parsers treat the bare option as one token. TC-BP-32 directly pins both an
+invalid mode token (`origin`) and a valid one (`no`) against that bounded model.
+TC-BP-34 runs the valid-mode form without a remote named `no`, pinning the
+ordinary fail-closed result.
+
+The valid-mode form retains a pre-existing Layer-1 gap: a destination-resolvable
+remote named after a mode can be mistaken for the push destination and allow a
+command Git sends to the following repository operand. Normally no such remote
+exists, resolution is unknown, and the trunk check remains armed. Layers 2 and 3
+remain authoritative because the pre-push hook reads Git's stdin protocol and
+server-side protection does not parse argv.
 
 | ID | Case | Expected |
 |---|---|---|
@@ -82,7 +93,7 @@ shift the parsed remote boundary.
 | TC-BP-31 | `git push -o ci.skip origin main` from `feat/x` | block (2) |
 | TC-BP-32 | direct remote-parser checks for bare, value-taking, and `--flag=value` options | parsed operand matches Git precedence |
 | TC-BP-33 | `git push --signed=if-asked origin main` from `feat/x` | block (2) |
-| TC-BP-34 | `git push --recurse-submodules origin main` from `feat/x` | block (2) |
+| TC-BP-34 | `git push --recurse-submodules no origin main` from `feat/x`, with no remote named `no` | block (2), unresolved destination fails closed |
 
 ### Different destination → allow
 
@@ -209,7 +220,7 @@ config would otherwise move the protected trunk and silently disable the guard.
 All counts below were measured, not estimated — by checking out the named
 implementation and running the current suite against it.
 
-**On this implementation: 73/73.**
+**On this implementation: 74/74.**
 
 The destination-scoping counts below were measured with the original
 TC-BP-01..27 slice (56 assertions). **Against PR #539's parent (`216a906`): 36
@@ -234,10 +245,10 @@ parent never allows on the strength of a resolved destination and so cannot
 exhibit those bypasses. They are still worth pinning: they constrain this
 implementation's allow gate, not the parent's.
 
-For #542, restoring only the old flag-classification arms produces **67 pass /
+For #542, restoring only the old flag-classification arms produces **68 pass /
 6 fail**: the two hook-level bare-`--signed` direction checks, the hook-level
 `--repo other` destination check, and three direct parser operand checks.
-Reapplying the correction produces **73/73**. The other `--repo` hook cases and
+Reapplying the correction produces **74/74**. The other `--repo` hook cases and
 the `-o` case deliberately remain green across the change; they pin Git
 behavior that must not be "fixed" in the wrong direction.
 
