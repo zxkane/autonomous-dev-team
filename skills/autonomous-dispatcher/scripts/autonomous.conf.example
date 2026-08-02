@@ -1092,6 +1092,31 @@ DEV_SKILL_CMD="/autonomous-dev"
 # uses scripts/gh-as-user.sh to post as a real user.
 REVIEW_BOTS=""
 
+# PUSH_ALLOWED_REMOTE_URLS: space-separated remote URLs that Layer-1 trunk
+# protection (`block-push-to-main.sh`) may push trunk on directly ([INV-148]).
+#
+# You usually do NOT need this. The hook already compares canonical push
+# DESTINATIONS, so any push landing on a repository other than this project is
+# allowed without configuration — including a project wiki, which lives at
+# `<project>.wiki.git` on both GitHub and GitLab and therefore canonicalizes to
+# a different URL than `<project>.git`. That relationship is structural, so the
+# wiki case needs no entry here.
+#
+# Use this only for a destination the comparison cannot infer — i.e. one that
+# genuinely IS this project's own trunk but which you have decided may be pushed
+# directly (a mirror you publish to, a vendored fork you own). It is an
+# ALLOWLIST of specific destinations, deliberately not a boolean "disable trunk
+# protection" switch: an operator can name what is exempt, and a reader can see
+# exactly what was exempted.
+#
+# URLs are compared after normalization (scheme, credentials, port, a trailing
+# `.git`, and case are ignored), so any spelling of the same repository matches:
+#   PUSH_ALLOWED_REMOTE_URLS="git@github.com:owner/mirror.git https://gitlab.example.com/group/docs"
+#
+# Layers 2 and 3 are unaffected — a destination listed here is still subject to
+# the per-worktree pre-push hook and server-side branch protection ([INV-17]).
+PUSH_ALLOWED_REMOTE_URLS=""
+
 # REVIEW_PROTECTED_PATHS: space-separated glob patterns marking paths the
 # autonomous dev agent provably CANNOT edit — either policy files a human owns
 # or paths needing a token scope the agent's scoped GitHub-App token lacks

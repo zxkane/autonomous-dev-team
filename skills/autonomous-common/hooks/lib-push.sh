@@ -189,3 +189,152 @@ is_trunk_ref() {
 
   return 1
 }
+
+# ---------------------------------------------------------------------------
+# parse_push_remote_operand <command>
+#
+# Echoes the first positional operand of a git-push command — the remote name
+# or a literal URL — and returns 0. Returns 1 (empty output) when the push has
+# no positional operand (bare `git push`, which targets the current branch's
+# configured remote).
+#
+# Trunk protection compares push DESTINATIONS ([INV-148]), so it must ask
+# which remote the push writes to, not assume `origin`. Flag/value skipping
+# mirrors parse_push_target_refspec's walk so both helpers agree on what
+# counts as a positional.
+parse_push_remote_operand() {
+  local command="$1"
+  local -a tokens
+  read -ra tokens <<<"$command"
+
+  local i=0 n=${#tokens[@]}
+  while (( i < n )) && [[ "${tokens[i]}" != "git" ]]; do
+    i=$((i+1))
+  done
+  (( i < n )) || return 1
+  i=$((i+1))
+
+  while (( i < n )); do
+    case "${tokens[i]}" in
+      -c|-C|--git-dir|--work-tree|--namespace|--super-prefix)
+        i=$(( i + 2 > n ? n : i + 2 ))
+        ;;
+      --*=*|--*) i=$((i+1)) ;;
+      *) break ;;
+    esac
+  done
+
+  (( i < n )) || return 1
+  [[ "${tokens[i]}" == "push" ]] || return 1
+  i=$((i+1))
+
+  while (( i < n )); do
+    case "${tokens[i]}" in
+      --repo|-o|--push-option|--receive-pack|--exec|--signed)
+        i=$(( i + 2 > n ? n : i + 2 )); continue ;;
+      -*) ;;
+      *) printf '%s\n' "${tokens[i]}"; return 0 ;;
+    esac
+    i=$((i+1))
+  done
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# canonical_remote_url <url>
+#
+# Echoes a comparable form of a git remote URL: scheme/credentials/port
+# stripped, SSH shorthand (`git@host:owner/repo`) folded to `host/owner/repo`,
+# a trailing `.git` and any trailing slashes removed, and the result
+# lowercased. Always returns 0 (an unrecognized shape passes through with the
+# same normalization applied, so comparison stays defined).
+#
+# Purpose is EQUALITY of two URLs naming the same repository, not validation.
+# The normalization is deliberately conservative: it only removes syntax that
+# provably cannot change which repository is addressed. It never rewrites the
+# path, so `<project>.git` and `<project>.wiki.git` stay distinct — that is
+# what makes a wiki's push destination recognizably different from its parent
+# project's ([INV-148]).
+canonical_remote_url() {
+  local url="$1"
+  [[ -n "$url" ]] || return 0
+
+  # Strip scheme (https://, git://, ssh://, file://, ...).
+  url="${url#*://}"
+
+  # SSH shorthand `git@host:owner/repo` → `host/owner/repo`. Only the FIRST `:`
+  # is rewritten, and only when it is not a port — a numeric segment is left for
+  # the port strip below. Testing the host segment alone is sufficient: a `:`
+  # anywhere later is inside the path, which is never rewritten.
+  local host_segment="${url%%/*}"
+  if [[ "$host_segment" == *:* && "${host_segment#*:}" != +([0-9]) ]]; then
+    url="${url/:/\/}"
+  fi
+
+  # Strip userinfo (`git@`, `user:token@`) from the host segment.
+  url="${url#*@}"
+
+  # Strip a port on the host segment (`host:2222/owner/repo`).
+  host_segment="${url%%/*}"
+  if [[ "$host_segment" == *:+([0-9]) ]]; then
+    local rest=""
+    [[ "$url" == */* ]] && rest="/${url#*/}"
+    url="${host_segment%%:*}${rest}"
+  fi
+
+  # Trailing slashes, then a single trailing `.git`.
+  while [[ "$url" == */ ]]; do url="${url%/}"; done
+  url="${url%.git}"
+  while [[ "$url" == */ ]]; do url="${url%/}"; done
+
+  printf '%s\n' "${url,,}"
+}
+
+# ---------------------------------------------------------------------------
+# push_destination_url <repo-dir> <remote-operand>
+#
+# Echoes the canonical push-destination URL for a push issued from <repo-dir>
+# with <remote-operand> (a remote name, a literal URL, or empty for bare
+# `git push`), and returns 0. Returns 1 (empty output) when the destination
+# cannot be determined — callers MUST treat that as "unknown" and fail closed.
+#
+# Resolution order mirrors git's own:
+#   1. an operand that looks like a URL is the destination verbatim
+#   2. a named remote resolves via `git remote get-url --push` (which honors
+#      `remote.<name>.pushurl`)
+#   3. no operand → the current branch's `remote.<branch>.remote`, else
+#      `remote.pushDefault`, else `origin`
+#
+# Only read-only `git -C` probes are used; no command text is ever executed.
+push_destination_url() {
+  local repo_dir="$1" operand="${2:-}"
+  local remote_name="" url=""
+
+  [[ -n "$repo_dir" ]] || return 1
+
+  if [[ -n "$operand" ]]; then
+    # A literal URL (scheme form, or SSH shorthand `host:path`) is used as-is.
+    if [[ "$operand" == *://* || "$operand" == *@*:* ]]; then
+      canonical_remote_url "$operand"
+      return 0
+    fi
+    remote_name="$operand"
+  else
+    local branch
+    branch=$(git -C "$repo_dir" symbolic-ref --quiet --short HEAD 2>/dev/null) || branch=""
+    if [[ -n "$branch" ]]; then
+      remote_name=$(git -C "$repo_dir" config --get "branch.${branch}.remote" 2>/dev/null) || remote_name=""
+    fi
+    if [[ -z "$remote_name" ]]; then
+      remote_name=$(git -C "$repo_dir" config --get remote.pushDefault 2>/dev/null) || remote_name=""
+    fi
+    [[ -n "$remote_name" ]] || remote_name="origin"
+  fi
+
+  # A local path configured as a remote is still a distinct destination; it is
+  # normalized like any other URL so comparison stays defined.
+  url=$(git -C "$repo_dir" remote get-url --push "$remote_name" 2>/dev/null) || return 1
+  [[ -n "$url" ]] || return 1
+
+  canonical_remote_url "$url"
+}

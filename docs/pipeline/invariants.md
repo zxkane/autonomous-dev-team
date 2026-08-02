@@ -9573,3 +9573,99 @@ INV-44/INV-46/INV-98/INV-122 regressions.
 - [INV-44](#inv-44-mergeable-hard-gate--a-conflicting-pr-can-never-reach-approved) / [INV-46](#inv-46-e2e-runs-once-in-a-dedicated-lane-before-the-review-fan-out--gated-not-per-agent) / [INV-54](#inv-54-the-pr-still-open-guard-gates-all-pass-chain-exits-not-just-pass) - retained post-fan-out, E2E, and closed-PR authorities.
 
 ---
+
+## INV-148: Layer-1 trunk protection compares push DESTINATIONS against an exported project anchor, and fails closed when either is unresolvable
+
+_Triage (issue #236): [machine-checked: tests/unit/test-block-push-regex.sh]_
+
+**Rule**: `block-push-to-main.sh` decides whether a `git push` is in scope by
+comparing **canonical push-destination URLs**, never local repository identity.
+It resolves two destinations and allows the push (`exit 0`, skipping the trunk
+check) **only when both resolve AND differ**:
+
+1. the **project anchor's** destination — the trunk this guard protects, taken
+   from `AUTONOMOUS_PROJECT_DIR` (exported by both wrappers, [INV-131] pattern),
+   falling back to `CLAUDE_PROJECT_DIR`, then to the hook cwd;
+2. the **push target's** destination — resolved from the repository
+   `resolve_git_command_cwd` identifies ([INV-146]) plus the push's own remote
+   operand, honoring `remote.<name>.pushurl`, `branch.<b>.remote`, and
+   `remote.pushDefault` the way git itself does.
+
+Every other outcome — either side unresolvable, no remote configured, an
+unparsable command, a missing anchor, or equal destinations — falls through to
+the trunk check. **Uncertainty never grants a trunk push.**
+
+Comparison is on `canonical_remote_url`: scheme, userinfo, port, trailing
+slashes, a single trailing `.git`, and case are normalized away, so any spelling
+of the same repository compares equal. The path is **never** rewritten, which is
+what keeps `<project>.wiki.git` distinct from `<project>.git`.
+
+**Why**: PR #539 fixed a real false positive — a project wiki lives in a
+separate `<project>.wiki.git` repository whose only branch is `main`, so every
+wiki update was blocked with no PR flow to route it through — but fixed it by
+comparing local `git-common-dir`, mirroring `block-commit-outside-worktree.sh`.
+That analogy does not transfer. Worktree hygiene protects the **local
+workspace**, where another local repository genuinely is out of scope, so local
+identity is an exact judgement. Trunk protection protects **what reaches the
+remote**, where local identity is only a proxy — and a false one in both
+directions:
+
+- **False negative (a new bypass).** A second independent clone of this project
+  has a different `git-common-dir` but pushes to this project's own trunk. Under
+  the common-dir comparison, `git -C <2nd-clone> push origin main` went from
+  blocked to allowed — precisely the push this guard exists to stop. Unlike the
+  session-boundary gap [INV-17] already documents (which the hook cannot reach),
+  this one was inside the hook's own reach, created by its own logic. Layers 2
+  and 3 are not an excuse: Layer 2 is installed **per worktree/clone**, so a
+  freshly-created clone most likely has no pre-push hook at all.
+- **False positive (the motivating bug, still unfixed).** Anchoring identity on
+  `pwd` makes a bare `git push` from **inside** the wiki compare the wiki against
+  itself, so the guard still blocked it. Only the explicit `git -C <wiki>` and
+  single-line `cd <wiki> && git push` shapes were fixed — not the natural agent
+  workflow of `cd`-ing into the wiki in one turn and pushing in the next.
+
+Comparing destinations fixes both with one rule, and needs **no wiki-specific
+configuration**: the wiki is allowed because its URL differs, which is
+structural on both GitHub and GitLab.
+
+**`PUSH_ALLOWED_REMOTE_URLS`** is the explicit, auditable residual lever: a
+space-separated **allowlist of specific destinations** that may be pushed on
+trunk directly (a mirror, a vendored fork). It is deliberately not a boolean
+"disable trunk protection" switch — an operator names what is exempt and a
+reader sees exactly what was exempted. Entries are compared after the same
+normalization, and a listed destination remains subject to Layers 2 and 3.
+
+**Producer**: `lib-push.sh::parse_push_remote_operand`,
+`lib-push.sh::canonical_remote_url`, `lib-push.sh::push_destination_url`;
+`autonomous-dev.sh` / `autonomous-review.sh` export `AUTONOMOUS_PROJECT_DIR`
+(and `PUSH_ALLOWED_REMOTE_URLS` when set) at startup, immediately after
+`BASE_BRANCH`.
+
+**Consumer**: `block-push-to-main.sh` (Layer 1 only). The Layer-2 per-worktree
+pre-push hook emitted by `install-git-pre-push.sh` is **unaffected** — it is
+self-contained by design, installed inside the repository it guards, and so has
+no cross-repository question to answer.
+
+**Scope note**: this governs only *whether a push is in scope*. The trunk-ref
+parsing (`parse_push_target_refspec` / `is_trunk_ref`, [INV-17]) and the
+`BASE_BRANCH` → `TRUNK_BRANCH` → `main` resolution chain ([INV-131]) are
+unchanged. Hooks remain zero-dependency shell: they read only what the wrapper
+exported and never parse conf.
+
+**Status**: **ENFORCED**.
+
+**Test**: `tests/unit/test-block-push-regex.sh` (`TC-BP-01..19`) — the 11
+pre-existing #64 cases unchanged, plus TC-BP-13b (bare push from inside the
+wiki), TC-BP-13c (no anchor → fail closed), TC-BP-16 (second clone of this
+project's remote blocked in all three command shapes), TC-BP-17 (five URL
+spellings of the same destination still blocked), TC-BP-18 (`.wiki` never
+normalized away), TC-BP-19 (allowlist match, cross-spelling match, unrelated
+entry, empty value, glob-shaped entry). 12 of the 32 assertions are red on
+PR #539's parent implementation.
+
+**Cross-references**:
+- [INV-17](#inv-17-trunk-protection-requires-defense-in-depth-across-3-layers) — the 3-layer model this is Layer 1 of; the destination comparison narrows Layer 1's *scope* without widening its *gaps*.
+- [INV-146](#inv-146-commit-worktree-enforcement-is-scoped-to-the-resolved-command-repository-and-fails-closed-when-command-context-is-uncertain) — supplies `resolve_git_command_cwd` and the fail-closed philosophy. Its **local-identity** decision is correct for worktree hygiene and is deliberately NOT reused here.
+- [INV-131](#inv-131-the-pipelines-base-branch-is-a-resolved-exported-validated-conf-value--never-a-hardcoded-main-literal-in-a-prompt-hook-or-provider-argv) — the resolve-once/export-once wrapper pattern the project anchor follows.
+
+---

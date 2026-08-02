@@ -194,6 +194,18 @@ if [[ "$BASE_BRANCH" != "main" ]]; then
   echo "[autonomous-dev] $(date -u +%H:%M:%S) Effective base branch: ${BASE_BRANCH}" >&2
 fi
 
+# [INV-148] Export the project anchor for block-push-to-main.sh. The hook must
+# know which repository is "this project" independently of its own cwd (the cwd
+# is the *pushing* repo, which for a wiki push is the wiki itself). Same
+# resolve-once/export-once pattern as BASE_BRANCH above: PROJECT_DIR is already
+# a required, validated conf value, and exporting keeps the hook zero-dependency
+# (no conf parsing inside a hook). PUSH_ALLOWED_REMOTE_URLS is exported the same
+# way when the operator set it.
+export AUTONOMOUS_PROJECT_DIR="$PROJECT_DIR"
+if [[ -n "${PUSH_ALLOWED_REMOTE_URLS:-}" ]]; then
+  export PUSH_ALLOWED_REMOTE_URLS
+fi
+
 # ---------------------------------------------------------------------------
 # [INV-109] Lane identity + atomic registry mint (Lane-GC PR-2).
 #

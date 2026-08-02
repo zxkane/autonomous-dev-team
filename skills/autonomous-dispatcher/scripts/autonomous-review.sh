@@ -457,6 +457,15 @@ if [[ "$BASE_BRANCH" != "main" ]]; then
   echo "[autonomous-review] $(date -u +%H:%M:%S) Effective base branch: ${BASE_BRANCH}" >&2
 fi
 
+# [INV-148] Export the project anchor for block-push-to-main.sh — see the
+# matching block in autonomous-dev.sh for why the hook cannot anchor on its own
+# cwd. Both wrappers export it so a review session that pushes (e.g. a conflict
+# rebase) evaluates the same destination comparison as a dev session.
+export AUTONOMOUS_PROJECT_DIR="$PROJECT_DIR"
+if [[ -n "${PUSH_ALLOWED_REMOTE_URLS:-}" ]]; then
+  export PUSH_ALLOWED_REMOTE_URLS
+fi
+
 # Validate REVIEW_BOTS at startup so a typo (e.g. REVIEW_BOTS="q codx")
 # fails fast with a clear error instead of silently dropping the bot.
 # Empty REVIEW_BOTS is allowed — the bot-review section is omitted from

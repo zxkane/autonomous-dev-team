@@ -25,6 +25,14 @@ NC='\033[0m'
 # current branch; tests must not contaminate the worktree we're running
 # in. Use a temp dir + `cd` into it for each case.
 TMPDIR=$(mktemp -d)
+
+# The project's own remote. [INV-148] compares push DESTINATIONS, so every
+# fixture repo needs an `origin`: what identifies "this project" is the URL a
+# push lands on, not which local directory issued it.
+PROJECT_URL="https://github.com/zxkane/autonomous-dev-team.git"
+# A wiki is `<project>.wiki.git` on both GitHub and GitLab — a different URL
+# under the same host+path, which is why it needs no configuration to allow.
+WIKI_URL="https://github.com/zxkane/autonomous-dev-team.wiki.git"
 trap 'rm -rf "$TMPDIR"' EXIT
 
 setup_repo() {
@@ -34,8 +42,23 @@ setup_repo() {
   git -C "$TMPDIR/repo" init --quiet --initial-branch=main
   git -C "$TMPDIR/repo" -c user.email=test@test -c user.name=test commit \
     --quiet --allow-empty -m init
+  # [INV-148]: the destination comparison needs the project's own remote.
+  git -C "$TMPDIR/repo" remote add origin "$PROJECT_URL"
   if [[ "$branch" != "main" ]]; then
     git -C "$TMPDIR/repo" checkout --quiet -b "$branch"
+  fi
+}
+
+# Build the hook's stdin payload — the JSON shape Claude Code delivers. `cwd`
+# is included only when passed, matching the two real shapes (a plain Bash call
+# carries no cwd key; a resolved one does).
+hook_input() {
+  local cmd="$1" cwd="${2:-}"
+  if [[ -n "$cwd" ]]; then
+    printf '{"tool_input":{"command":%s},"cwd":%s}' \
+      "$(jq -Rn --arg c "$cmd" '$c')" "$(jq -Rn --arg d "$cwd" '$d')"
+  else
+    printf '{"tool_input":{"command":%s}}' "$(jq -Rn --arg c "$cmd" '$c')"
   fi
 }
 
@@ -44,9 +67,8 @@ setup_repo() {
 # state-dir helpers work without writing into the actual project.
 run_hook() {
   local cmd="$1"
-  local input
-  input=$(printf '{"tool_input":{"command":%s}}' "$(jq -Rn --arg c "$cmd" '$c')")
-  (cd "$TMPDIR/repo" && CLAUDE_PROJECT_DIR="$TMPDIR/repo" bash "$HOOK" <<<"$input")
+  (cd "$TMPDIR/repo" && CLAUDE_PROJECT_DIR="$TMPDIR/repo" \
+    bash "$HOOK" <<<"$(hook_input "$cmd")")
   echo $?
 }
 
@@ -61,27 +83,29 @@ assert_exit() {
   fi
 }
 
-# Set up a SECOND, unrelated repo (with `main` checked out) to stand in for
-# another repository the agent legitimately pushes to — most importantly a
-# project's separate `<project>.wiki.git`, whose default and only branch is
-# `main` and which has no PR flow at all.
+# Set up a SECOND repo (with `main` checked out) standing in for another
+# repository the agent legitimately pushes to. `url` is its `origin`; pass the
+# wiki URL for the wiki case, or an unrelated URL for a sibling checkout.
 setup_other_repo() {
-  local name="$1"
-  rm -rf "$TMPDIR/$name"
+  local name="$1" url="${2:-https://github.com/other-owner/other-repo.git}"
+  rm -rf "${TMPDIR:?}/$name"
   mkdir -p "$TMPDIR/$name"
   git -C "$TMPDIR/$name" init --quiet --initial-branch=main
   git -C "$TMPDIR/$name" -c user.email=test@test -c user.name=test commit \
     --quiet --allow-empty -m init
+  git -C "$TMPDIR/$name" remote add origin "$url"
 }
 
-# Run the hook with cwd = the project repo (what Claude Code actually passes)
-# while the command targets a different repo.
+# Run the hook with an explicit cwd, and with the project anchor exported the
+# way the wrappers do ([INV-131] pattern). The anchor is what lets a bare
+# `git push` issued from INSIDE another repo still be judged against this
+# project — the hook's own cwd is the pushing repo, not the project.
 run_hook_cwd() {
   local cmd="$1" cwd="$2"
-  local input
-  input=$(printf '{"tool_input":{"command":%s},"cwd":%s}' \
-    "$(jq -Rn --arg c "$cmd" '$c')" "$(jq -Rn --arg d "$cwd" '$d')")
-  (cd "$cwd" && CLAUDE_PROJECT_DIR="$TMPDIR/repo" bash "$HOOK" <<<"$input")
+  (cd "$cwd" \
+    && CLAUDE_PROJECT_DIR="$TMPDIR/repo" \
+       AUTONOMOUS_PROJECT_DIR="$TMPDIR/repo" \
+       bash "$HOOK" <<<"$(hook_input "$cmd" "$cwd")")
   echo $?
 }
 
@@ -192,11 +216,11 @@ assert_exit "git status (not a push) allowed" "0" "$out"
 # ===========================================================================
 # TC-BP-12: push to ANOTHER repo's main via `git -C <other>` → allow
 # ===========================================================================
-# Trunk protection guards THIS project's repo. A push whose destination
-# repository is a different one is not this guard's business: the agent may
-# legitimately be publishing to a sibling checkout, a vendored dependency, or
-# a wiki. Blocking it is a pure false positive — there is no PR flow here to
-# route the change through.
+# Trunk protection guards THIS project's remote trunk. A push whose
+# DESTINATION is a different repository is not this guard's business: the agent
+# may legitimately be publishing to a sibling checkout or a vendored
+# dependency. Blocking it is a pure false positive — there is no PR flow here
+# to route the change through.
 echo ""
 echo "=== TC-BP-12: push another repo's main via -C → allow ==="
 setup_repo main
@@ -208,15 +232,48 @@ assert_exit "push to another repo's main via -C allowed" "0" "$out"
 # TC-BP-13: push to a .wiki.git clone's main via `cd && git push` → allow
 # ===========================================================================
 # The real-world shape that motivated this: publishing a design doc to a
-# GitLab project wiki. `<project>.wiki.git` is a separate repository whose
-# only branch is `main`, so the guard fired on every wiki update and the docs
-# could not be pushed at all.
+# project wiki. `<project>.wiki.git` is a separate repository whose only branch
+# is `main`, so the guard fired on every wiki update and the docs could not be
+# pushed at all. No configuration derives this — the wiki URL simply differs
+# from the project URL, so the same destination comparison allows it.
 echo ""
 echo "=== TC-BP-13: push to <project>.wiki.git main via cd → allow ==="
 setup_repo main
-setup_other_repo project.wiki
+setup_other_repo project.wiki "$WIKI_URL"
 out=$(run_hook_cwd "cd $TMPDIR/project.wiki && git push origin main" "$TMPDIR/repo")
 assert_exit "push to <project>.wiki.git main allowed" "0" "$out"
+
+# ===========================================================================
+# TC-BP-13b: BARE `git push` from inside the wiki clone → allow
+# ===========================================================================
+# The most natural agent workflow: `cd` into the wiki in one turn, then push in
+# the next. The hook's own cwd IS the wiki here, so a cwd-anchored identity
+# check would compare the wiki against itself and block — which is why the
+# project anchor must come from the wrapper-exported value, not `pwd`.
+# Pinned against regression to a pwd-derived anchor.
+echo ""
+echo "=== TC-BP-13b: bare push from inside the wiki clone → allow ==="
+setup_repo main
+setup_other_repo project.wiki "$WIKI_URL"
+out=$(run_hook_cwd "git push" "$TMPDIR/project.wiki")
+assert_exit "bare push from inside wiki clone allowed" "0" "$out"
+out=$(run_hook_cwd "git push origin main" "$TMPDIR/project.wiki")
+assert_exit "explicit push origin main from inside wiki clone allowed" "0" "$out"
+
+# ===========================================================================
+# TC-BP-13c: no project anchor exported → fail closed
+# ===========================================================================
+# With no anchor the hook falls back to its cwd, so the wiki compares equal to
+# itself and the push is CHECKED, not waved through. Uncertainty must never
+# grant a trunk push; the wiki allowance is a capability the wrapper grants by
+# exporting the anchor, never an inference from an absent one.
+echo ""
+echo "=== TC-BP-13c: bare push from wiki with NO anchor → block (fail closed) ==="
+setup_repo main
+setup_other_repo project.wiki "$WIKI_URL"
+out=$( (cd "$TMPDIR/project.wiki" && env -u AUTONOMOUS_PROJECT_DIR -u CLAUDE_PROJECT_DIR \
+  bash "$HOOK" <<<"$(hook_input "git push origin main")" >/dev/null 2>&1); echo $? )
+assert_exit "bare wiki push with no anchor fails closed" "2" "$out"
 
 # ===========================================================================
 # TC-BP-14: push THIS repo's main via `git -C <self>` → still block
@@ -232,15 +289,97 @@ assert_exit "push to own repo's main via -C still blocked" "2" "$out"
 # ===========================================================================
 # TC-BP-15: push main from a linked worktree of THIS repo → still block
 # ===========================================================================
-# A linked worktree shares its git-common-dir with the project repo, so it
-# must still count as "this repo" — otherwise every guard could be sidestepped
-# by committing from a worktree.
+# A linked worktree pushes to the same destination as the project repo, so it
+# must still count as "this project" — otherwise every guard could be
+# sidestepped by pushing from a worktree.
 echo ""
 echo "=== TC-BP-15: push own repo main from a linked worktree → still block ==="
 setup_repo main
 git -C "$TMPDIR/repo" worktree add --quiet -b feat/wt "$TMPDIR/wt" >/dev/null 2>&1
 out=$(run_hook_cwd "git push origin HEAD:refs/heads/main" "$TMPDIR/wt")
 assert_exit "push to own repo's main from linked worktree still blocked" "2" "$out"
+
+# ===========================================================================
+# TC-BP-16: SECOND INDEPENDENT CLONE of this project's remote → still block
+# ===========================================================================
+# The security boundary a local-identity check cannot express. This clone has
+# its own git-common-dir, so any "is it the same local repo?" comparison calls
+# it a different repository and allows the push — but its `origin` is THIS
+# project, so the push lands on the very trunk the guard protects. Comparing
+# destinations is what makes this a block. Pinned against regression to a
+# local-identity comparison.
+echo ""
+echo "=== TC-BP-16: push from a 2nd clone of this project's remote → still block ==="
+setup_repo main
+setup_other_repo clone2 "$PROJECT_URL"
+out=$(run_hook_cwd "git -C $TMPDIR/clone2 push origin main" "$TMPDIR/repo")
+assert_exit "push to own trunk from a 2nd clone blocked (-C form)" "2" "$out"
+out=$(run_hook_cwd "cd $TMPDIR/clone2 && git push origin main" "$TMPDIR/repo")
+assert_exit "push to own trunk from a 2nd clone blocked (cd form)" "2" "$out"
+out=$(run_hook_cwd "git -C $TMPDIR/clone2 push origin HEAD:refs/heads/main" "$TMPDIR/repo")
+assert_exit "push to own trunk from a 2nd clone blocked (HEAD:refs form)" "2" "$out"
+
+# ===========================================================================
+# TC-BP-17: URL spelling differences do not defeat the comparison
+# ===========================================================================
+# The same repository reached over SSH shorthand, with credentials, a port, or
+# without the `.git` suffix must still compare EQUAL to the project — else the
+# TC-BP-16 bypass reopens under a different spelling.
+echo ""
+echo "=== TC-BP-17: same destination, different URL spellings → still block ==="
+setup_repo main
+for _url in \
+  "git@github.com:zxkane/autonomous-dev-team.git" \
+  "git@github.com:zxkane/autonomous-dev-team" \
+  "https://user:token@github.com/zxkane/autonomous-dev-team.git" \
+  "ssh://git@github.com:22/zxkane/autonomous-dev-team.git" \
+  "https://github.com/zxkane/Autonomous-Dev-Team.git"; do
+  setup_other_repo spelling "$_url"
+  out=$(run_hook_cwd "git -C $TMPDIR/spelling push origin main" "$TMPDIR/repo")
+  assert_exit "spelling '$_url' still blocked" "2" "$out"
+done
+
+# ===========================================================================
+# TC-BP-18: a wiki-shaped path is NOT special-cased into the project
+# ===========================================================================
+# Guards the normalization: only a trailing `.git` is stripped, never `.wiki`.
+# If `.wiki` were folded away, a wiki push would compare equal to the project
+# and be blocked again — the original bug.
+echo ""
+echo "=== TC-BP-18: wiki URL canonicalizes distinctly from the project URL ==="
+setup_repo main
+setup_other_repo wikispell "git@github.com:zxkane/autonomous-dev-team.wiki.git"
+out=$(run_hook_cwd "git -C $TMPDIR/wikispell push origin main" "$TMPDIR/repo")
+assert_exit "wiki over SSH shorthand allowed" "0" "$out"
+
+# ===========================================================================
+# TC-BP-19: PUSH_ALLOWED_REMOTE_URLS exempts a named destination
+# ===========================================================================
+# The explicit, auditable opt-out for a destination that IS this project's
+# trunk but which the operator has decided may be pushed directly. An
+# unrelated entry must NOT exempt anything, and matching is spelling-insensitive.
+echo ""
+echo "=== TC-BP-19: PUSH_ALLOWED_REMOTE_URLS allowlist ==="
+setup_repo main
+run_hook_allow() {
+  local cmd="$1" allow="$2"
+  (cd "$TMPDIR/repo" \
+    && AUTONOMOUS_PROJECT_DIR="$TMPDIR/repo" PUSH_ALLOWED_REMOTE_URLS="$allow" \
+       bash "$HOOK" <<<"$(hook_input "$cmd")" >/dev/null 2>&1)
+  echo $?
+}
+out=$(run_hook_allow "git push origin main" "$PROJECT_URL")
+assert_exit "own trunk allowed when destination is allowlisted" "0" "$out"
+out=$(run_hook_allow "git push origin main" "git@github.com:zxkane/autonomous-dev-team")
+assert_exit "allowlist matches a different spelling of the same destination" "0" "$out"
+out=$(run_hook_allow "git push origin main" "https://github.com/other/unrelated.git")
+assert_exit "unrelated allowlist entry does not exempt own trunk" "2" "$out"
+out=$(run_hook_allow "git push origin main" "")
+assert_exit "empty allowlist blocks own trunk" "2" "$out"
+# An entry holding a glob metachar must stay literal — never expand against the
+# hook's cwd (which contains files, so an unguarded split could match one).
+out=$(run_hook_allow "git push origin main" "https://github.com/zxkane/*")
+assert_exit "glob-shaped allowlist entry does not exempt own trunk" "2" "$out"
 
 # ===========================================================================
 # Summary
