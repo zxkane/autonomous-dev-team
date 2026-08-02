@@ -1,10 +1,9 @@
 #!/bin/bash
-# test-block-push-regex.sh — Regression tests for #64 in block-push-to-main.sh.
+# test-block-push-regex.sh — Layer-1 trunk-protection regression tests.
 #
-# Covers all 8 cases from the issue's "Proposed scope" table. The test
-# constructs a throwaway git repo with both `main` and a feature branch,
-# checks out the relevant branch, then feeds the hook a JSON input
-# matching what Claude Code would deliver and asserts the exit code.
+# Covers the original #64 cases, destination scoping, fail-closed behavior, and
+# push-option parsing. Each case runs in a throwaway repository and feeds the
+# hook the JSON input shape delivered by supported coding agents.
 #
 # Run: bash tests/unit/test-block-push-regex.sh
 
@@ -15,6 +14,7 @@ FAIL=0
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 HOOK="$PROJECT_ROOT/skills/autonomous-common/hooks/block-push-to-main.sh"
+LIB_PUSH="$PROJECT_ROOT/skills/autonomous-common/hooks/lib-push.sh"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -72,6 +72,15 @@ run_hook() {
   echo $?
 }
 
+run_remote_parser() {
+  local cmd="$1"
+  (
+    # shellcheck source=../../skills/autonomous-common/hooks/lib-push.sh
+    source "$LIB_PUSH"
+    parse_push_remote_operand "$cmd"
+  )
+}
+
 assert_exit() {
   local desc="$1" expected="$2" actual="$3"
   if [[ "$expected" == "$actual" ]]; then
@@ -79,6 +88,17 @@ assert_exit() {
     PASS=$((PASS + 1))
   else
     echo -e "  ${RED}FAIL${NC}: $desc (expected exit=$expected, actual exit=$actual)"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
+assert_output() {
+  local desc="$1" expected="$2" actual="$3"
+  if [[ "$expected" == "$actual" ]]; then
+    echo -e "  ${GREEN}PASS${NC}: $desc"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${NC}: $desc (expected='$expected', actual='$actual')"
     FAIL=$((FAIL + 1))
   fi
 }
@@ -552,6 +572,93 @@ for _w in autonomous-dev autonomous-review; do
     assert_exit "${_w}.sh exports PUSH_ALLOWED_REMOTE_URLS when set" "0" "1"
   fi
 done
+
+# ===========================================================================
+# TC-BP-28: bare --signed must not consume the remote
+# ===========================================================================
+echo ""
+echo "=== TC-BP-28: --signed push to main from feat -> block ==="
+setup_repo feat/x
+out=$(run_hook "git push --signed origin main")
+assert_exit "--signed push to main from feat blocked" "2" "$out"
+
+# ===========================================================================
+# TC-BP-29: --repo value and positional repository follow Git precedence
+# ===========================================================================
+echo ""
+echo "=== TC-BP-29: --repo repository precedence ==="
+setup_repo feat/x
+out=$(run_hook "git push --repo origin main")
+assert_exit "--repo origin main from feat has an implicit feature ref" "0" "$out"
+setup_repo main
+out=$(run_hook "git push --repo origin feat/foo")
+assert_exit "--repo origin feat/foo from main has an implicit trunk ref" "2" "$out"
+setup_repo feat/x
+out=$(run_hook "git push --repo origin origin main")
+assert_exit "--repo plus positional origin and explicit main ref blocked" "2" "$out"
+setup_repo main
+setup_other_repo repo-override "$PROJECT_URL"
+git -C "$TMPDIR/repo-override" remote add other https://github.com/other-owner/other-repo.git
+out=$(run_hook_cwd "git push --repo other" "$TMPDIR/repo-override")
+assert_exit "--repo unrelated remote overrides protected push destination" "0" "$out"
+
+# ===========================================================================
+# TC-BP-30: --signed feature push from trunk -> allow
+# ===========================================================================
+echo ""
+echo "=== TC-BP-30: --signed feature push from main -> allow ==="
+setup_repo main
+out=$(run_hook "git push --signed origin feat/foo")
+assert_exit "--signed feature push from main allowed" "0" "$out"
+
+# ===========================================================================
+# TC-BP-31: -o still consumes its separate value
+# ===========================================================================
+echo ""
+echo "=== TC-BP-31: -o value before push to main -> block ==="
+setup_repo feat/x
+out=$(run_hook "git push -o ci.skip origin main")
+assert_exit "-o value skipped and push to main blocked" "2" "$out"
+
+# ===========================================================================
+# TC-BP-32: the remote parser mirrors push-option token handling
+# ===========================================================================
+echo ""
+echo "=== TC-BP-32: remote operand parser flag handling ==="
+out=$(run_remote_parser "git push --signed origin main")
+assert_output "--signed leaves origin as the remote operand" "origin" "$out"
+out=$(run_remote_parser "git push --repo origin main")
+assert_output "positional main overrides the --repo value" "main" "$out"
+out=$(run_remote_parser "git push --repo origin")
+assert_output "--repo value is used without a positional repository" "origin" "$out"
+out=$(run_remote_parser "git push --repo=origin")
+assert_output "--repo=value is used without a positional repository" "origin" "$out"
+out=$(run_remote_parser "git push --repo origin origin main")
+assert_output "positional origin overrides the --repo value" "origin" "$out"
+out=$(run_remote_parser "git push -o ci.skip origin main")
+assert_output "-o still consumes ci.skip before the remote" "origin" "$out"
+out=$(run_remote_parser "git push --signed=if-asked origin main")
+assert_output "--signed=value remains a one-token option" "origin" "$out"
+out=$(run_remote_parser "git push --recurse-submodules origin main")
+assert_output "invalid bare --recurse-submodules is handled conservatively" "origin" "$out"
+
+# ===========================================================================
+# TC-BP-33: --flag=value remains one token
+# ===========================================================================
+echo ""
+echo "=== TC-BP-33: --signed=value push to main from feat -> block ==="
+setup_repo feat/x
+out=$(run_hook "git push --signed=if-asked origin main")
+assert_exit "--signed=value push to main from feat blocked" "2" "$out"
+
+# ===========================================================================
+# TC-BP-34: invalid bare --recurse-submodules fails closed
+# ===========================================================================
+echo ""
+echo "=== TC-BP-34: bare --recurse-submodules before main -> block ==="
+setup_repo feat/x
+out=$(run_hook "git push --recurse-submodules origin main")
+assert_exit "bare --recurse-submodules cannot shift the remote boundary" "2" "$out"
 
 # ===========================================================================
 # Summary

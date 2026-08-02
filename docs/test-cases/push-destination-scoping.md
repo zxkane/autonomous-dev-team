@@ -4,7 +4,7 @@ Covers `skills/autonomous-common/hooks/block-push-to-main.sh` and the four
 `lib-push.sh` helpers it added (`parse_push_remote_operand`,
 `canonical_remote_url`, `push_destination_url`, `anchor_owns_destination`).
 
-Suite: `tests/unit/test-block-push-regex.sh` — 56 assertions, hermetic (throwaway
+Suite: `tests/unit/test-block-push-regex.sh` — 73 assertions, hermetic (throwaway
 repos under `mktemp -d`, no network; a remote URL only has to be *configured*,
 never reachable, because the comparison is textual).
 
@@ -58,6 +58,31 @@ independently, so the tests can distinguish "anchored on the project" from
 | TC-BP-09 | `--tags` only | allow (0) |
 | TC-BP-10 | `TRUNK_BRANCH=master` + push to `refs/heads/master` | block (2) |
 | TC-BP-11 | not a push command | allow (0) |
+
+### Push option grammar (#542)
+
+The destination and refspec parsers mirror option classification so they agree
+where positional operands begin. Bare `--signed` consumes no value. `--repo`
+does consume a repository value, but a later positional repository overrides
+it. `-o` / `--push-option`, `--receive-pack`, and `--exec` continue to consume a
+separate value, while `--flag=value` forms remain one token.
+
+Git rejects bare `--recurse-submodules` followed by a remote as an invalid mode.
+Layer 1 handles that unsupported form conservatively as one token so it cannot
+shift the parsed remote boundary.
+
+| ID | Case | Expected |
+|---|---|---|
+| TC-BP-28 | `git push --signed origin main` from `feat/x` | block (2) |
+| TC-BP-29 | `git push --repo origin main` from `feat/x` | allow (0), implicit feature ref |
+| TC-BP-29a | `git push --repo origin feat/foo` from `main` | block (2), implicit trunk ref |
+| TC-BP-29b | `git push --repo origin origin main` from `feat/x` | block (2), explicit trunk ref |
+| TC-BP-29c | `git push --repo other` from a second clone on `main`, where `origin` is protected and `other` is unrelated | allow (0), option repository controls destination |
+| TC-BP-30 | `git push --signed origin feat/foo` from `main` | allow (0) |
+| TC-BP-31 | `git push -o ci.skip origin main` from `feat/x` | block (2) |
+| TC-BP-32 | direct remote-parser checks for bare, value-taking, and `--flag=value` options | parsed operand matches Git precedence |
+| TC-BP-33 | `git push --signed=if-asked origin main` from `feat/x` | block (2) |
+| TC-BP-34 | `git push --recurse-submodules origin main` from `feat/x` | block (2) |
 
 ### Different destination → allow
 
@@ -184,17 +209,19 @@ config would otherwise move the protected trunk and silently disable the guard.
 All counts below were measured, not estimated — by checking out the named
 implementation and running the current suite against it.
 
-**On this implementation: 56/56.**
+**On this implementation: 73/73.**
 
-**Against PR #539's parent (`216a906`): 36 pass / 20 fail.** The 20 red:
+The destination-scoping counts below were measured with the original
+TC-BP-01..27 slice (56 assertions). **Against PR #539's parent (`216a906`): 36
+pass / 20 fail.** The 20 red:
 the 2 wiki-bare-push cases, the 3 second-clone forms, the 5 URL spellings, the
 2 positive allowlist cases, the 4 DNS/path-equivalent spellings (TC-BP-26), and
 the 4 wrapper-export statics (TC-BP-25).
 
-**Against the first cut of this change (`2d71c7f`): 42 pass / 14 fail.** Those
-14 are the adversarial pins — each was a *verified live bypass or false positive*
-in that commit, reproduced and compared against `origin/main` to confirm it was a
-regression rather than pre-existing.
+**Against the first cut of that change (`2d71c7f`): 42 pass / 14 fail.** Those
+14 are the adversarial pins — each was a *verified live bypass or false
+positive* in that commit, reproduced and compared against `origin/main` to
+confirm it was a regression rather than pre-existing.
 
 The two red sets barely overlap, and that is the point: the parent is red where
 it is too *strict* (wiki, allowlist) or where a local-identity check cannot see
@@ -206,6 +233,13 @@ Some cases are green on both — e.g. TC-BP-20..23 pass on the parent, because t
 parent never allows on the strength of a resolved destination and so cannot
 exhibit those bypasses. They are still worth pinning: they constrain this
 implementation's allow gate, not the parent's.
+
+For #542, restoring only the old flag-classification arms produces **67 pass /
+6 fail**: the two hook-level bare-`--signed` direction checks, the hook-level
+`--repo other` destination check, and three direct parser operand checks.
+Reapplying the correction produces **73/73**. The other `--repo` hook cases and
+the `-o` case deliberately remain green across the change; they pin Git
+behavior that must not be "fixed" in the wrong direction.
 
 Suites re-run green alongside this change: `test-block-commit-outside-worktree.sh`
 (186), `test-is-git-command-quote-strip.sh` (9), `test-install-git-pre-push.sh`

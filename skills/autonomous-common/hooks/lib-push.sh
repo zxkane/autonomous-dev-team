@@ -86,10 +86,10 @@ parse_push_target_refspec() {
       --mirror|--mirror=*)  saw_mirror=1 ;;
       --tags|--tags=*)      saw_tags_flag=1 ;;
       --delete|-d)          saw_delete=1 ;;
-      # Skip flags that take a value
-      --repo|-o|--push-option|--receive-pack|--exec|--signed)
+      # Skip flags that take a separate value. Bare --signed is one token.
+      --repo|-o|--push-option|--receive-pack|--exec)
         i=$(( i + 2 > n ? n : i + 2 )); continue ;;
-      # Combined --flag=value or --flag forms — consume as 1 token
+      # Remaining short, long, or --flag=value options consume 1 token.
       -*) ;;
       # Positional: first one is the remote, rest are refspecs (or
       # `tag <name>` pair).
@@ -193,10 +193,11 @@ is_trunk_ref() {
 # ---------------------------------------------------------------------------
 # parse_push_remote_operand <command>
 #
-# Echoes the first positional operand of a git-push command — the remote name
-# or a literal URL — and returns 0. Echoes nothing and returns 0 when the push
-# has no positional operand (bare `git push`, which targets the current
-# branch's configured remote — a resolvable destination, not an unknown).
+# Echoes the effective repository operand of a git-push command — a `--repo`
+# value, or the first positional remote name / literal URL that overrides it —
+# and returns 0. Echoes nothing and returns 0 when the push has no repository
+# operand (bare `git push`, which targets the current branch's configured
+# remote — a resolvable destination, not an unknown).
 #
 # Returns 1 for anything this helper cannot confidently read, so callers can
 # treat "1" as UNKNOWN and fail closed:
@@ -239,7 +240,22 @@ parse_push_remote_operand() {
       j=$((j+1))
       while (( j < n )); do
         case "${tokens[j]}" in
-          --repo|-o|--push-option|--receive-pack|--exec|--signed)
+          # --repo supplies a repository, but a later positional repository
+          # overrides it. Preserve both forms of Git's precedence.
+          --repo)
+            (( j + 1 < n )) || return 1
+            operand="${tokens[j+1]}"
+            found=1
+            j=$((j+2))
+            continue
+            ;;
+          --repo=*)
+            operand="${tokens[j]#*=}"
+            found=1
+            j=$((j+1))
+            continue
+            ;;
+          -o|--push-option|--receive-pack|--exec)
             j=$(( j + 2 > n ? n : j + 2 )); continue ;;
           -*) ;;
           *) operand="${tokens[j]}"; found=1; break ;;

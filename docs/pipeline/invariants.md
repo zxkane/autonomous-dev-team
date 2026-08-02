@@ -9620,6 +9620,19 @@ check armed:
 - `canonical_remote_url` returning non-zero (nothing comparable remains), or no
   resolvable remote for the named operand.
 
+The destination and trunk-ref parsers must classify push options identically
+before their first positional operand. Bare `--signed` consumes no following
+token. `--repo` supplies a repository value, including its `--repo=<value>`
+form, but a later positional repository overrides it. Other options that consume
+a separate value are limited to `-o` / `--push-option`, `--receive-pack`, and
+`--exec`; remaining bare and `--flag=value` options consume one token. In
+particular, Git rejects bare `--recurse-submodules` when the next token is a
+remote, so the bounded Layer-1 parser handles that unsupported form
+conservatively as one token rather than letting it shift the remote boundary.
+If `parse_push_remote_operand` and `parse_push_target_refspec` disagree here,
+the destination check can inspect one token while the trunk check inspects
+another.
+
 **Uncertainty never grants a trunk push.**
 
 `canonical_remote_url` normalizes away scheme, userinfo, port, the SSH
@@ -9682,15 +9695,16 @@ pre-push hook emitted by `install-git-pre-push.sh` is **unaffected** — it is
 self-contained by design, installed inside the repository it guards, and so has
 no cross-repository question to answer.
 
-**Scope note**: this governs only *whether a push is in scope*. The trunk-ref
-parsing (`parse_push_target_refspec` / `is_trunk_ref`, [INV-17]) and the
-`BASE_BRANCH` → `TRUNK_BRANCH` → `main` resolution chain ([INV-131]) are
-unchanged. Hooks remain zero-dependency shell: they read only what the wrapper
-exported and never parse conf.
+**Scope note**: destination comparison still governs only *whether a push is in
+scope*. Its operand classification is kept in parity with trunk-ref parsing
+(`parse_push_target_refspec` / `is_trunk_ref`, [INV-17]) so both decisions see
+the same command boundary. The `BASE_BRANCH` → `TRUNK_BRANCH` → `main`
+resolution chain ([INV-131]) is unchanged. Hooks remain zero-dependency shell:
+they read only what the wrapper exported and never parse conf.
 
 **Status**: **ENFORCED**.
 
-**Test**: `tests/unit/test-block-push-regex.sh` (`TC-BP-01..27`, 56 assertions) —
+**Test**: `tests/unit/test-block-push-regex.sh` (`TC-BP-01..34`, 73 assertions) —
 the 11 pre-existing #64 cases unchanged, plus TC-BP-13b (bare push from inside
 the wiki), TC-BP-13c (no anchor → fail closed), TC-BP-16 (second clone of this
 project's remote, all three command shapes), TC-BP-17 (five URL spellings),
@@ -9699,6 +9713,13 @@ cross-spelling match, unrelated entry, empty value, and a glob-shaped entry
 pinned **non-vacuously** by planting a cwd file the pattern would expand onto),
 and TC-BP-25 (both wrappers export the anchor — dropping it is fail-closed, so
 nothing else would catch it).
+
+TC-BP-28..34 pin the mirrored push-option grammar: bare `--signed` leaves the
+remote visible to both parsers, `--repo` preserves its value and positional
+override precedence, `-o` still consumes its value, `--signed=<value>` remains
+one token, and invalid bare `--recurse-submodules` syntax is handled
+conservatively. The `--repo` cases run through the hook, not only the helper, so
+the production destination-check call path is covered.
 
 TC-BP-20..24, 26, 27 pin the fail-closed rule against the ways two earlier cuts
 of this change violated it. Every one was a **verified** bypass or false
