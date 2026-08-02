@@ -9580,25 +9580,45 @@ _Triage (issue #236): [machine-checked: tests/unit/test-block-push-regex.sh]_
 
 **Rule**: `block-push-to-main.sh` decides whether a `git push` is in scope by
 comparing **canonical push-destination URLs**, never local repository identity.
-It resolves two destinations and allows the push (`exit 0`, skipping the trunk
-check) **only when both resolve AND differ**:
+It allows the push (`exit 0`, skipping the trunk check) only when the target
+destination is **proven** AND is **none of the project anchor's remotes**.
 
-1. the **project anchor's** destination — the trunk this guard protects, taken
-   from `AUTONOMOUS_PROJECT_DIR` (exported by both wrappers, [INV-131] pattern),
-   falling back to `CLAUDE_PROJECT_DIR`, then to the hook cwd;
-2. the **push target's** destination — resolved from the repository
-   `resolve_git_command_cwd` identifies ([INV-146]) plus the push's own remote
-   operand, honoring `remote.<name>.pushurl`, `branch.<b>.remote`, and
-   `remote.pushDefault` the way git itself does.
+The **project anchor** is `AUTONOMOUS_PROJECT_DIR` (exported by both wrappers,
+[INV-131] pattern), falling back to `CLAUDE_PROJECT_DIR`, then to the hook cwd.
+The anchor's own *bare-push* destination is deliberately NOT the definition of
+"this project": `remote.pushDefault` or `branch.<b>.pushRemote` in the project
+checkout would silently move the protected trunk and switch the guard off.
+Instead `anchor_owns_destination` matches the target against **every** remote the
+anchor knows (fetch and push URLs), so ordinary local config cannot shrink the
+protected set.
 
-Every other outcome — either side unresolvable, no remote configured, an
-unparsable command, a missing anchor, or equal destinations — falls through to
-the trunk check. **Uncertainty never grants a trunk push.**
+The **target destination** must be positively established, and each of the
+following reports *unknown* rather than a guess — any unknown leaves the trunk
+check armed:
 
-Comparison is on `canonical_remote_url`: scheme, userinfo, port, trailing
-slashes, a single trailing `.git`, and case are normalized away, so any spelling
-of the same repository compares equal. The path is **never** rewritten, which is
-what keeps `<project>.wiki.git` distinct from `<project>.git`.
+- `resolve_git_command_cwd` rc=2 ([INV-146]) — a push matched but its context is
+  unresolvable. This is **not** treated as "the hook cwd": the cwd is a
+  different repository than the command's real target, so substituting it would
+  compare the wrong repo and break in both directions.
+- more than one `git push` on the command line — one operand cannot describe two
+  destinations, and the trunk-ref parser reads refspecs from the whole line, so
+  answering for the first push would let a second reach trunk unexamined.
+- an operand bearing a quote or expansion character — `read -ra` does not process
+  quotes, so such a token would canonicalize to a *confidently wrong*
+  destination. That is worse than an unresolved one, because it satisfies the
+  allow gate while the real shell pushes somewhere else.
+- `canonical_remote_url` returning non-zero (nothing comparable remains), or no
+  resolvable remote for the named operand.
+
+**Uncertainty never grants a trunk push.**
+
+`canonical_remote_url` normalizes away scheme, userinfo, port, the SSH
+shorthand's `host:path` colon, repeated/leading/trailing slashes in the path, a
+trailing `.git`, and case — so any spelling of the same repository compares
+equal. Host and path are normalized **separately**, so a `@`, `:`, or `//`
+inside the path can never be read as host syntax (which would collapse two
+unrelated repositories onto one canonical value). `.wiki` is never stripped,
+which is what keeps `<project>.wiki.git` distinct from `<project>.git`.
 
 **Why**: PR #539 fixed a real false positive — a project wiki lives in a
 separate `<project>.wiki.git` repository whose only branch is `main`, so every
@@ -9636,9 +9656,10 @@ reader sees exactly what was exempted. Entries are compared after the same
 normalization, and a listed destination remains subject to Layers 2 and 3.
 
 **Producer**: `lib-push.sh::parse_push_remote_operand`,
-`lib-push.sh::canonical_remote_url`, `lib-push.sh::push_destination_url`;
-`autonomous-dev.sh` / `autonomous-review.sh` export `AUTONOMOUS_PROJECT_DIR`
-(and `PUSH_ALLOWED_REMOTE_URLS` when set) at startup, immediately after
+`lib-push.sh::canonical_remote_url`, `lib-push.sh::push_destination_url`,
+`lib-push.sh::anchor_owns_destination`; `autonomous-dev.sh` /
+`autonomous-review.sh` export `AUTONOMOUS_PROJECT_DIR` (and
+`PUSH_ALLOWED_REMOTE_URLS` when set) at startup, immediately after
 `BASE_BRANCH`.
 
 **Consumer**: `block-push-to-main.sh` (Layer 1 only). The Layer-2 per-worktree
@@ -9654,14 +9675,24 @@ exported and never parse conf.
 
 **Status**: **ENFORCED**.
 
-**Test**: `tests/unit/test-block-push-regex.sh` (`TC-BP-01..19`) — the 11
-pre-existing #64 cases unchanged, plus TC-BP-13b (bare push from inside the
-wiki), TC-BP-13c (no anchor → fail closed), TC-BP-16 (second clone of this
+**Test**: `tests/unit/test-block-push-regex.sh` (`TC-BP-01..24`, 44 assertions)
+— the 11 pre-existing #64 cases unchanged, plus TC-BP-13b (bare push from inside
+the wiki), TC-BP-13c (no anchor → fail closed), TC-BP-16 (second clone of this
 project's remote blocked in all three command shapes), TC-BP-17 (five URL
 spellings of the same destination still blocked), TC-BP-18 (`.wiki` never
 normalized away), TC-BP-19 (allowlist match, cross-spelling match, unrelated
-entry, empty value, glob-shaped entry). 12 of the 32 assertions are red on
-PR #539's parent implementation.
+entry, empty value, and a glob-shaped entry pinned **non-vacuously** by planting
+a cwd file the pattern would expand onto). 12 of the 44 are red on PR #539's
+parent implementation.
+
+TC-BP-20..24 pin the fail-closed rule against the ways an earlier cut of this
+change violated it — each was a **verified** bypass or false positive, not a
+hypothetical: chained pushes (TC-BP-20), quoted/expansion operands (TC-BP-21),
+rc=2 grammars evaluated against the wrong repo (TC-BP-22), local push-config
+redirect (TC-BP-23), and path-embedded `@` collapsing distinct hosts (TC-BP-24).
+They are green on the parent too — the parent never allows on the strength of a
+resolved destination, so it cannot exhibit these — which is why they are pinned
+here rather than presented as parent-regressions.
 
 **Cross-references**:
 - [INV-17](#inv-17-trunk-protection-requires-defense-in-depth-across-3-layers) — the 3-layer model this is Layer 1 of; the destination comparison narrows Layer 1's *scope* without widening its *gaps*.

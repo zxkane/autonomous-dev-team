@@ -400,6 +400,25 @@ generic liveness fingerprint.
 ([INV-131](invariants.md#inv-131-the-pipelines-base-branch-is-a-resolved-exported-validated-conf-value--never-a-hardcoded-main-literal-in-a-prompt-hook-or-provider-argv),
 default `main`).
 
+### Startup exports consumed by hooks
+
+Immediately after resolving `BASE_BRANCH`, the wrapper also exports the project
+anchor for Layer-1 trunk protection
+([INV-148](invariants.md#inv-148-layer-1-trunk-protection-compares-push-destinations-against-an-exported-project-anchor-and-fails-closed-when-either-is-unresolvable)):
+
+| Export | Source | Consumed by |
+|---|---|---|
+| `BASE_BRANCH` | `resolve_base_branch` | `check-rebase-before-push.sh`, `verify-completion.sh`, `block-push-to-main.sh` |
+| `AUTONOMOUS_PROJECT_DIR` | `PROJECT_DIR` (required, validated conf) | `block-push-to-main.sh` |
+| `PUSH_ALLOWED_REMOTE_URLS` | conf, exported only when non-empty | `block-push-to-main.sh` |
+
+`block-push-to-main.sh` cannot derive the project from its own cwd — the cwd is
+the *pushing* repository, which for a wiki push is the wiki itself — so the
+anchor must arrive by export. Dropping the export does not fail loudly: the hook
+falls back to its cwd, which is fail-closed (a wiki push is blocked again)
+rather than permissive. Same resolve-once/export-once discipline as
+`BASE_BRANCH`; hooks stay zero-dependency shell and never parse conf.
+
 ## Mode = resume
 
 1. **Fetch review feedback** from issue comments — most recent comment whose body **starts with** `Review findings` or `Review PASSED`, OR carries a `BLOCKING` / `[P1]` token ([INV-57](invariants.md#inv-57-dev-resume-must-not-short-circuit-on-a-standing-approval-when-newer-review-findings-exist), closes #188). The two prefixes are wrapper-side strings the review agent emits; dispatcher status comments (e.g. `Dispatching autonomous review`, `Moving to pending-review for assessment`, `no new commits since last review at <sha>`) start with neither prefix and carry neither token, so they are correctly excluded. Pre-fix (#113) the second clause was a substring match on `review`, which let dispatcher chatter shadow real review findings whenever a status comment landed after the verdict — the resumed dev session would then see dispatcher noise as its `## Review Feedback` and make zero progress. The `BLOCKING`/`[P1]` clause (added for #188) broadens recognition beyond the exact `Review findings:` prefix so a late or independent findings comment (a heading `## Codex review findings`, a bare operator note) is still actionable, without re-introducing the #113 false positives. The token clause has two guards (issue #188 review): the `BLOCKING` token is anchored with a *consuming* leading group `(^|[^A-Za-z-])BLOCKING` (never a look-behind) so `NON-BLOCKING` does not match, plus a *consuming* right boundary so `BLOCKINGS` does not match; and a first-line exclusion list (`Review PASSED`/`Review APPROVED`, `## ✅`, `**Agent Session Report`, `Multi-agent review:`, `Reviewed HEAD:`, `<!-- … -->`, `Dispatching`/`Resuming`/`Moving to`) keeps a PASS verdict that says "No BLOCKING issues remain" and dev status/session comments that mention the tokens in prose from being misclassified as change-requests. **Engine boundary ([INV-90]/[INV-91], #296 B6):** the read now routes through `itp_list_comments "$ISSUE" | jq -r '<selector>'` (the normalized [INV-90] array `.[]`), so the selector runs under the **system jq's Oniguruma** engine, not gh's Go-RE2. Because the two engines diverge on `\b`/`\s`/`(?i)` for non-ASCII input, the selector is rewritten to explicit, engine-equivalent forms that select IDENTICALLY in both (= the old RE2 behavior): `BLOCKING\b` → `(?i:(^|[^A-Za-z-])BLOCKING)($|[^A-Za-z0-9_])` (the `(?i)` is SCOPED over the literal only, so the explicit ASCII boundary classes stay OUTSIDE the case-fold and Unicode simple-fold chars `K` U+212A / `ſ` U+017F do not diverge from RE2's ASCII `\b`); `\[P1\]` → `(?i:\[P1\])`; the leading `^\s*` of the exclusion → `^[ \t\r\n\f]*` (explicit ASCII whitespace, excluding NBSP to match RE2's `\s`); each exclusion `(?i)` → a scoped `(?i:…)`. A look-behind remains forbidden (the consuming-anchor design is what makes selection engine-equivalent). `tests/unit/test-resume-selector-re2-compat.sh` (static + system-jq round-trip) and the engine-divergence fixtures in `tests/unit/test-resume-review-comments-filter.sh` guard this boundary; the `:1051` `| last` relies on [INV-90]'s **stable** ascending `createdAt` sort to pick the later of two same-second findings.

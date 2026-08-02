@@ -194,100 +194,140 @@ is_trunk_ref() {
 # parse_push_remote_operand <command>
 #
 # Echoes the first positional operand of a git-push command — the remote name
-# or a literal URL — and returns 0. Returns 1 (empty output) when the push has
-# no positional operand (bare `git push`, which targets the current branch's
-# configured remote).
+# or a literal URL — and returns 0. Echoes nothing and returns 0 when the push
+# has no positional operand (bare `git push`, which targets the current
+# branch's configured remote — a resolvable destination, not an unknown).
 #
-# Trunk protection compares push DESTINATIONS ([INV-148]), so it must ask
-# which remote the push writes to, not assume `origin`. Flag/value skipping
-# mirrors parse_push_target_refspec's walk so both helpers agree on what
-# counts as a positional.
+# Returns 1 for anything this helper cannot confidently read, so callers can
+# treat "1" as UNKNOWN and fail closed:
+#   - no `git push` invocation on the line
+#   - MORE THAN ONE `git push` on the line (`git push a x && git push b y`) —
+#     a single answer cannot describe two destinations, and the trunk-ref
+#     parser reads refspecs from the whole line, so answering for only the
+#     first push would let the second one through unexamined
+#   - a quoted or expansion-bearing operand — `read -ra` does not process
+#     quotes, so the token still carries them and would canonicalize to a
+#     destination that is confidently wrong rather than merely unresolved
+#
+# Trunk protection compares push DESTINATIONS ([INV-148]), so it must ask which
+# remote the push writes to, not assume `origin`. Flag/value skipping mirrors
+# parse_push_target_refspec's walk so both helpers agree on what counts as a
+# positional.
 parse_push_remote_operand() {
   local command="$1"
   local -a tokens
   read -ra tokens <<<"$command"
 
-  local i=0 n=${#tokens[@]}
-  while (( i < n )) && [[ "${tokens[i]}" != "git" ]]; do
+  local n=${#tokens[@]}
+  local i=0 pushes=0 operand="" found=0
+
+  # Scan the WHOLE line: a second `git push` must be detected, not ignored.
+  while (( i < n )); do
+    [[ "${tokens[i]}" == "git" ]] || { i=$((i+1)); continue; }
+    local j=$((i+1))
+    while (( j < n )); do
+      case "${tokens[j]}" in
+        -c|-C|--git-dir|--work-tree|--namespace|--super-prefix)
+          j=$(( j + 2 > n ? n : j + 2 )) ;;
+        --*=*|--*) j=$((j+1)) ;;
+        *) break ;;
+      esac
+    done
+    if (( j < n )) && [[ "${tokens[j]}" == "push" ]]; then
+      pushes=$((pushes+1))
+      (( pushes > 1 )) && return 1
+      j=$((j+1))
+      while (( j < n )); do
+        case "${tokens[j]}" in
+          --repo|-o|--push-option|--receive-pack|--exec|--signed)
+            j=$(( j + 2 > n ? n : j + 2 )); continue ;;
+          -*) ;;
+          *) operand="${tokens[j]}"; found=1; break ;;
+        esac
+        j=$((j+1))
+      done
+    fi
     i=$((i+1))
   done
-  (( i < n )) || return 1
-  i=$((i+1))
 
-  while (( i < n )); do
-    case "${tokens[i]}" in
-      -c|-C|--git-dir|--work-tree|--namespace|--super-prefix)
-        i=$(( i + 2 > n ? n : i + 2 ))
-        ;;
-      --*=*|--*) i=$((i+1)) ;;
-      *) break ;;
-    esac
-  done
+  (( pushes == 1 )) || return 1
 
-  (( i < n )) || return 1
-  [[ "${tokens[i]}" == "push" ]] || return 1
-  i=$((i+1))
-
-  while (( i < n )); do
-    case "${tokens[i]}" in
-      --repo|-o|--push-option|--receive-pack|--exec|--signed)
-        i=$(( i + 2 > n ? n : i + 2 )); continue ;;
-      -*) ;;
-      *) printf '%s\n' "${tokens[i]}"; return 0 ;;
-    esac
-    i=$((i+1))
-  done
-  return 1
+  if (( found == 1 )); then
+    # A quote or expansion character means the token is not the literal value
+    # git will receive. Unknown, not "as written".
+    [[ "$operand" != *[\"\'\$\`\\]* ]] || return 1
+    printf '%s\n' "$operand"
+  fi
+  return 0
 }
 
 # ---------------------------------------------------------------------------
 # canonical_remote_url <url>
 #
-# Echoes a comparable form of a git remote URL: scheme/credentials/port
-# stripped, SSH shorthand (`git@host:owner/repo`) folded to `host/owner/repo`,
-# a trailing `.git` and any trailing slashes removed, and the result
-# lowercased. Always returns 0 (an unrecognized shape passes through with the
-# same normalization applied, so comparison stays defined).
+# Echoes a comparable form of a git remote URL and returns 0; returns 1 (empty
+# output) when nothing comparable remains, so a caller can distinguish
+# "canonicalized" from "cannot canonicalize" and fail closed.
+#
+# Normalized away: scheme, userinfo, port, SSH shorthand's `host:path` colon,
+# repeated/leading/trailing slashes in the path, a trailing `.git`, and case.
+# Host and path are normalized SEPARATELY, so a `@`, `:`, or `//` inside the
+# path can never be mistaken for host syntax.
 #
 # Purpose is EQUALITY of two URLs naming the same repository, not validation.
-# The normalization is deliberately conservative: it only removes syntax that
-# provably cannot change which repository is addressed. It never rewrites the
-# path, so `<project>.git` and `<project>.wiki.git` stay distinct — that is
-# what makes a wiki's push destination recognizably different from its parent
-# project's ([INV-148]).
+# `.wiki` is deliberately never stripped, so `<project>.git` and
+# `<project>.wiki.git` stay distinct — that is what makes a wiki's push
+# destination recognizably different from its parent project's ([INV-148]).
 canonical_remote_url() {
   local url="$1"
-  [[ -n "$url" ]] || return 0
+  [[ -n "$url" ]] || return 1
 
   # Strip scheme (https://, git://, ssh://, file://, ...).
   url="${url#*://}"
 
-  # SSH shorthand `git@host:owner/repo` → `host/owner/repo`. Only the FIRST `:`
-  # is rewritten, and only when it is not a port — a numeric segment is left for
-  # the port strip below. Testing the host segment alone is sufficient: a `:`
-  # anywhere later is inside the path, which is never rewritten.
-  local host_segment="${url%%/*}"
-  if [[ "$host_segment" == *:* && "${host_segment#*:}" != +([0-9]) ]]; then
-    url="${url/:/\/}"
+  # Split host segment from path ONCE, then normalize each independently. Doing
+  # this by hand (rather than repeated whole-string edits) is what keeps a `@`,
+  # `:`, or `//` inside the PATH from being mistaken for host syntax.
+  local host_segment="${url%%/*}" path=""
+  [[ "$url" == */* ]] && path="${url#*/}"
+
+  # SSH shorthand `git@host:owner/repo` — the `:` separates host from path, so
+  # everything after it belongs to the path. A purely numeric tail is a port,
+  # not a path, and is handled by the port strip below.
+  # Userinfo (`git@`, `user:token@`) FIRST — it may itself contain a `:`, which
+  # must not be mistaken for the SSH host:path separator or a port.
+  host_segment="${host_segment##*@}"
+
+  # An IPv6 literal's colons live inside brackets and are not this separator.
+  if [[ "$host_segment" == *:* && "$host_segment" != *]* ]]; then
+    local after_colon="${host_segment#*:}"
+    if [[ "$after_colon" != +([0-9]) ]]; then
+      # `host:/path` and `host:path` address the same repository — the slash
+      # normalization below removes the difference.
+      path="${after_colon}/${path}"
+      host_segment="${host_segment%%:*}"
+    fi
   fi
 
-  # Strip userinfo (`git@`, `user:token@`) from the host segment.
-  url="${url#*@}"
-
-  # Strip a port on the host segment (`host:2222/owner/repo`).
-  host_segment="${url%%/*}"
-  if [[ "$host_segment" == *:+([0-9]) ]]; then
-    local rest=""
-    [[ "$url" == */* ]] && rest="/${url#*/}"
-    url="${host_segment%%:*}${rest}"
+  # Port (`host:2222`) — host segment only. An IPv6 literal keeps its brackets,
+  # so its inner colons are never confused with a port separator.
+  if [[ "$host_segment" == *]:+([0-9]) || ( "$host_segment" != *]* && "$host_segment" == *:+([0-9]) ) ]]; then
+    host_segment="${host_segment%:*}"
   fi
 
-  # Trailing slashes, then a single trailing `.git`.
-  while [[ "$url" == */ ]]; do url="${url%/}"; done
+  # Collapse repeated slashes and strip leading/trailing ones: `//a//b/` and
+  # `a/b` address the same repository.
+  while [[ "$path" == *//* ]]; do path="${path//\/\//\/}"; done
+  while [[ "$path" == /* ]]; do path="${path#/}"; done
+  while [[ "$path" == */ ]]; do path="${path%/}"; done
+
+  # Lowercase BEFORE stripping `.git` so `.GIT` is removed too. `.wiki` is never
+  # touched — that is what keeps a wiki a distinct destination ([INV-148]).
+  url="${host_segment,,}${path:+/${path,,}}"
   url="${url%.git}"
   while [[ "$url" == */ ]]; do url="${url%/}"; done
 
-  printf '%s\n' "${url,,}"
+  [[ -n "$url" ]] || return 1
+  printf '%s\n' "$url"
 }
 
 # ---------------------------------------------------------------------------
@@ -302,8 +342,9 @@ canonical_remote_url() {
 #   1. an operand that looks like a URL is the destination verbatim
 #   2. a named remote resolves via `git remote get-url --push` (which honors
 #      `remote.<name>.pushurl`)
-#   3. no operand → the current branch's `remote.<branch>.remote`, else
-#      `remote.pushDefault`, else `origin`
+#   3. no operand → `branch.<b>.pushRemote`, else `remote.pushDefault`, else
+#      `branch.<b>.remote`, else `origin` — git's documented push precedence,
+#      which is NOT the same as its fetch precedence
 #
 # Only read-only `git -C` probes are used; no command text is ever executed.
 push_destination_url() {
@@ -316,17 +357,20 @@ push_destination_url() {
     # A literal URL (scheme form, or SSH shorthand `host:path`) is used as-is.
     if [[ "$operand" == *://* || "$operand" == *@*:* ]]; then
       canonical_remote_url "$operand"
-      return 0
+      return
     fi
     remote_name="$operand"
   else
     local branch
     branch=$(git -C "$repo_dir" symbolic-ref --quiet --short HEAD 2>/dev/null) || branch=""
     if [[ -n "$branch" ]]; then
-      remote_name=$(git -C "$repo_dir" config --get "branch.${branch}.remote" 2>/dev/null) || remote_name=""
+      remote_name=$(git -C "$repo_dir" config --get "branch.${branch}.pushRemote" 2>/dev/null) || remote_name=""
     fi
     if [[ -z "$remote_name" ]]; then
       remote_name=$(git -C "$repo_dir" config --get remote.pushDefault 2>/dev/null) || remote_name=""
+    fi
+    if [[ -z "$remote_name" && -n "$branch" ]]; then
+      remote_name=$(git -C "$repo_dir" config --get "branch.${branch}.remote" 2>/dev/null) || remote_name=""
     fi
     [[ -n "$remote_name" ]] || remote_name="origin"
   fi
@@ -337,4 +381,35 @@ push_destination_url() {
   [[ -n "$url" ]] || return 1
 
   canonical_remote_url "$url"
+}
+
+# ---------------------------------------------------------------------------
+# anchor_owns_destination <anchor-dir> <canonical-destination>
+#
+# Returns 0 when <canonical-destination> matches ANY remote configured in
+# <anchor-dir> (fetch or push URL), 1 otherwise.
+#
+# The anchor's *bare-push* destination alone is not a safe definition of "this
+# project" ([INV-148]): `remote.pushDefault` or `branch.<b>.pushRemote` in the
+# project checkout would silently redefine which trunk is protected and switch
+# the guard off. Checking every remote the project knows about means ordinary
+# local config cannot shrink the protected set.
+anchor_owns_destination() {
+  local anchor_dir="$1" destination="$2"
+  local name url canon
+
+  [[ -n "$anchor_dir" && -n "$destination" ]] || return 1
+
+  while IFS= read -r name; do
+    [[ -n "$name" ]] || continue
+    for url in \
+      "$(git -C "$anchor_dir" remote get-url --push "$name" 2>/dev/null)" \
+      "$(git -C "$anchor_dir" remote get-url "$name" 2>/dev/null)"; do
+      [[ -n "$url" ]] || continue
+      canon=$(canonical_remote_url "$url") || continue
+      [[ "$canon" != "$destination" ]] || return 0
+    done
+  done < <(git -C "$anchor_dir" remote 2>/dev/null)
+
+  return 1
 }

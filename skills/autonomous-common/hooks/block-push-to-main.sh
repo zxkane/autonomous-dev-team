@@ -55,16 +55,26 @@ if [[ -z "$anchor_dir" || ! -d "$anchor_dir" ]]; then
   anchor_dir="$(pwd -P)"
 fi
 
-push_dir="$(pwd -P)"
-if resolved_dir=$(resolve_git_command_cwd "push" "$command" "$push_dir"); then
+# Which repository issues the push. rc=2 means a push matched but its context is
+# unresolvable ([INV-146]) — that is UNKNOWN, not "the cwd": the cwd is a
+# different repository than the command's real target, so substituting it would
+# compare the wrong repo in both directions. Only rc=0 yields a usable target.
+push_dir=""
+if resolved_dir=$(resolve_git_command_cwd "push" "$command" "$(pwd -P)"); then
   push_dir="$resolved_dir"
 fi
 
-remote_operand=$(parse_push_remote_operand "$command") || remote_operand=""
-anchor_url=$(push_destination_url "$anchor_dir" "") || anchor_url=""
-target_url=$(push_destination_url "$push_dir" "$remote_operand") || target_url=""
+# Both destinations must be PROVEN before the push may be waved through. Each
+# of these can report "unknown", and any unknown leaves the trunk check armed.
+target_url=""
+if [[ -n "$push_dir" ]] && remote_operand=$(parse_push_remote_operand "$command"); then
+  target_url=$(push_destination_url "$push_dir" "$remote_operand") || target_url=""
+fi
 
-if [[ -n "$anchor_url" && -n "$target_url" && "$target_url" != "$anchor_url" ]]; then
+# Out of scope only when the destination is known AND is none of the anchor's
+# remotes. `anchor_owns_destination` (not the anchor's bare-push destination)
+# is what stops local push config from redefining the protected trunk.
+if [[ -n "$target_url" ]] && ! anchor_owns_destination "$anchor_dir" "$target_url"; then
   exit 0
 fi
 

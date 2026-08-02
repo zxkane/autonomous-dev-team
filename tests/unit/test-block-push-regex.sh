@@ -377,9 +377,122 @@ assert_exit "unrelated allowlist entry does not exempt own trunk" "2" "$out"
 out=$(run_hook_allow "git push origin main" "")
 assert_exit "empty allowlist blocks own trunk" "2" "$out"
 # An entry holding a glob metachar must stay literal — never expand against the
-# hook's cwd (which contains files, so an unguarded split could match one).
-out=$(run_hook_allow "git push origin main" "https://github.com/zxkane/*")
-assert_exit "glob-shaped allowlist entry does not exempt own trunk" "2" "$out"
+# hook's cwd. Made non-vacuous by planting a file in the cwd whose name IS the
+# canonical destination, so an unguarded split would expand the pattern into a
+# matching entry and wrongly exempt the push. With `set -f` the pattern stays
+# literal and the push is blocked. (Verified to FAIL when `set -f` is removed.)
+(cd "$TMPDIR/repo" && mkdir -p "github.com/zxkane" \
+  && : > "github.com/zxkane/autonomous-dev-team")
+out=$(run_hook_allow "git push origin main" "github.com/zxkane/*")
+assert_exit "glob-shaped allowlist entry stays literal (set -f), does not exempt" "2" "$out"
+rm -rf "$TMPDIR/repo/github.com"
+
+# ===========================================================================
+# TC-BP-20: chained pushes — a second `git push` cannot ride along
+# ===========================================================================
+# One operand cannot describe two destinations, and the trunk-ref parser reads
+# refspecs from the WHOLE line. Answering for only the first push would let the
+# second reach trunk unexamined. Two pushes on a line = UNKNOWN = fail closed.
+echo ""
+echo "=== TC-BP-20: chained push does not bypass ==="
+setup_repo main
+git -C "$TMPDIR/repo" remote add upstream https://github.com/upstream-owner/adt.git
+out=$(run_hook_cwd "git push upstream feat/x && git push origin main" "$TMPDIR/repo")
+assert_exit "chained push whose 2nd targets own trunk blocked" "2" "$out"
+out=$(run_hook_cwd "git push https://github.com/other/x.git main && git push origin main" "$TMPDIR/repo")
+assert_exit "chained push with literal-URL 1st arm blocked" "2" "$out"
+
+# ===========================================================================
+# TC-BP-21: a quoted operand is UNKNOWN, not a literal destination
+# ===========================================================================
+# `read -ra` does not strip quotes, so the token still carries them. Treating it
+# as a URL would canonicalize `…team.git"` — a confidently WRONG destination
+# that differs from the anchor and would be waved through, while the real shell
+# strips the quotes and pushes to the protected trunk.
+echo ""
+echo "=== TC-BP-21: quoted URL operand fails closed ==="
+setup_repo main
+out=$(run_hook_cwd "git push \"$PROJECT_URL\" main" "$TMPDIR/repo")
+assert_exit "double-quoted own-trunk URL operand blocked" "2" "$out"
+out=$(run_hook_cwd "git push '$PROJECT_URL' main" "$TMPDIR/repo")
+assert_exit "single-quoted own-trunk URL operand blocked" "2" "$out"
+out=$(run_hook_cwd 'git push $REMOTE main' "$TMPDIR/repo")
+assert_exit "variable-expansion operand blocked" "2" "$out"
+
+# ===========================================================================
+# TC-BP-22: unresolvable command context is UNKNOWN, never "the cwd"
+# ===========================================================================
+# `resolve_git_command_cwd` rc=2 means a push matched but its target repo cannot
+# be resolved ([INV-146]). Substituting the hook's cwd would compare the WRONG
+# repository — allowing a project-trunk push issued from a wiki cwd. These
+# grammars are all rc=2, and every one must still be checked.
+echo ""
+echo "=== TC-BP-22: rc=2 grammars fail closed (cwd = a different repo) ==="
+setup_repo main
+setup_other_repo project.wiki "$WIKI_URL"
+for _cmd in \
+  "env git -C $TMPDIR/repo push origin main" \
+  "timeout 60 git -C $TMPDIR/repo push origin main" \
+  "cd $TMPDIR/repo ; git push origin main" \
+  "git --git-dir=$TMPDIR/repo/.git --work-tree=$TMPDIR/repo push origin main"; do
+  out=$(run_hook_cwd "$_cmd" "$TMPDIR/project.wiki")
+  assert_exit "rc=2 grammar reaching own trunk blocked: ${_cmd:0:38}…" "2" "$out"
+done
+
+# ===========================================================================
+# TC-BP-23: local push config cannot redefine the protected trunk
+# ===========================================================================
+# The anchor's BARE-PUSH destination is not a safe definition of "this project":
+# `remote.pushDefault` / `branch.<b>.pushRemote` in the project checkout would
+# silently move it and switch the guard off. The anchor check therefore matches
+# against ALL of the anchor's remotes.
+echo ""
+echo "=== TC-BP-23: pushDefault/pushRemote cannot disable the guard ==="
+setup_repo main
+git -C "$TMPDIR/repo" remote add myfork https://github.com/zxkane/fork.git
+git -C "$TMPDIR/repo" config remote.pushDefault myfork
+out=$(run_hook_cwd "git push origin main" "$TMPDIR/repo")
+assert_exit "remote.pushDefault redirect does not disable trunk protection" "2" "$out"
+git -C "$TMPDIR/repo" config --unset remote.pushDefault
+git -C "$TMPDIR/repo" config branch.main.pushRemote myfork
+out=$(run_hook_cwd "git push origin main" "$TMPDIR/repo")
+assert_exit "branch.<b>.pushRemote redirect does not disable trunk protection" "2" "$out"
+
+# ===========================================================================
+# TC-BP-24: URL spellings that must NOT collide
+# ===========================================================================
+# Guards the host/path split: a `@`, `:`, or `//` inside the PATH must never be
+# read as host syntax, or two unrelated repositories canonicalize equal and a
+# legitimate push to one is blocked as if it were the other.
+echo ""
+echo "=== TC-BP-24: path-embedded @ / // do not collapse distinct repos ==="
+setup_repo main
+setup_other_repo atpath "https://gitlab.example.com/group/u@n/repo.git"
+out=$(run_hook_cwd "git -C $TMPDIR/atpath push origin main" "$TMPDIR/repo")
+assert_exit "path-embedded @ repo treated as a different destination" "0" "$out"
+
+# ===========================================================================
+# TC-BP-25: both wrappers export the project anchor
+# ===========================================================================
+# The hook cannot derive the project from its own cwd, so the anchor MUST arrive
+# by export ([INV-148]). Dropping the export is fail-closed, not permissive — a
+# wiki push starts being blocked again — so nothing else would catch it. Static
+# assertion mirrors TC-BASEBR-025's treatment of the BASE_BRANCH export.
+echo ""
+echo "=== TC-BP-25: wrappers export AUTONOMOUS_PROJECT_DIR ==="
+for _w in autonomous-dev autonomous-review; do
+  _f="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/${_w}.sh"
+  if grep -qE '^export AUTONOMOUS_PROJECT_DIR="\$PROJECT_DIR"$' "$_f"; then
+    assert_exit "${_w}.sh exports AUTONOMOUS_PROJECT_DIR" "0" "0"
+  else
+    assert_exit "${_w}.sh exports AUTONOMOUS_PROJECT_DIR" "0" "1"
+  fi
+  if grep -qE '^  export PUSH_ALLOWED_REMOTE_URLS$' "$_f"; then
+    assert_exit "${_w}.sh exports PUSH_ALLOWED_REMOTE_URLS when set" "0" "0"
+  else
+    assert_exit "${_w}.sh exports PUSH_ALLOWED_REMOTE_URLS when set" "0" "1"
+  fi
+done
 
 # ===========================================================================
 # Summary

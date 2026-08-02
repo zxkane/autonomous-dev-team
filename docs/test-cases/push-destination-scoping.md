@@ -4,7 +4,7 @@ Covers `skills/autonomous-common/hooks/block-push-to-main.sh` and the three
 `lib-push.sh` helpers it added (`parse_push_remote_operand`,
 `canonical_remote_url`, `push_destination_url`).
 
-Suite: `tests/unit/test-block-push-regex.sh` — 32 assertions, hermetic (throwaway
+Suite: `tests/unit/test-block-push-regex.sh` — 44 assertions, hermetic (throwaway
 repos under `mktemp -d`, no network; a remote URL only has to be *configured*,
 never reachable, because the comparison is textual).
 
@@ -101,11 +101,19 @@ itself, and the push is **checked**. The wiki allowance is a capability the
 wrapper grants by exporting the anchor — never an inference drawn from its
 absence.
 
-> Additional uncertainty paths (unparsable command, non-git or missing `-C`
-> target, `env`/wrapper prefixes, variable expansion) are covered by
-> `resolve_git_command_cwd`'s own matrix under
-> [INV-146](../pipeline/invariants.md) and were verified unchanged by this
-> change: each still reaches the trunk check and blocks.
+Uncertainty is not one path but four, and each has its own case below:
+unresolvable command context (TC-BP-22), an ambiguous operand (TC-BP-21),
+multiple pushes on one line (TC-BP-20), and a destination that cannot be
+canonicalized at all (`canonical_remote_url` returns non-zero, so the allow gate
+cannot fire).
+
+The important consequence of TC-BP-22 is that **the wiki allowance only applies
+to command shapes `resolve_git_command_cwd` can parse.** A wiki push written as
+`env git -C <wiki> push origin main` or `timeout 60 git -C <wiki> push …` is
+rc=2, so it is treated as unknown and **blocked** — the same as on the parent
+branch. That is deliberate: a shape that can't be resolved must not be waved
+through just because it *might* be a wiki. Widening the supported grammar is the
+way to allow more shapes, never relaxing the fail-closed rule.
 
 ### `PUSH_ALLOWED_REMOTE_URLS` allowlist
 
@@ -115,20 +123,55 @@ absence.
 | TC-BP-19b | own trunk, listed under a *different spelling* of the same URL | allow (0) |
 | TC-BP-19c | own trunk, allowlist holds only an unrelated URL | block (2) |
 | TC-BP-19d | own trunk, allowlist empty | block (2) |
-| TC-BP-19e | own trunk, allowlist entry contains a glob metachar (`…/zxkane/*`) | block (2) |
+| TC-BP-19e | own trunk, allowlist entry contains a glob metachar (`github.com/zxkane/*`) | block (2) |
 
 19c and 19d are the important half: the lever must exempt only what it names,
 and an empty or unset value must behave exactly as if the lever did not exist.
-19e pins the word-split: the list is split under `set -f`, so a glob-shaped
-entry stays a literal URL instead of expanding against the hook's cwd and
-matching an unintended path.
+
+19e pins the word-split under `set -f`, and does so **non-vacuously**: it plants
+a file in the hook's cwd whose path *is* the canonical destination, so without
+`set -f` the pattern expands into a matching entry and wrongly exempts the push.
+Confirmed by neutralizing `set -f` in the hook — the assertion flips to a
+failure, and only that one.
+
+### Adversarial cases (added after review of the first implementation)
+
+Each of these was a **verified bypass or false positive** in the first cut of
+this change, reproduced against `origin/main` to confirm it was a regression and
+not pre-existing. They are kept as regression pins.
+
+| ID | Case | Expected |
+|---|---|---|
+| TC-BP-20 | `git push upstream feat/x && git push origin main` — a second push riding along on one line | block (2) |
+| TC-BP-20b | same, with a literal URL in the first arm | block (2) |
+| TC-BP-21 | own-trunk URL operand in double quotes | block (2) |
+| TC-BP-21b | …in single quotes | block (2) |
+| TC-BP-21c | operand is `$REMOTE` (variable expansion) | block (2) |
+| TC-BP-22 | four rc=2 grammars (`env`, `timeout`, `;`-separated `cd`, `--git-dir/--work-tree`) reaching own trunk from a *wiki* cwd | block (2) ×4 |
+| TC-BP-23 | `remote.pushDefault` points elsewhere | block (2) |
+| TC-BP-23b | `branch.<b>.pushRemote` points elsewhere | block (2) |
+| TC-BP-24 | a repo whose *path* embeds `@` must not collapse onto another host's | allow (0) |
+
+TC-BP-20/21 exist because a single operand cannot describe two destinations, and
+because `read -ra` does not strip quotes — a quoted token canonicalizes to a
+*confidently wrong* destination, which is worse than an unresolved one, since it
+satisfies the allow gate. TC-BP-23 exists because the anchor's own bare-push
+destination is not a safe definition of "this project": ordinary local push
+config would otherwise move the protected trunk and silently disable the guard.
 
 ## Red/green evidence
 
 Against PR #539's parent implementation (original hook + `lib-push.sh`, current
-tests): **20 pass / 12 fail**. The 12 red assertions are exactly the two
+tests): **32 pass / 12 fail**. The 12 red assertions are exactly the two
 wiki-bare-push cases, the three second-clone forms, the five URL spellings, and
-the two positive allowlist cases. On the fixed implementation: **32/32**.
+the two positive allowlist cases. On the fixed implementation: **44/44**.
+
+The adversarial cases (TC-BP-20..24) are green on the parent too, and that is
+expected: the parent blocks those inputs already, because it never allows on the
+strength of a *resolved* destination. They are red only against the **first cut
+of this change**, which did — each was verified as a live regression there and is
+pinned here so the allow gate can never again be satisfied by a destination that
+was guessed rather than proven.
 
 Suites re-run green alongside this change: `test-block-commit-outside-worktree.sh`
 (186), `test-is-git-command-quote-strip.sh` (9), `test-install-git-pre-push.sh`
