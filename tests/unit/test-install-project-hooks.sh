@@ -242,8 +242,14 @@ echo "=== TC-IPH-06: aborts with clear error if no skills tree found ==="
 repo="$TMPDIR/repo6"
 mkdir -p "$repo"
 git -C "$repo" init --quiet --initial-branch=main
+isolated_skills="$TMPDIR/isolated-skills"
+mkdir -p "$isolated_skills/autonomous-common/scripts"
+cp "$INSTALLER" "$isolated_skills/autonomous-common/scripts/install-project-hooks.sh"
+cp "$PROJECT_ROOT/skills/autonomous-common/scripts/lib-installer.sh" \
+  "$isolated_skills/autonomous-common/scripts/lib-installer.sh"
 
-err="$(cd "$repo" && bash "$INSTALLER" --no-git-hook 2>&1 >/dev/null)" || rc=$?
+err="$(cd "$repo" && bash "$isolated_skills/autonomous-common/scripts/install-project-hooks.sh" \
+  --no-git-hook 2>&1 >/dev/null)" || rc=$?
 rc="${rc:-0}"
 if [[ "$rc" -ne 0 ]] && grep -q "autonomous-dispatcher" <<<"$err" \
    && grep -q "npx skills" <<<"$err"; then
@@ -251,6 +257,62 @@ if [[ "$rc" -ne 0 ]] && grep -q "autonomous-dispatcher" <<<"$err" \
   PASS=$((PASS + 1))
 else
   echo -e "  ${RED}FAIL${NC}: expected non-zero exit + guidance, got rc=$rc, err='$err'"
+  FAIL=$((FAIL + 1))
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-ENTRY-SHIM-028: invoked shared/user-scope skills root fallback ==="
+# ---------------------------------------------------------------------------
+repo="$TMPDIR/repo-user-scope"
+mkdir -p "$repo"
+git -C "$repo" init --quiet --initial-branch=main
+
+user_skills="$TMPDIR/user-skills"
+user_common_scripts="$user_skills/autonomous-common/scripts"
+user_dispatcher_scripts="$user_skills/autonomous-dispatcher/scripts"
+mkdir -p "$user_common_scripts" "$user_skills/autonomous-common/hooks" \
+  "$user_dispatcher_scripts"
+cp "$INSTALLER" "$user_common_scripts/install-project-hooks.sh"
+cp "$PROJECT_ROOT/skills/autonomous-common/scripts/lib-installer.sh" \
+  "$user_common_scripts/lib-installer.sh"
+printf '# fixture lib\n' > "$user_dispatcher_scripts/lib-config.sh"
+printf '#!/bin/bash\nexit 0\n' > "$user_dispatcher_scripts/autonomous-dev.sh"
+printf '#!/bin/bash\nexit 0\n' > "$user_dispatcher_scripts/autonomous-review.sh"
+chmod 644 "$user_dispatcher_scripts/autonomous-dev.sh" \
+  "$user_dispatcher_scripts/autonomous-review.sh"
+
+(cd "$repo" && bash "$user_common_scripts/install-project-hooks.sh" \
+  --no-git-hook >/dev/null 2>&1) || user_install_rc=$?
+user_install_rc="${user_install_rc:-0}"
+printf 'PROJECT_ID=x\n' > "$repo/scripts/autonomous.conf"
+chmod 600 "$repo/scripts/autonomous.conf"
+user_doc_out="$(cd "$repo" && bash "$user_common_scripts/install-project-hooks.sh" \
+  --doctor 2>&1)" || user_doc_rc=$?
+user_doc_rc="${user_doc_rc:-0}"
+
+expected_user_target="$user_dispatcher_scripts/autonomous-dev.sh"
+actual_user_target="$(readlink "$repo/scripts/autonomous-dev.sh" 2>/dev/null || true)"
+if [[ "$user_install_rc" -eq 0 && "$actual_user_target" == "$expected_user_target" ]]; then
+  echo -e "  ${GREEN}PASS${NC}: shared installer onboarded a project without project-local skills"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: shared installer fallback failed rc=$user_install_rc target='$actual_user_target'"
+  FAIL=$((FAIL + 1))
+fi
+if [[ "$user_doc_rc" -eq 0 ]] && grep -q 'Doctor: OK' <<<"$user_doc_out"; then
+  echo -e "  ${GREEN}PASS${NC}: --doctor resolves the same shared skills root"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: shared-scope --doctor failed rc=$user_doc_rc out=$user_doc_out"
+  FAIL=$((FAIL + 1))
+fi
+if [[ -x "$user_dispatcher_scripts/autonomous-dev.sh" \
+   && -x "$user_dispatcher_scripts/autonomous-review.sh" ]]; then
+  echo -e "  ${GREEN}PASS${NC}: shared installer healed direct-launch wrapper execute bits"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: shared installer left shared wrappers non-executable"
   FAIL=$((FAIL + 1))
 fi
 

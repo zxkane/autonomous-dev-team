@@ -17,11 +17,11 @@
 #
 # Test-class legend (see docs/test-cases/lane-gc-p7-scope.md for the full
 # table): REAL tests run against this box's actual systemd-run/loginctl/
-# systemctl — this series' own dev/CI host genuinely has Linger=no, so the
-# refusal-path tests are REAL, not simulated. SHIM tests PATH-prepend a
-# recording/behavior-controlling fixture script; they prove SELECTION LOGIC
-# and KILL-PATH ARGV SHAPE only, never real cgroup/kernel semantics — see
-# the "Honest scope note" at the bottom of this file.
+# systemctl and skip when the host does not meet a scenario's prerequisite.
+# SHIM tests PATH-prepend a recording/behavior-controlling fixture script;
+# they prove SELECTION LOGIC and KILL-PATH ARGV SHAPE only, never real
+# cgroup/kernel semantics — see the "Honest scope note" at the bottom of
+# this file.
 #
 # Full scenario list: docs/test-cases/lane-gc-p7-scope.md (TC-LGC7-*).
 #
@@ -94,10 +94,15 @@ _real_systemd_available() {
 
 REAL_SYSTEMD=false
 _real_systemd_available && REAL_SYSTEMD=true
+REAL_LOGIN_USER="${USER:-$(id -un)}"
+REAL_LINGER="unavailable"
+if [[ "$REAL_SYSTEMD" == true ]]; then
+  REAL_LINGER="$(loginctl show-user "$REAL_LOGIN_USER" -p Linger --value 2>/dev/null || echo unavailable)"
+fi
 
 # ===========================================================================
 echo ""
-echo "=== TC-LGC7-001/002/003/004: REAL backend refusal on this Linger=no host ==="
+echo "=== TC-LGC7-001/002/003/004: REAL backend refusal (host-conditional) ==="
 # ===========================================================================
 if [[ "$REAL_SYSTEMD" == true ]]; then
   NS001="lgc7-001"
@@ -109,7 +114,6 @@ if [[ "$REAL_SYSTEMD" == true ]]; then
     echo "BACKEND=$backend"
   ')
   BACKEND001="${OUT001#BACKEND=}"
-  REAL_LINGER="$(loginctl show-user -p Linger --value 2>/dev/null || echo no)"
   if [[ "$REAL_LINGER" == "yes" ]]; then
     assert_skip "TC-LGC7-001: real _lane_backend() refusal on Linger=no" "this host's REAL Linger is 'yes' — the refusal-path assumption for this specific test does not hold here; TC-LGC7-014 (SHIM) covers the positive path unconditionally"
     assert_skip "TC-LGC7-002: WARN names the missing prerequisite" "same as above"
@@ -131,6 +135,7 @@ if [[ "$REAL_SYSTEMD" == true ]]; then
   UNIT003="$(echo "$OUT003" | sed -n '3p')"
   if [[ "$REAL_LINGER" == "yes" ]]; then
     assert_skip "TC-LGC7-003: lane_install records BACKEND=pgid on this host" "REAL Linger is 'yes' on this host"
+    assert_skip "TC-LGC7-003b: UNIT is the sentinel dash" "same as above"
   else
     assert_eq "TC-LGC7-003: lane_install records BACKEND=pgid, UNIT=- with no override on this real host" "pgid" "$BACKEND003"
     assert_eq "TC-LGC7-003b: UNIT is the sentinel dash" "-" "$UNIT003"
@@ -357,26 +362,34 @@ echo "=== TC-LGC7-023/024/025: registration-failure fallback — payload MUST st
 # (review round-1 P2-2: a rejected/failed systemd-run registration must
 # never mean the wrapped command silently never executed)
 # ===========================================================================
+REGFAIL_BIN="$TMPROOT/registration-failure-bin"
+mkdir -p "$REGFAIL_BIN"
+cat > "$REGFAIL_BIN/systemd-run" <<'EOF'
+#!/bin/bash
+echo "Failed to start transient scope: deterministic test failure" >&2
+exit 1
+EOF
+chmod +x "$REGFAIL_BIN/systemd-run"
+
 NS023="lgc7-023"
 export ADT_STATE_ROOT="$(_lane_state_root "$NS023")"
 MARKER023="$TMPROOT/tc023.marker"
 rm -f "$MARKER023"
-(
-  source "$LIB_LANE"
+PATH="$REGFAIL_BIN:$PATH" TEST_SYSTEMD_RUN="$REGFAIL_BIN/systemd-run" TEST_MARKER023="$MARKER023" bash -c '
+  hash -p "$TEST_SYSTEMD_RUN" systemd-run
+  source "'"$LIB_LANE"'"
   LANE_ID=$(lane_mint proj023 dev 23)
   LANE_DIR=$(lane_install proj023 "$LANE_ID")
-  # An invalid systemd unit name (empirically verified on this box: `@`
-  # inside a unit name makes systemd-run's OWN registration fail outright,
-  # BEFORE the payload is ever exec'd — this is the exact "registration
-  # failed for reasons that have nothing to do with the payload" scenario).
+  # Force the systemd-run registration itself to fail before payload exec. Using
+  # a shim keeps this invariant stable across systemd versions and hosts.
   lane_set "$LANE_DIR" BACKEND systemd-scope
-  lane_set "$LANE_DIR" UNIT "bad@unit-name-tc023"
-  lane_spawn "$LANE_DIR" agent -- bash -c "touch '$MARKER023'"
+  lane_set "$LANE_DIR" UNIT "adt-tc-lgc7-023"
+  lane_spawn "$LANE_DIR" agent -- touch "$TEST_MARKER023"
   echo "SPAWN_RC=$?"
-) > "$TMPROOT/tc023.out" 2>"$TMPROOT/tc023.err"
+' > "$TMPROOT/tc023.out" 2>"$TMPROOT/tc023.err"
 SPAWNRC023="$(grep -o 'SPAWN_RC=.*' "$TMPROOT/tc023.out" | cut -d= -f2)"
 if [[ -f "$MARKER023" ]]; then
-  assert_pass "TC-LGC7-023: a systemd-run REGISTRATION failure (invalid unit name) does NOT lose the payload — it still ran via the pgid fallback"
+  assert_pass "TC-LGC7-023: a systemd-run REGISTRATION failure does NOT lose the payload — it still ran via the pgid fallback"
 else
   assert_fail "TC-LGC7-023: payload never ran after a registration failure — the exact bug review round-1 P2-2 flagged (marker file absent, lane_spawn stdout: $(cat "$TMPROOT/tc023.out" 2>/dev/null))"
 fi
@@ -390,14 +403,15 @@ NS024="lgc7-024"
 export ADT_STATE_ROOT="$(_lane_state_root "$NS024")"
 COUNTFILE024="$TMPROOT/tc024.count"
 echo 0 > "$COUNTFILE024"
-(
-  source "$LIB_LANE"
+PATH="$REGFAIL_BIN:$PATH" TEST_SYSTEMD_RUN="$REGFAIL_BIN/systemd-run" TEST_COUNTFILE024="$COUNTFILE024" bash -c '
+  hash -p "$TEST_SYSTEMD_RUN" systemd-run
+  source "'"$LIB_LANE"'"
   LANE_ID=$(lane_mint proj024 dev 24)
   LANE_DIR=$(lane_install proj024 "$LANE_ID")
   lane_set "$LANE_DIR" BACKEND systemd-scope
-  lane_set "$LANE_DIR" UNIT "bad@unit-name-tc024"
-  lane_spawn "$LANE_DIR" agent -- bash -c "n=\$(cat '$COUNTFILE024'); echo \$((n+1)) > '$COUNTFILE024'"
-) >/dev/null 2>&1
+  lane_set "$LANE_DIR" UNIT "adt-tc-lgc7-024"
+  lane_spawn "$LANE_DIR" agent -- bash -c "n=\$(cat \"\$TEST_COUNTFILE024\"); echo \$((n+1)) > \"\$TEST_COUNTFILE024\""
+' >/dev/null 2>&1
 assert_eq "TC-LGC7-024: the fallback runs the payload EXACTLY ONCE on a registration failure (never a double-run)" "1" "$(cat "$COUNTFILE024" 2>/dev/null)"
 
 # TC-LGC7-025: a GENUINE payload failure (successful registration, payload
@@ -900,13 +914,11 @@ echo "=== TC-LGC7-080/081: lane-file recording (both branches) ==="
 # [Lane-GC PR-7 review round-1, P1-1] `ADT_LANE_BACKEND_OVERRIDE` may only
 # NARROW `_lane_backend`'s result, never WIDEN it — `=systemd-scope` is a
 # REQUEST that still must pass every real linger/bus/probe check, never a
-# bypass. This suite's own dev/CI host is genuinely Linger=no, so the
-# override's `=systemd-scope` arm is EXPECTED to still resolve to `pgid`
-# here — asserting the OLD "override widens" behavior would now be asserting
-# a fixed vulnerability. TC-LGC7-080 therefore asserts the NARROWING-ONLY
-# contract directly; a scope-backend LANE FILE for downstream argv/kill-path
-# tests is obtained via direct `lane_set` post-install (never via the
-# override) throughout the rest of this suite.
+# bypass. The real-host refusal assertion is conditional on the explicit-user
+# Linger probe; a Linger=yes host skips it. TC-LGC7-011 covers the refusal
+# branch deterministically. A scope-backend LANE FILE for downstream
+# argv/kill-path tests is obtained via direct `lane_set` post-install (never
+# via the override) throughout the rest of this suite.
 NS080="lgc7-080"
 export ADT_STATE_ROOT="$(_lane_state_root "$NS080")"
 OUT080=$(ADT_LANE_BACKEND_OVERRIDE=systemd-scope bash -c '
@@ -918,9 +930,7 @@ OUT080=$(ADT_LANE_BACKEND_OVERRIDE=systemd-scope bash -c '
 ')
 BACKEND080=$(echo "$OUT080" | grep -o 'BACKEND=.*' | cut -d= -f2)
 UNIT080=$(echo "$OUT080" | grep -o 'UNIT=.*' | cut -d= -f2)
-REAL_LINGER80="no"
-[[ "$REAL_SYSTEMD" == true ]] && REAL_LINGER80="$(loginctl show-user -p Linger --value 2>/dev/null || echo no)"
-if [[ "$REAL_LINGER80" == "yes" ]]; then
+if [[ "$REAL_LINGER" == "yes" ]]; then
   assert_skip "TC-LGC7-080: override-cannot-widen on a Linger=no host" "this host's REAL Linger is 'yes' — the narrowing scenario this test targets does not apply here"
   assert_skip "TC-LGC7-080b: UNIT sentinel on override-refused host" "same as above"
 else
@@ -942,8 +952,7 @@ assert_eq "TC-LGC7-080c: ADT_LANE_BACKEND_OVERRIDE=pgid unconditionally forces p
 NS081="lgc7-081"
 export ADT_STATE_ROOT="$(_lane_state_root "$NS081")"
 if [[ "$REAL_SYSTEMD" == true ]]; then
-  REAL_LINGER81="$(loginctl show-user -p Linger --value 2>/dev/null || echo no)"
-  if [[ "$REAL_LINGER81" != "yes" ]]; then
+  if [[ "$REAL_LINGER" != "yes" ]]; then
     OUT081=$(bash -c '
       source "'"$LIB_LANE"'"
       LANE_ID=$(lane_mint proj081 dev 81)
@@ -957,9 +966,11 @@ if [[ "$REAL_SYSTEMD" == true ]]; then
     assert_eq "TC-LGC7-081b: UNIT=- sentinel" "-" "$UNIT081"
   else
     assert_skip "TC-LGC7-081: no-override real-host recording" "this host's real Linger is 'yes'"
+    assert_skip "TC-LGC7-081b: UNIT=- sentinel" "same as above"
   fi
 else
   assert_skip "TC-LGC7-081: no-override real-host recording" "systemd-run/loginctl/systemctl not all present on PATH"
+  assert_skip "TC-LGC7-081b: UNIT=- sentinel" "same as above"
 fi
 
 # ===========================================================================
