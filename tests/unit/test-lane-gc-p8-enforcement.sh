@@ -1101,6 +1101,147 @@ else
   pass "TC-LGC8-022f: candidate identities flow through explicit function parameters"
 fi
 
+echo "=== Lane-GC P8 bounded candidate scans ==="
+
+PRIME_LINE="$(grep -n -m1 '_gc_same_uid_pids >/dev/null' "$ADT_GC" | cut -d: -f1)"
+PASS2_CALL_LINE="$(grep -n -m1 '^  _gc_pass2$' "$ADT_GC" | cut -d: -f1)"
+if [[ -n "$PRIME_LINE" && -n "$PASS2_CALL_LINE" && "$PRIME_LINE" -lt "$PASS2_CALL_LINE" ]]; then
+  pass "TC-LGC8-023: full GC primes the same-user PID snapshot in the parent shell before Pass 2"
+else
+  fail "TC-LGC8-023: same-user PID snapshot is not primed before process-substitution consumers"
+fi
+
+SCAN_LANES=200
+SCAN_PIDS=40
+
+PASS31_SRC="$(sed -n '/^_gc_pass3_chrome_lane_scoped() {$/,/^}/p' "$ADT_GC")"
+ARGV_COUNT="$TMPROOT/pass31-argv.count"
+ENUM31_COUNT="$TMPROOT/pass31-enumeration.count"
+printf '0\n' > "$ARGV_COUNT"
+printf '0\n' > "$ENUM31_COUNT"
+TEST_SCAN_LANES="$SCAN_LANES" TEST_SCAN_PIDS="$SCAN_PIDS" \
+  TEST_ARGV_COUNT="$ARGV_COUNT" TEST_ENUM_COUNT="$ENUM31_COUNT" bash -c '
+  source "$1"
+  eval "$2"
+  _gc_all_lane_dirs() {
+    local i
+    for ((i = 1; i <= TEST_SCAN_LANES; i++)); do
+      printf "/missing/lane-%s\n" "$i"
+    done
+  }
+  lane_probe() { printf "dead\n"; }
+  lane_delayed_signal_backend_verified() { return 0; }
+  lane_get() { printf "/tmp/profile-%s\n" "${1##*-}"; }
+  _gc_same_uid_pids() {
+    local i n
+    n="$(( $(cat "$TEST_ENUM_COUNT") + 1 ))"
+    printf "%s\n" "$n" > "$TEST_ENUM_COUNT"
+    for ((i = 1; i <= TEST_SCAN_PIDS; i++)); do printf "%s\n" "$((4000 + i))"; done
+  }
+  proc_identity() { printf "v2-linux:00000000-0000-0000-0000-000000000000:%s\n" "$1"; }
+  proc_identity_is_durable() { return 0; }
+  proc_argv() {
+    local n
+    n="$(( $(cat "$TEST_ARGV_COUNT") + 1 ))"
+    printf "%s\n" "$n" > "$TEST_ARGV_COUNT"
+    printf "unrelated-process\n"
+  }
+  _gc_log() { :; }
+  GC_MODE=dry-run
+  SKIPS=0
+  KILLED=0
+  WOULD_KILL=0
+  _gc_pass3_chrome_lane_scoped
+' _ "$LIB_LANE" "$PASS31_SRC"
+assert_eq "TC-LGC8-024a: Pass 3.1 enumerates the PID snapshot once across 200 lanes" \
+  "1" "$(cat "$ENUM31_COUNT")"
+assert_eq "TC-LGC8-024b: Pass 3.1 reads each PID argv once across 200 lanes" \
+  "$SCAN_PIDS" "$(cat "$ARGV_COUNT")"
+
+PASS34_SRC="$(sed -n '/^_gc_pass3_e2e_servers() {$/,/^}/p' "$ADT_GC")"
+CWD_COUNT="$TMPROOT/pass34-cwd.count"
+ENUM34_COUNT="$TMPROOT/pass34-enumeration.count"
+printf '0\n' > "$CWD_COUNT"
+printf '0\n' > "$ENUM34_COUNT"
+TEST_SCAN_LANES="$SCAN_LANES" TEST_SCAN_PIDS="$SCAN_PIDS" \
+  TEST_CWD_COUNT="$CWD_COUNT" TEST_ENUM_COUNT="$ENUM34_COUNT" bash -c '
+  source "$1"
+  eval "$2"
+  _gc_all_lane_dirs() {
+    local i
+    for ((i = 1; i <= TEST_SCAN_LANES; i++)); do
+      printf "/missing/lane-%s\n" "$i"
+    done
+  }
+  lane_probe() { printf "dead\n"; }
+  lane_delayed_signal_backend_verified() { return 0; }
+  lane_get() { printf "/definitely-missing/worktree-%s\n" "${1##*-}"; }
+  _gc_same_uid_pids() {
+    local i n
+    n="$(( $(cat "$TEST_ENUM_COUNT") + 1 ))"
+    printf "%s\n" "$n" > "$TEST_ENUM_COUNT"
+    for ((i = 1; i <= TEST_SCAN_PIDS; i++)); do printf "%s\n" "$((5000 + i))"; done
+  }
+  proc_identity() { printf "v2-linux:00000000-0000-0000-0000-000000000000:%s\n" "$1"; }
+  proc_identity_is_durable() { return 0; }
+  readlink() {
+    local n
+    n="$(( $(cat "$TEST_CWD_COUNT") + 1 ))"
+    printf "%s\n" "$n" > "$TEST_CWD_COUNT"
+    printf "/unrelated/cwd\n"
+  }
+  _gc_log() { :; }
+  GC_MODE=dry-run
+  SKIPS=0
+  KILLED=0
+  WOULD_KILL=0
+  _gc_pass3_e2e_servers
+' _ "$LIB_LANE" "$PASS34_SRC"
+assert_eq "TC-LGC8-025a: Pass 3.4 enumerates the PID snapshot once across 200 lanes" \
+  "1" "$(cat "$ENUM34_COUNT")"
+assert_eq "TC-LGC8-025b: Pass 3.4 reads each PID cwd once across 200 lanes" \
+  "$SCAN_PIDS" "$(cat "$CWD_COUNT")"
+
+SAME_UID_GLOBALS="$(sed -n '/^_GC_SAME_UID_PIDS_CACHED=false$/,/^_GC_SAME_UID_PIDS_CACHE=""$/p' "$ADT_GC")"
+SAME_UID_LIST_SRC="$(sed -n '/^_gc_list_same_uid_pids() {$/,/^}/p' "$ADT_GC")"
+SAME_UID_CACHED_SRC="$(sed -n '/^_gc_same_uid_pids() {$/,/^}/p' "$ADT_GC")"
+SAME_UID_CURRENT_SRC="$(sed -n '/^_gc_current_same_uid_pids() {$/,/^}/p' "$ADT_GC")"
+PROFILE_SHARER_SRC="$(sed -n '/^_gc_chrome_profile_has_live_sharer() {$/,/^}/p' "$ADT_GC")"
+FRESH_ENUM_COUNT="$TMPROOT/fresh-enumeration.count"
+printf '0\n' > "$FRESH_ENUM_COUNT"
+OUT26="$(TEST_ENUM_COUNT="$FRESH_ENUM_COUNT" bash -c '
+  eval "$1"
+  eval "$2"
+  eval "$3"
+  eval "$4"
+  eval "$5"
+  ps() {
+    local n
+    n="$(( $(cat "$TEST_ENUM_COUNT") + 1 ))"
+    printf "%s\n" "$n" > "$TEST_ENUM_COUNT"
+    printf "6101\n"
+    [[ "$n" -ge 2 ]] && printf "6102\n"
+  }
+  id() { printf "1000\n"; }
+  proc_argv() {
+    case "$1" in
+      6102) printf "chrome --user-data-dir=/tmp/late-profile\n" ;;
+      *) printf "chrome --user-data-dir=/tmp/other-profile\n" ;;
+    esac
+  }
+  _gc_same_uid_pids >/dev/null
+  if _gc_chrome_profile_has_live_sharer "/tmp/late-profile" 6101; then
+    printf "RC=0\n"
+  else
+    printf "RC=%s\n" "$?"
+  fi
+' _ "$SAME_UID_GLOBALS" "$SAME_UID_LIST_SRC" "$SAME_UID_CACHED_SRC" \
+  "$SAME_UID_CURRENT_SRC" "$PROFILE_SHARER_SRC")"
+assert_contains "TC-LGC8-026a: rule 3.2 sees a same-profile sharer that started after the candidate snapshot" \
+  "RC=0" "$OUT26"
+assert_eq "TC-LGC8-026b: protective live-sharer check performs one fresh enumeration" \
+  "2" "$(cat "$FRESH_ENUM_COUNT")"
+
 echo ""
 echo "Lane-GC P8 tests: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

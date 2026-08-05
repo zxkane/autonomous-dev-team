@@ -34,6 +34,7 @@ ID prefix: `TC-ENTRY-SHIM-NNN`
 | TC-ENTRY-SHIM-025 | `--doctor` missing conf | exit 1 (or warn), flags missing `autonomous.conf` |
 | TC-ENTRY-SHIM-026 | `--doctor` + `--dry-run` both pure read-only | no fs mutation |
 | TC-ENTRY-SHIM-027 | real project-local files (autonomous.conf, deploy.sh) never overwritten/pruned | preserved |
+| TC-ENTRY-SHIM-028 | invoke a shared/user-scope `autonomous-common` installer from a project with no project-local skills tree and non-executable shared wrappers | project-local probe order remains authoritative, then the invoked installer's canonical skills root supplies dispatcher entries/hooks; install heals wrapper execute bits and `--doctor` succeeds |
 
 ## E2E (`tests/e2e/test-entry-point-startup.sh`)
 

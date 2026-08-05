@@ -1263,7 +1263,7 @@ rm -rf "$ST73"
 
 # ===========================================================================
 echo ""
-echo "=== TC-LGC4-080..083: log discipline + ADT_GC_SUMMARY metrics ==="
+echo "=== TC-LGC4-080..084: log discipline + ADT_GC_SUMMARY metrics ==="
 # ===========================================================================
 ST80=$(mktemp -d)
 OUT80=$(ADT_STATE_ROOT="$ST80" bash "$ADT_GC" --dry-run 2>&1)
@@ -1272,6 +1272,37 @@ for field in would_kill= killed= would_kill_legacy_signature= unknown_class= liv
   assert_contains "TC-LGC4-082: summary carries field $field" "$field" "$OUT80"
 done
 rm -rf "$ST80"
+
+NOW_MS_SRC="$(sed -n '/^_gc_now_ms() {$/,/^}/p' "$ADT_GC")"
+NOW_MS_UUTILS="$(bash -c '
+  eval "$1"
+  date() {
+    case "$1" in
+      "+%s %N") printf "1700000000 123456789\n" ;;
+      "+%s%3N") printf "1700000000123456789\n" ;;
+      "+%s") printf "1700000000\n" ;;
+      *) return 1 ;;
+    esac
+  }
+  _gc_now_ms
+' _ "$NOW_MS_SRC")"
+assert_eq "TC-LGC4-084a: _gc_now_ms uses the first three digits of a full-width nanosecond field" \
+  "1700000000123" "$NOW_MS_UUTILS"
+
+NOW_MS_NO_NANOS="$(bash -c '
+  eval "$1"
+  date() {
+    case "$1" in
+      "+%s %N") printf "1700000000 %%N\n" ;;
+      "+%s%3N") printf "1700000000%%3N\n" ;;
+      "+%s") printf "1700000000\n" ;;
+      *) return 1 ;;
+    esac
+  }
+  _gc_now_ms
+' _ "$NOW_MS_SRC")"
+assert_eq "TC-LGC4-084b: _gc_now_ms falls back to whole-second milliseconds without numeric nanoseconds" \
+  "1700000000000" "$NOW_MS_NO_NANOS"
 
 ST81=$(mktemp -d)
 mkdir -p "$ST81"

@@ -220,17 +220,21 @@ _gc_env_readable() {
   env_readable "$pid"
 }
 
-# _gc_now_ms — epoch milliseconds. GNU date supports %3N; BSD/macOS date
-# does not, so the fallback degrades to whole-second precision (still
-# monotonic-enough for a single run's elapsed_ms field, which is telemetry
-# only — never a decision input).
+# _gc_now_ms — epoch milliseconds. Read seconds and nanoseconds as separate
+# fields because some date implementations ignore `%3N`'s width and emit all
+# nine nanosecond digits. Unsupported `%N` falls back to whole-second precision.
 _gc_now_ms() {
-  local ms
-  ms="$(date +%s%3N 2>/dev/null)"
-  if [[ "$ms" =~ ^[0-9]+$ ]]; then
-    printf '%s\n' "$ms"
+  local stamp seconds nanos
+  stamp="$(date '+%s %N' 2>/dev/null || true)"
+  read -r seconds nanos <<< "$stamp"
+  if [[ ! "$seconds" =~ ^[0-9]+$ ]]; then
+    seconds="$(date +%s 2>/dev/null || echo 0)"
+    [[ "$seconds" =~ ^[0-9]+$ ]] || seconds=0
+  fi
+  if [[ "$nanos" =~ ^[0-9]{3} ]]; then
+    printf '%s%s\n' "$seconds" "${nanos:0:3}"
   else
-    printf '%s\n' "$(( $(date +%s) * 1000 ))"
+    printf '%s000\n' "$seconds"
   fi
 }
 
@@ -600,22 +604,33 @@ _gc_pass1() {
 # _gc_same_uid_pids — every PID owned by this uid, one per line, excluding
 # THIS process (self-match safety, design §4-C5 "grep -vw $$"). Cached
 # after the first call (`_GC_SAME_UID_PIDS_CACHED` flag, since the PID set
-# itself may legitimately be empty): Pass 2/3 call this from five separate
-# sites (once per Pass-3 sub-rule plus once per dead-lane match in the two
-# lane-scoped sub-rules), and the same-uid PID set cannot change meaning
-# mid-run — re-shelling out to `ps`/`tr`/`grep` on every call is pure
-# waste on exactly the incident (many orphans) GC exists to clean up.
+# itself may legitimately be empty). The full-run entry point primes the cache
+# in the parent shell before Pass 2; every process-substitution producer then
+# inherits the same snapshot instead of losing cache assignments in a subshell.
+# Re-shelling out to `ps`/`tr`/`grep` at each Pass 2/3 call site is pure waste
+# on exactly the incident (many orphans) GC exists to clean up.
 # `--quick` (Pass 1 only) never calls this at all, so the AC-pinned "<1s
 # on 50 lane dirs" Pass-1 budget is unaffected either way.
 _GC_SAME_UID_PIDS_CACHED=false
 _GC_SAME_UID_PIDS_CACHE=""
+_gc_list_same_uid_pids() {
+  ps -eo pid= -U "$(id -u)" 2>/dev/null | tr -d ' ' | grep -vw "$$" || true
+}
+
 _gc_same_uid_pids() {
   if [[ "$_GC_SAME_UID_PIDS_CACHED" != true ]]; then
-    _GC_SAME_UID_PIDS_CACHE="$(ps -eo pid= -U "$(id -u)" 2>/dev/null | tr -d ' ' | grep -vw "$$" || true)"
+    _GC_SAME_UID_PIDS_CACHE="$(_gc_list_same_uid_pids)"
     _GC_SAME_UID_PIDS_CACHED=true
   fi
   [[ -n "$_GC_SAME_UID_PIDS_CACHE" ]] && printf '%s\n' "$_GC_SAME_UID_PIDS_CACHE"
   return 0
+}
+
+# Protective checks must see processes that appeared after the candidate
+# snapshot. Keep this separate from candidate enumeration so a late live
+# sharer can still veto a rule 3.2 kill.
+_gc_current_same_uid_pids() {
+  _gc_list_same_uid_pids
 }
 
 # _gc_has_term_program <pid> — rule 2.2's unconditional-skip test: true iff
@@ -939,7 +954,12 @@ _gc_pass3_candidate_backend_verified() {
 }
 
 _gc_pass3_chrome_lane_scoped() {
-  local lane_dir hint pid pid_identity argv pg pg_identity
+  local lane_dir hint pid pid_identity argv pg pg_identity index matched_index
+  local -a lane_dirs=()
+  local -a hints=()
+
+  # Registry reads stay lane-oriented, but candidate classification does not:
+  # retain eligible metadata in memory so each PID identity/argv is read once.
   while IFS= read -r lane_dir; do
     [[ -n "$lane_dir" ]] || continue
     [[ "$(lane_probe "$lane_dir" 2>/dev/null)" == "dead" ]] || continue
@@ -950,38 +970,52 @@ _gc_pass3_chrome_lane_scoped() {
     fi
     hint="$(lane_get "$lane_dir" CHROME_PROFILE_HINT 2>/dev/null || echo -)"
     [[ -n "$hint" && "$hint" != "-" ]] || continue
-    while IFS= read -r pid; do
-      [[ -n "$pid" ]] || continue
-      pid_identity="$(proc_identity "$pid" 2>/dev/null)" || continue
-      proc_identity_is_durable "$pid_identity" || continue
-      argv="$(proc_argv "$pid" 2>/dev/null | tr '\n' ' ')"
-      [[ "$argv" == *"--user-data-dir=${hint}"* || "$argv" == *"$hint"* ]] || continue
-      pg="$(proc_pgid "$pid" 2>/dev/null || echo "")"
-      _gc_safe_kill_pgid "$pg" || continue
-      pg_identity="$(proc_identity "$pg" 2>/dev/null)" || continue
-      proc_identity_is_durable "$pg_identity" || continue
-      # [Lane-GC PR-4 review round-2, P1-1 class fix] age_floor=0 — design
-      # §6 row 3.1 lists no age conjunct for this rule; the dead-lane
-      # CHROME_PROFILE_HINT match is already an exact, positive join (same
-      # confidence class as rule 2.1's exact ADT_LANE_ID join). Every OTHER
-      # shared guard now applies too — pre-fix this rule checked ONLY
-      # TERM_PROGRAM, nothing else.
-      _gc_common_kill_guards "$pid" "$pg" 0 "3.1" "$pid_identity" "$pg_identity" || continue
-      _gc_pass3_candidate_backend_verified "$pid" "3.1" || continue
-      if [[ "$GC_MODE" == "kill" ]]; then
-        if _gc_kill_candidate "$pid" "$pg" "$pid_identity" "$pg_identity"; then
-          KILLED=$((KILLED + 1))
-          _gc_log "kill rule=3.1 pid=$pid lane=$lane_dir hint=$hint"
-        else
-          SKIPS=$((SKIPS + 1))
-          _gc_log "skip rule=3.1 pid=$pid pgid=$pg reason=signal-identity-changed"
-        fi
-      else
-        WOULD_KILL=$((WOULD_KILL + 1))
-        _gc_log "would-kill rule=3.1 pid=$pid lane=$lane_dir hint=$hint"
-      fi
-    done < <(_gc_same_uid_pids)
+    lane_dirs+=("$lane_dir")
+    hints+=("$hint")
   done < <(_gc_all_lane_dirs)
+
+  ((${#hints[@]} > 0)) || return 0
+  while IFS= read -r pid; do
+    [[ -n "$pid" ]] || continue
+    pid_identity="$(proc_identity "$pid" 2>/dev/null)" || continue
+    proc_identity_is_durable "$pid_identity" || continue
+    argv="$(proc_argv "$pid" 2>/dev/null | tr '\n' ' ')"
+    matched_index=-1
+    for index in "${!hints[@]}"; do
+      hint="${hints[$index]}"
+      if [[ "$argv" == *"--user-data-dir=${hint}"* || "$argv" == *"$hint"* ]]; then
+        matched_index="$index"
+        break
+      fi
+    done
+    (( matched_index >= 0 )) || continue
+    lane_dir="${lane_dirs[$matched_index]}"
+    hint="${hints[$matched_index]}"
+    pg="$(proc_pgid "$pid" 2>/dev/null || echo "")"
+    _gc_safe_kill_pgid "$pg" || continue
+    pg_identity="$(proc_identity "$pg" 2>/dev/null)" || continue
+    proc_identity_is_durable "$pg_identity" || continue
+    # [Lane-GC PR-4 review round-2, P1-1 class fix] age_floor=0 — design
+    # §6 row 3.1 lists no age conjunct for this rule; the dead-lane
+    # CHROME_PROFILE_HINT match is already an exact, positive join (same
+    # confidence class as rule 2.1's exact ADT_LANE_ID join). Every OTHER
+    # shared guard now applies too — pre-fix this rule checked ONLY
+    # TERM_PROGRAM, nothing else.
+    _gc_common_kill_guards "$pid" "$pg" 0 "3.1" "$pid_identity" "$pg_identity" || continue
+    _gc_pass3_candidate_backend_verified "$pid" "3.1" || continue
+    if [[ "$GC_MODE" == "kill" ]]; then
+      if _gc_kill_candidate "$pid" "$pg" "$pid_identity" "$pg_identity"; then
+        KILLED=$((KILLED + 1))
+        _gc_log "kill rule=3.1 pid=$pid lane=$lane_dir hint=$hint"
+      else
+        SKIPS=$((SKIPS + 1))
+        _gc_log "skip rule=3.1 pid=$pid pgid=$pg reason=signal-identity-changed"
+      fi
+    else
+      WOULD_KILL=$((WOULD_KILL + 1))
+      _gc_log "would-kill rule=3.1 pid=$pid lane=$lane_dir hint=$hint"
+    fi
+  done < <(_gc_same_uid_pids)
 }
 
 # _gc_chrome_profile_has_live_sharer <profile_dir> <exclude_pid> — rule
@@ -995,7 +1029,7 @@ _gc_chrome_profile_has_live_sharer() {
     [[ -n "$pid" && "$pid" != "$exclude_pid" ]] || continue
     argv="$(proc_argv "$pid" 2>/dev/null | tr '\n' ' ')"
     [[ "$argv" == *"--user-data-dir=${profile_dir}"* ]] && return 0
-  done < <(_gc_same_uid_pids)
+  done < <(_gc_current_same_uid_pids)
   return 1
 }
 
@@ -1136,7 +1170,12 @@ _gc_pass3_wedged_gh() {
 }
 
 _gc_pass3_e2e_servers() {
-  local lane_dir worktree pid pid_identity cwd pg pg_identity
+  local lane_dir worktree pid pid_identity cwd pg pg_identity index matched_index
+  local -a lane_dirs=()
+  local -a worktrees=()
+
+  # Snapshot eligible lane metadata first; /proc cwd reads are substantially
+  # more expensive than comparing one cached cwd against in-memory paths.
   while IFS= read -r lane_dir; do
     [[ -n "$lane_dir" ]] || continue
     [[ "$(lane_probe "$lane_dir" 2>/dev/null)" == "dead" ]] || continue
@@ -1148,40 +1187,54 @@ _gc_pass3_e2e_servers() {
     worktree="$(lane_get "$lane_dir" WORKTREE 2>/dev/null || echo -)"
     [[ -n "$worktree" && "$worktree" != "-" ]] || continue
     [[ -e "$worktree" ]] && continue  # worktree still exists — not this rule
-    while IFS= read -r pid; do
-      [[ -n "$pid" ]] || continue
-      pid_identity="$(proc_identity "$pid" 2>/dev/null)" || continue
-      proc_identity_is_durable "$pid_identity" || continue
-      cwd="$(readlink "/proc/${pid}/cwd" 2>/dev/null || echo "")"
-      [[ "$cwd" == "${worktree}"* || "$cwd" == "${worktree} (deleted)"* ]] || continue
-      pg="$(proc_pgid "$pid" 2>/dev/null || echo "")"
-      _gc_safe_kill_pgid "$pg" || continue
-      pg_identity="$(proc_identity "$pg" 2>/dev/null)" || continue
-      proc_identity_is_durable "$pg_identity" || continue
-      # [Lane-GC PR-4 review round-2, P1-1] this rule previously applied
-      # NO guard at all before killing — no TERM_PROGRAM skip, no age
-      # floor, no live-pgid/ancestry check — so an operator shell (or a
-      # still-useful dev server) `cwd`'d inside a worktree directory that
-      # has since been `rm -rf`'d got its WHOLE PGID killed outright.
-      # floor=0: design row 3.4 lists no age conjunct (like 3.1, this is
-      # an exact structural match — dead lane + WORKTREE path gone + cwd
-      # still points there — not a fuzzy heuristic needing a wait).
-      _gc_common_kill_guards "$pid" "$pg" 0 "3.4" "$pid_identity" "$pg_identity" || continue
-      _gc_pass3_candidate_backend_verified "$pid" "3.4" || continue
-      if [[ "$GC_MODE" == "kill" ]]; then
-        if _gc_kill_candidate "$pid" "$pg" "$pid_identity" "$pg_identity"; then
-          KILLED=$((KILLED + 1))
-          _gc_log "kill rule=3.4 pid=$pid lane=$lane_dir worktree=$worktree"
-        else
-          SKIPS=$((SKIPS + 1))
-          _gc_log "skip rule=3.4 pid=$pid pgid=$pg reason=signal-identity-changed"
-        fi
-      else
-        WOULD_KILL=$((WOULD_KILL + 1))
-        _gc_log "would-kill rule=3.4 pid=$pid lane=$lane_dir worktree=$worktree"
-      fi
-    done < <(_gc_same_uid_pids)
+    lane_dirs+=("$lane_dir")
+    worktrees+=("$worktree")
   done < <(_gc_all_lane_dirs)
+
+  ((${#worktrees[@]} > 0)) || return 0
+  while IFS= read -r pid; do
+    [[ -n "$pid" ]] || continue
+    pid_identity="$(proc_identity "$pid" 2>/dev/null)" || continue
+    proc_identity_is_durable "$pid_identity" || continue
+    cwd="$(readlink "/proc/${pid}/cwd" 2>/dev/null || echo "")"
+    matched_index=-1
+    for index in "${!worktrees[@]}"; do
+      worktree="${worktrees[$index]}"
+      if [[ "$cwd" == "${worktree}"* || "$cwd" == "${worktree} (deleted)"* ]]; then
+        matched_index="$index"
+        break
+      fi
+    done
+    (( matched_index >= 0 )) || continue
+    lane_dir="${lane_dirs[$matched_index]}"
+    worktree="${worktrees[$matched_index]}"
+    pg="$(proc_pgid "$pid" 2>/dev/null || echo "")"
+    _gc_safe_kill_pgid "$pg" || continue
+    pg_identity="$(proc_identity "$pg" 2>/dev/null)" || continue
+    proc_identity_is_durable "$pg_identity" || continue
+    # [Lane-GC PR-4 review round-2, P1-1] this rule previously applied
+    # NO guard at all before killing — no TERM_PROGRAM skip, no age
+    # floor, no live-pgid/ancestry check — so an operator shell (or a
+    # still-useful dev server) `cwd`'d inside a worktree directory that
+    # has since been `rm -rf`'d got its WHOLE PGID killed outright.
+    # floor=0: design row 3.4 lists no age conjunct (like 3.1, this is
+    # an exact structural match — dead lane + WORKTREE path gone + cwd
+    # still points there — not a fuzzy heuristic needing a wait).
+    _gc_common_kill_guards "$pid" "$pg" 0 "3.4" "$pid_identity" "$pg_identity" || continue
+    _gc_pass3_candidate_backend_verified "$pid" "3.4" || continue
+    if [[ "$GC_MODE" == "kill" ]]; then
+      if _gc_kill_candidate "$pid" "$pg" "$pid_identity" "$pg_identity"; then
+        KILLED=$((KILLED + 1))
+        _gc_log "kill rule=3.4 pid=$pid lane=$lane_dir worktree=$worktree"
+      else
+        SKIPS=$((SKIPS + 1))
+        _gc_log "skip rule=3.4 pid=$pid pgid=$pg reason=signal-identity-changed"
+      fi
+    else
+      WOULD_KILL=$((WOULD_KILL + 1))
+      _gc_log "would-kill rule=3.4 pid=$pid lane=$lane_dir worktree=$worktree"
+    fi
+  done < <(_gc_same_uid_pids)
 }
 
 _gc_pass3() {
@@ -1372,6 +1425,9 @@ START_MS="$(_gc_now_ms)"
 
 _gc_pass1
 if [[ "$GC_QUICK" != true ]]; then
+  # Process-substitution producers run in subshells. Prime this cache in the
+  # parent so every Pass 2/3 consumer inherits the same PID snapshot.
+  _gc_same_uid_pids >/dev/null
   _gc_pass2
   _gc_pass3
   _gc_pass4
@@ -1379,6 +1435,7 @@ fi
 
 END_MS="$(_gc_now_ms)"
 ELAPSED_MS=$(( END_MS - START_MS ))
+(( ELAPSED_MS >= 0 )) || ELAPSED_MS=0
 
 SUMMARY="ADT_GC_SUMMARY skips=${SKIPS} would_kill=${WOULD_KILL} killed=${KILLED} would_kill_legacy_signature=${WOULD_KILL_LEGACY} unknown_class=${UNKNOWN_CLASS} live_burner_alerts=${LIVE_BURNER_ALERTS} elapsed_ms=${ELAPSED_MS}"
 _gc_log "$SUMMARY"

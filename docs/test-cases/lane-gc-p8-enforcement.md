@@ -55,6 +55,10 @@ Test runner: `bash tests/unit/test-lane-gc-p8-enforcement.sh`.
 | TC-LGC8-020a/b | a Pass 2/3 candidate and its PGID leader match at classification, TERM lands, then leader identity changes before KILL | returns `3`; the KILL phase is refused and the changed process remains |
 | TC-LGC8-021 | Pass 2 and every Pass 3 rule encounter a candidate tagged to a dead `systemd-scope` lane | refuse before signaling; lane-scoped rules also refuse before enumerating lane-owned candidates, pending full-wrapper scope enrollment in #522 |
 | TC-LGC8-022 | Pass 2/3 candidate classification order and identity transport | bind the PID before any env/argv/cwd classification, pass identities explicitly, and use one durable authorization helper |
+| TC-LGC8-023 | a full Pass 2/3 run needs the same-user PID set from multiple process-substitution call sites | prime the PID snapshot in the parent shell before Pass 2 so process-substitution subshells inherit one cached enumeration |
+| TC-LGC8-024 | Pass 3.1 scans 200 eligible dead lanes and 40 same-user PIDs | enumerate candidates once and read each PID's identity/argv once; compare the cached argv against all lane hints in memory |
+| TC-LGC8-025 | Pass 3.4 scans 200 eligible dead lanes and 40 same-user PIDs | enumerate candidates once and read each PID's identity/cwd once; compare the cached cwd against all missing worktrees in memory |
+| TC-LGC8-026 | a same-profile Chrome sharer starts after the parent candidate snapshot is primed | the rule 3.2 protective check performs a fresh same-user enumeration, sees the new sharer, and refuses classification |
 
 All fixtures use a fresh `ADT_STATE_ROOT`; the tests never inspect or mutate the
 operator's real lane registry.
