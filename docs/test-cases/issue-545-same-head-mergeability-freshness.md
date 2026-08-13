@@ -24,8 +24,11 @@ Every fixture uses one fixed full HEAD and an unprovable dev-session completion.
 | TC-545-FRESH-013 | A concurrent check-then-post race duplicates one reservation ordinal and its completion marker; one ordinary flip also exists | Count the reservation/completion duplicates as one logical freshness attempt and the ordinary flip as one separate attempt. Duplicate reservation comments cannot exhaust the cap early. |
 | TC-545-FRESH-014 | Two freshness ordinals consumed the cap while completion was unprovable; completion later becomes provable on the same session and HEAD | The completed-session router observes the shared cap and stalls instead of adding another pending-review requeue. |
 | TC-545-FRESH-015 | Completion is provable, but the completed-session logical flip count cannot read comments | Propagate operational defer (`3`) without requeueing or stalling from fabricated zero. |
-| TC-545-FRESH-016 | The comment provider returns a malformed row while reading logical flip accounting | Return nonzero with no numeric output; malformed accounting cannot become count zero. |
+| TC-545-FRESH-016 | The comment provider returns a malformed row or a body-start-recognized marker that fails its grammar | Return nonzero with no numeric output; malformed accounting cannot become count zero. |
 | TC-545-FRESH-017 | The direct Step 4b completed-session entry point receives operational defer (`3`) for one issue before another pending issue | Continue scanning the project, omit the deferred issue from `JUST_DISPATCHED`, and preserve ordinary handled-route exemption for the later issue. Hard non-`3` errors retain their prior tick-failing contract. |
+| TC-545-FRESH-018 | An ordinary prose comment quotes review-aware flip and freshness-reservation marker examples | Ignore the unanchored examples, return a successful logical flip count of zero, and do not classify reviewer prose as corrupt accounting. |
+| TC-545-FRESH-019 | A prose comment quotes a byte-exact freshness reservation for ordinal 1 before repeated same-HEAD `MERGEABLE` recovery ticks | The quote satisfies neither idempotency nor accounting. Persist real anchored reservations, requeue exactly `REVIEW_RETRY_LIMIT` times, then converge to `stalled`. |
+| TC-545-FRESH-020 | Only a sparse retained reservation ordinal (for example, `flip=2`) exists below the unique reservation cap | Allocate the next ordinal above the retained maximum, perform only the remaining bounded requeue, and then stall at the unique reservation cap. |
 
 ## Hermetic Golden Trace
 

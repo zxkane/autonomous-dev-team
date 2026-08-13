@@ -52,7 +52,7 @@ log() { :; }
 itp_list_comments() {
   local body="<!-- review-verdict: ${_MOCK_VERDICT} cause=${_MOCK_VERDICT_CAUSE} head=${_MOCK_HEAD} -->"
   local posted
-  if [[ "${FUNCNAME[1]:-}" == "_same_head_requeue_intent_count" \
+  if [[ " ${FUNCNAME[*]} " == *" _same_head_requeue_intent_stats "* \
         && "$_MOCK_INTENT_COUNT_READ_RC" != "0" ]]; then
     return "$_MOCK_INTENT_COUNT_READ_RC"
   fi
@@ -433,7 +433,7 @@ itp_post_comment 545 "$completion_marker"
 itp_post_comment 545 "$completion_marker"
 itp_post_comment 545 "$ordinary_marker"
 assert_eq "TC-545-FRESH-013 duplicate intent ordinals consume one reservation" \
-  "1" "$(_same_head_requeue_intent_count 545 sid-545 "$HEAD_H")"
+  $'1\t2' "$(_same_head_requeue_intent_stats 545 sid-545 "$HEAD_H")"
 assert_eq "TC-545-FRESH-013 reservation/completion pair plus ordinary flip count as two attempts" \
   "2" "$(count_review_aware_flips 545 sid-545)"
 
@@ -479,6 +479,20 @@ assert_eq "TC-545-FRESH-016 malformed comment rows return nonzero" \
   "nonzero" "$([[ "$count_rc" -ne 0 ]] && printf 'nonzero' || printf 'zero')"
 assert_eq "TC-545-FRESH-016 malformed comments never fabricate zero" \
   "" "$count_output"
+_MOCK_COMMENTS_JSON_OVERRIDE='[{"body":"<!-- review-aware-flip:non-substantive cause=mergeable-unknown session=<sid> -->"}]'
+count_output=$(count_review_aware_flips 545 sid-545)
+count_rc=$?
+assert_eq "TC-545-FRESH-016 malformed recognized flips return nonzero" \
+  "nonzero" "$([[ "$count_rc" -ne 0 ]] && printf 'nonzero' || printf 'zero')"
+assert_eq "TC-545-FRESH-016 malformed recognized flips never fabricate zero" \
+  "" "$count_output"
+_MOCK_COMMENTS_JSON_OVERRIDE='[{"body":"<!-- same-head-mergeability-requeue: issue=545 head=<head> session=sid-545 flip=1 status=MERGEABLE -->"}]'
+count_output=$(_same_head_requeue_intent_stats 545 sid-545 "$HEAD_H")
+count_rc=$?
+assert_eq "TC-545-FRESH-016 malformed recognized reservations return nonzero" \
+  "nonzero" "$([[ "$count_rc" -ne 0 ]] && printf 'nonzero' || printf 'zero')"
+assert_eq "TC-545-FRESH-016 malformed recognized reservations never fabricate zero" \
+  "" "$count_output"
 
 echo
 echo "=== TC-545-FRESH-017: direct completed-session defer does not abort the tick ==="
@@ -511,6 +525,69 @@ assert_eq "TC-545-FRESH-017 direct caller handles operational defer" \
   "0" "$direct_route_rc"
 assert_eq "TC-545-FRESH-017 later issues still run and only handled routes are exempted" \
   $'route:545\nroute:546\njust:546' "$(cat "$direct_route_trace")"
+
+echo
+echo "=== TC-545-FRESH-018: prose-quoted markers are not accounting records ==="
+_reset
+_MOCK_COMMENTS_JSON_OVERRIDE=$(jq -cn --arg body \
+  'Review guidance quoted `<!-- review-aware-flip:non-substantive cause=mergeable-unknown session=<sid> -->` and `<!-- same-head-mergeability-requeue: issue=545 head=<head> session=<sid> flip=1 status=MERGEABLE -->` as examples.' \
+  '[{body:$body}]')
+count_output=$(count_review_aware_flips 545 sid-545)
+count_rc=$?
+assert_eq "TC-545-FRESH-018 prose marker examples do not fail accounting" \
+  "0" "$count_rc"
+assert_eq "TC-545-FRESH-018 prose marker examples do not consume the budget" \
+  "0" "$count_output"
+
+echo
+echo "=== TC-545-FRESH-019: quoted reservation cannot suppress bounded intents ==="
+_reset
+reservation_marker="<!-- same-head-mergeability-requeue: issue=545 head=${HEAD_H} session=sid-545 flip=1 status=MERGEABLE -->"
+itp_post_comment 545 \
+  "Review note quoted ${reservation_marker} while discussing the retry protocol."
+: >"$TRACE"
+for tick in $(seq 1 "$REVIEW_RETRY_LIMIT"); do
+  handle_pending_dev_pr_exists 545
+  assert_eq "TC-545-FRESH-019 requeue ${tick} remains review-eligible" \
+    "pending-review" "$_MOCK_LABEL_STATE"
+  _MOCK_LABEL_STATE="pending-dev"
+done
+handle_pending_dev_pr_exists 545
+assert_eq "TC-545-FRESH-019 quoted intent still converges at the cap" \
+  "stalled" "$_MOCK_LABEL_STATE"
+comments_json=$(itp_list_comments 545)
+assert_eq "TC-545-FRESH-019 persists the configured anchored reservations" \
+  "$REVIEW_RETRY_LIMIT" "$(jq '[.[].body | select(startswith("<!-- same-head-mergeability-requeue:"))] | length' \
+    <<<"$comments_json")"
+assert_eq "TC-545-FRESH-019 performs only the bounded label transitions" \
+  "$REVIEW_RETRY_LIMIT" \
+  "$(grep -c "^label_swap${US}545${US}pending-dev${US}pending-review$" "$TRACE")"
+assert_eq "TC-545-FRESH-019 stalls exactly once" \
+  "1" "$(grep -c "^mark_stalled" "$TRACE")"
+
+echo
+echo "=== TC-545-FRESH-020: sparse reservation ordinals still converge ==="
+_reset
+itp_post_comment 545 \
+  "<!-- same-head-mergeability-requeue: issue=545 head=${HEAD_H} session=sid-545 flip=2 status=MERGEABLE -->"
+: >"$TRACE"
+handle_pending_dev_pr_exists 545
+assert_eq "TC-545-FRESH-020 sparse history reserves a fresh ordinal" \
+  "pending-review" "$_MOCK_LABEL_STATE"
+_MOCK_LABEL_STATE="pending-dev"
+handle_pending_dev_pr_exists 545
+assert_eq "TC-545-FRESH-020 sparse history stalls at the unique reservation cap" \
+  "stalled" "$_MOCK_LABEL_STATE"
+comments_json=$(itp_list_comments 545)
+assert_eq "TC-545-FRESH-020 advances past the highest retained ordinal" \
+  $'2\n3' \
+  "$(jq -r '.[].body
+    | select(startswith("<!-- same-head-mergeability-requeue:"))
+    | capture(" flip=(?<flip>[0-9]+) ").flip' <<<"$comments_json" | sort -nu)"
+assert_eq "TC-545-FRESH-020 performs only the remaining bounded transition" \
+  "1" "$(grep -c "^label_swap${US}545${US}pending-dev${US}pending-review$" "$TRACE")"
+assert_eq "TC-545-FRESH-020 stalls exactly once" \
+  "1" "$(grep -c "^mark_stalled" "$TRACE")"
 
 echo
 echo "=== TC-545-TRACE-001: two UNKNOWN reviews then MERGEABLE on fixed HEAD ==="

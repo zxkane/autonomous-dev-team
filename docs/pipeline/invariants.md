@@ -9798,12 +9798,22 @@ reservation and its optional completion marker form one logical attempt keyed
 by session + full HEAD + ordinal; the union of those keys is counted, so
 reservation/completion pairs and concurrent duplicate posts cannot double
 spend the budget. A reservation without completion still counts. Comment
-transport failure, malformed JSON/schema, or a malformed recognized marker
-returns nonzero; `handle_completed_session_routing` propagates operational
-defer (`3`) without label mutation. Its same-HEAD caller preserves that code,
-and the direct Step 4b caller handles it with `continue`, so neither entry
-point aborts the remaining project scan or adds the issue to `JUST_DISPATCHED`.
-Other nested nonzero errors retain their prior hard-error mapping.
+recognition is body-start anchored: only a comment whose body starts with the
+declared `review-aware-flip:non-substantive` or
+`same-head-mergeability-requeue` prefix enters strict marker parsing. Prose
+that merely quotes either marker is not accounting evidence and is ignored.
+The reservation idempotency check and reservation counter use the same
+body-start selector, so one comment cannot be "already present" to the writer
+but absent from the budget. New reservation ordinals advance past the highest
+retained ordinal rather than deriving from the unique count, so a sparse
+timeline cannot repeatedly reuse one marker and evade the cap. Comment
+transport failure, malformed JSON/schema, or a body-start-recognized marker
+that fails its full grammar returns nonzero;
+`handle_completed_session_routing` propagates operational defer (`3`) without
+label mutation. Its same-HEAD caller preserves that code, and the direct Step
+4b caller handles it with `continue`, so neither entry point aborts the
+remaining project scan or adds the issue to `JUST_DISPATCHED`. Other nested
+nonzero errors retain their prior hard-error mapping.
 
 **GitLab interaction**: policy states such as `ci_still_running`,
 `ci_must_pass`, `not_approved`, and `discussions_not_resolved` remain normalized
@@ -9849,7 +9859,11 @@ TC-545-FRESH-013 (duplicate reservation/completion posts count once),
 TC-545-FRESH-014 (later completed-session routing inherits freshness spend),
 TC-545-FRESH-015 (completed-session accounting read failure defers), and
 TC-545-FRESH-016 (malformed accounting fails nonzero),
-TC-545-FRESH-017 (the direct tick caller continues after defer), plus
+TC-545-FRESH-017 (the direct tick caller continues after defer),
+TC-545-FRESH-018 (prose-quoted markers are ignored without failing accounting),
+TC-545-FRESH-019 (a verbatim quoted reservation cannot suppress real
+reservations or escape the cap), TC-545-FRESH-020 (sparse retained ordinals
+still allocate a fresh marker and converge), plus
 TC-545-TRACE-001 (two initial `UNKNOWN` preflights followed by same-HEAD
 `MERGEABLE` reaches normal review with no manual label change or commit).
 `tests/unit/test-dispatcher-review-disposition-routing.sh::TC-E2E-REBASE-054`

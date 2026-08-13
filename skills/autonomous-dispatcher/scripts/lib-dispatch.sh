@@ -1387,8 +1387,9 @@ classify_recent_review_verdict() {
 # Ordinary flip comments count individually. INV-149 reservations and their
 # completion comments share a (session, HEAD, ordinal) key and count once even
 # when both exist or a concurrent check-then-post race duplicates either one.
-# Comment transport/schema/marker failures return nonzero; callers must never
-# fabricate zero because that would reset a consumed retry budget.
+# Comment transport/schema failures and malformed body-start-recognized markers
+# return nonzero; callers must never fabricate zero because that would reset a
+# consumed retry budget. Marker-looking substrings in prose are not recognized.
 count_review_aware_flips() {
   local issue_num="$1"
   local session_id="$2"
@@ -1397,11 +1398,11 @@ count_review_aware_flips() {
   comments=$(itp_list_comments "$issue_num" 2>/dev/null) || return 1
   jq -er --arg session "$session_id" '
     def ordinary_re:
-      "<!-- review-aware-flip:non-substantive cause=[^[:space:]>]+ session=(?<session>[^[:space:]>]+) -->";
+      "^<!-- review-aware-flip:non-substantive cause=[^[:space:]>]+ session=(?<session>[^[:space:]>]+) -->";
     def refresh_re:
-      "<!-- review-aware-flip:non-substantive cause=mergeable-unknown session=(?<session>[^[:space:]>]+) head=(?<head>[^[:space:]>]+) source=same-head-refresh flip=(?<flip>[0-9]+) -->";
+      "^<!-- review-aware-flip:non-substantive cause=mergeable-unknown session=(?<session>[^[:space:]>]+) head=(?<head>[^[:space:]>]+) source=same-head-refresh flip=(?<flip>[0-9]+) -->";
     def intent_re:
-      "<!-- same-head-mergeability-requeue: issue=[0-9]+ head=(?<head>[^[:space:]>]+) session=(?<session>[^[:space:]>]+) flip=(?<flip>[0-9]+) status=(MERGEABLE|CONFLICTING) -->";
+      "^<!-- same-head-mergeability-requeue: issue=[0-9]+ head=(?<head>[^[:space:]>]+) session=(?<session>[^[:space:]>]+) flip=(?<flip>[0-9]+) status=(MERGEABLE|CONFLICTING) -->";
     def freshness_key:
       .session + "\u001f" + .head + "\u001f" + .flip;
 
@@ -1411,7 +1412,7 @@ count_review_aware_flips() {
     else
       reduce .[].body as $body (
         {ordinary: 0, freshness: {}};
-        if ($body | contains("<!-- same-head-mergeability-requeue:"))
+        if ($body | startswith("<!-- same-head-mergeability-requeue:"))
         then
           if ($body | test(intent_re))
           then ($body | capture(intent_re)) as $marker
@@ -1421,7 +1422,7 @@ count_review_aware_flips() {
               end
           else error("malformed same-head mergeability reservation")
           end
-        elif ($body | contains("<!-- review-aware-flip:non-substantive"))
+        elif ($body | startswith("<!-- review-aware-flip:non-substantive"))
         then
           if ($body | test(refresh_re))
           then ($body | capture(refresh_re)) as $marker
@@ -4120,43 +4121,55 @@ recent_error_envelope() {
   return 0
 }
 
+# Return bodies that start with a marker prefix after strict transport shape
+# validation. Both reservation counting and idempotency use this selector so
+# prose that quotes a marker cannot be "present" to one path and absent from
+# the other.
+_same_head_marker_bodies() {
+  local issue_num="$1" marker_prefix="$2"
+  local comments
+  comments=$(itp_list_comments "$issue_num" 2>/dev/null) || return 1
+  jq -ec --arg marker_prefix "$marker_prefix" '
+    if type != "array"
+       or any(.[]; type != "object" or (.body | type) != "string")
+    then error("comments must be an array of objects with string bodies")
+    else [.[] | .body | select(startswith($marker_prefix))]
+    end
+  ' <<<"$comments" 2>/dev/null
+}
+
 # Ensure one exact recovery comment. A read failure is distinct from absence so
 # a provider outage cannot turn an idempotency check into duplicate writes.
 _same_head_ensure_comment() {
   local issue_num="$1" marker="$2" body="$3"
-  local comments
-  comments=$(itp_list_comments "$issue_num" 2>/dev/null) || return 1
-  if jq -e --arg marker "$marker" \
-      'any(.[].body; type == "string" and contains($marker))' \
-      >/dev/null 2>&1 <<<"$comments"; then
+  local matching
+  matching=$(_same_head_marker_bodies "$issue_num" "$marker") || return 1
+  if jq -e 'length > 0' >/dev/null 2>&1 <<<"$matching"; then
     return 0
   fi
   itp_post_comment "$issue_num" "$body" >/dev/null 2>&1
 }
 
-_same_head_requeue_intent_count() {
+_same_head_requeue_intent_stats() {
   local issue_num="$1" scope="$2" current_head="$3"
-  local comments
-  comments=$(itp_list_comments "$issue_num" 2>/dev/null) || return 1
+  local matching
+  matching=$(_same_head_marker_bodies \
+    "$issue_num" "<!-- same-head-mergeability-requeue:") || return 1
   jq -er \
     --arg head "$current_head" \
     --arg session "$scope" \
     'def intent_re:
        "^<!-- same-head-mergeability-requeue: issue=[0-9]+ head=(?<head>[^[:space:]>]+) session=(?<session>[^[:space:]>]+) flip=(?<flip>[0-9]+) status=(MERGEABLE|CONFLICTING) -->";
-     if type != "array"
-        or any(.[]; type != "object" or (.body | type) != "string")
-     then error("comments must be an array of objects with string bodies")
-     else
-       [.[].body
-        | select(startswith("<!-- same-head-mergeability-requeue:"))
-        | if test(intent_re)
-          then capture(intent_re)
-          else error("malformed same-head mergeability reservation")
-          end
-        | select(.head == $head and .session == $session)
-        | .flip
-       ] | unique | length
-     end' <<<"$comments" 2>/dev/null
+     [.[]
+      | if test(intent_re)
+        then capture(intent_re)
+        else error("malformed same-head mergeability reservation")
+        end
+      | select(.head == $head and .session == $session)
+      | (.flip | tonumber)
+     ] | unique as $ordinals
+     | [$ordinals | length, ((($ordinals | max) // 0) + 1)]
+     | @tsv' <<<"$matching" 2>/dev/null
 }
 
 # INV-149 freshness requeue. Each durable intent reserves one bounded attempt
@@ -4167,11 +4180,17 @@ _same_head_refresh_requeue_review() {
   local issue_num="$1" pr_ref="$2" current_head="$3"
   local session_id="$4" status="${5^^}"
   local scope="${session_id:-same-head-${current_head}}"
-  local reservation_count limit ordinal intent_marker intent_body complete_marker
+  local reservation_stats reservation_count limit ordinal
+  local intent_marker intent_body complete_marker
 
-  if ! reservation_count=$(_same_head_requeue_intent_count \
+  if ! reservation_stats=$(_same_head_requeue_intent_stats \
       "$issue_num" "$scope" "$current_head"); then
     log "  WARN: issue #${issue_num} could not read same-HEAD requeue reservations — deferring for INV-128"
+    return 3
+  fi
+  read -r reservation_count ordinal <<<"$reservation_stats"
+  if ! [[ "$reservation_count" =~ ^[0-9]+$ && "$ordinal" =~ ^[1-9][0-9]*$ ]]; then
+    log "  WARN: issue #${issue_num} received malformed same-HEAD requeue reservation stats — deferring for INV-128"
     return 3
   fi
   limit="${REVIEW_RETRY_LIMIT:-2}"
@@ -4187,7 +4206,6 @@ _same_head_refresh_requeue_review() {
     return 0
   fi
 
-  ordinal=$((reservation_count + 1))
   intent_marker="<!-- same-head-mergeability-requeue: issue=${issue_num} head=${current_head} session=${scope} flip=${ordinal} status=${status} -->"
   intent_body="$(printf '%s\n%s' \
     "$intent_marker" \
