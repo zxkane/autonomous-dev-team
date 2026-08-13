@@ -213,6 +213,58 @@ review_validate_pinned_pr() {
   printf -v "$action_var" '%s' "proceed"
 }
 
+# review_refresh_mergeability_once
+#   PR EXPECTED_HEAD HEAD_OUT STATUS_OUT ACTION_OUT
+#
+# Revalidates one mutable mergeability observation against provider snapshots
+# of the same open HEAD. Unlike the bounded review preflight below, a
+# chp_mergeable failure remains distinguishable from a successful UNKNOWN read:
+# callers deciding whether historical UNKNOWN evidence is still current must
+# not fabricate a failed read into fresh terminal evidence.
+#
+# ACTION_OUT uses the review preflight action vocabulary: proceed,
+# conflict-rebase, mergeable-unknown, closed, head-changed, or read-failed.
+review_refresh_mergeability_once() {
+  local pr="$1" expected_head="$2"
+  local head_var="$3" status_var="$4" action_var="$5"
+  local state="" head="" branch="" action=""
+  local status="" status_rc=0
+
+  printf -v "$head_var" '%s' ""
+  printf -v "$status_var" '%s' ""
+  printf -v "$action_var" '%s' "read-failed"
+
+  review_validate_pinned_pr "$pr" "$expected_head" \
+    state head branch action
+  printf -v "$head_var" '%s' "$head"
+  if [[ "$action" != "proceed" ]]; then
+    printf -v "$action_var" '%s' "$action"
+    return 0
+  fi
+
+  status=$(chp_mergeable "$pr" 2>/dev/null) || status_rc=$?
+
+  review_validate_pinned_pr "$pr" "$head" \
+    state head branch action
+  printf -v "$head_var" '%s' "$head"
+  printf -v "$status_var" '%s' "$status"
+  if [[ "$action" != "proceed" ]]; then
+    printf -v "$action_var" '%s' "$action"
+    return 0
+  fi
+  if [[ "$status_rc" -ne 0 ]]; then
+    return 0
+  fi
+
+  case "$(_classify_mergeable_gate "$status")" in
+    proceed) printf -v "$action_var" '%s' "proceed" ;;
+    block-substantive)
+      printf -v "$action_var" '%s' "conflict-rebase"
+      ;;
+    *) printf -v "$action_var" '%s' "mergeable-unknown" ;;
+  esac
+}
+
 # review_mergeability_preflight PR STATE_OUT HEAD_OUT BRANCH_OUT STATUS_OUT ACTION_OUT
 #
 # ACTION_OUT is one of proceed, conflict-rebase, mergeable-unknown, closed,

@@ -452,6 +452,19 @@
       "note": "If a PR already references the issue, skip re-dispatching dev and route straight to review."
     },
     {
+      "id": "dispatch-pending-dev-mergeability-freshness-review",
+      "from": "pending_dev",
+      "to": "pending_review",
+      "event": "dispatcher-step4a5-refresh-stale-mergeability",
+      "actor": "dispatcher",
+      "guards": ["same-head-reviewed-failed", "verdict-fail-nonsubstantive-mergeable-unknown", "non-substantive-marker-present", "no-live-dev-wrapper", "provider-refresh-same-open-head", "provider-refresh-known"],
+      "actions": ["remove-label:pending-dev", "add-label:pending-review", "comment:fresh-mergeability-requeue"],
+      "code_site": "lib-dispatch.sh _same_head_refresh_requeue_review(): INV-149 freshness requeue",
+      "mermaid": "pending_dev --> pending_review: Same-HEAD terminal refresh is MERGEABLE or CONFLICTING [INV-149]",
+      "inv_refs": ["INV-149", "INV-147", "INV-125"],
+      "note": "A consumed self-heal-non-substantive:<head> marker cannot make historical mergeable-unknown evidence terminal. A HEAD-pinned current MERGEABLE or CONFLICTING observation re-enters normal review; review preflight then reaches fan-out or the canonical conflict/rebase route. Persistent UNKNOWN stalls through the existing bound. Provider-read failure stays pending-dev with operational-defer rc=3, so JUST_DISPATCHED does not suppress the INV-128 bound."
+    },
+    {
       "id": "dispatch-pending-dev-selfheal-lost-session",
       "from": "pending_dev",
       "to": "in_progress",

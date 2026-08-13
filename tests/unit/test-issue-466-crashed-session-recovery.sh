@@ -335,7 +335,7 @@ handle_pending_dev_pr_exists 99
 rc=$?
 assert_eq   "TC-466-LIVE-001 returns 0 (park)" "0" "$rc"
 assert_match "TC-466-LIVE-001 posts stale-verdict residual park" "stale-verdict:sha-A" "$(_trace_all)"
-assert_match "TC-466-LIVE-001 updated park comment text mentions the transient (not permanent) nature of the wait" "transient wait, not a permanent park" "$(_trace_all)"
+assert_match "TC-466-LIVE-001 park text names the liveness-watchdog bound" "transient wait bounded by the liveness watchdog" "$(_trace_all)"
 assert_eq   "TC-466-LIVE-001 ZERO dev-new" "0" "$(_trace_verbs | grep -c '^dispatch$')"
 assert_no_match "TC-466-LIVE-001 no in-progress flip" "pending-dev${US}in-progress" "$(_trace_all)"
 

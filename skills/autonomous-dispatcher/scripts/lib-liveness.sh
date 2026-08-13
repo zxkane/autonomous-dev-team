@@ -111,7 +111,7 @@ _LIVENESS_GRAMMARS_JSON=$(cat <<'_LIVENESS_GRAMMARS_JSON_EOF'
 [
   {
     "name": "stale-verdict:",
-    "re": "^PR (#[0-9]+|\\(number unknown\\)) HEAD `[^`\\n]+` already reviewed with FAILED verdict; awaiting new commits before re-review\\. A dev wrapper appears to still be running for this issue, or a concurrent dispatcher tick is mid-dispatch — this is a transient wait, not a permanent park \\(`stale-verdict:[^`\\n]+`\\)\\.$",
+    "re": "^PR (#[0-9]+|\\(number unknown\\)) HEAD `[^`\\n]+` already reviewed with FAILED verdict; awaiting a safe recovery decision\\. A dev wrapper may still be running, a concurrent dispatcher tick may be mid-dispatch, or current provider evidence may be unreadable — this is a transient wait bounded by the liveness watchdog \\(`stale-verdict:[^`\\n]+`\\)\\.$",
     "digest": true
   },
   {

@@ -7258,7 +7258,8 @@ _Triage (issue #236): [machine-checked: tests/unit/test-issue-461-completed-none
 
 ---
 
-## INV-125: a resolved dev session id whose completion `is_session_completed` cannot confirm (a non-terminal stop reason such as `api_error`, a non-claude dev CLI, or an unreadable log), with no live wrapper, gets the SAME bounded verdict-aware recovery as the [INV-111] self-heal branch — and every marker-present same-HEAD fall-through escalates to `mark_stalled`, never the residual park
+<a id="inv-125-a-resolved-dev-session-id-whose-completion-is_session_completed-cannot-confirm-a-non-terminal-stop-reason-such-as-api_error-a-non-claude-dev-cli-or-an-unreadable-log-with-no-live-wrapper-gets-the-same-bounded-verdict-aware-recovery-as-the-inv-111-self-heal-branch--and-every-marker-present-same-head-fall-through-escalates-to-mark_stalled-never-the-residual-park"></a>
+## INV-125: a resolved dev session id whose completion `is_session_completed` cannot confirm gets the same bounded verdict-aware recovery as the [INV-111] self-heal branch, and marker-present same-HEAD fall-throughs with current terminal evidence escalate to `mark_stalled`
 
 _Triage (issue #236): [machine-checked: tests/unit/test-issue-466-crashed-session-recovery.sh, tests/unit/test-issue-351-stale-verdict-delegate.sh]_
 
@@ -7277,9 +7278,9 @@ Both call sites gate on `may_stall_now` (no live dev wrapper) BEFORE invoking th
 - `failed-non-substantive` → `label_swap pending-dev → pending-review` (re-review, not a `dev-new` — the code isn't the problem), bounded via the **shared** `self-heal-non-substantive:<head>` marker — the SAME marker namespace regardless of which cause requested the re-review, because a re-review costs the same either way; a separate per-cause marker would silently double the budget.
 - `failed-substantive` (dev-actionable=true) or `none` (fail OPEN, the same posture the pre-existing self-heal behavior and the classifier's own legacy no-trailer fallback take) → bounded `dev-new`, gated on a **shared** budget check across BOTH `self-heal-lost-session:<head>` AND `crashed-session-retry:<head>` — either marker present means this HEAD already consumed its one self-heal/crash-recovery `dev-new` with no progress, regardless of which cause is asking now.
 
-**Part 2 — closing the counting hole.** Every marker-present / budget-exhausted arm above calls `mark_stalled` **directly** — it NEVER falls through to the residual `stale-verdict:<head>` park. In a park, `count_retries` is frozen by construction (a park posts only an idempotent notice, which `count_retries` never counts — no dispatch, no countable comment), so the pre-existing code comments claiming "MAX_RETRIES remains the eventual backstop" for a marker-present fall-through were **false as written**: with no dispatch ever running again for that HEAD, no comment `count_retries` scans for can ever be posted, so the counter can never grow and `MAX_RETRIES` can never trip. The marker itself IS the evidence that the one bounded recovery for this HEAD was already spent with no progress — that is sufficient grounds for `mark_stalled` on its own, without needing `count_retries` to independently confirm it. (Teaching `count_retries` to count park notices instead was rejected: notices are idempotent, at most one per HEAD, so they could never accumulate to any threshold either — the explicit `mark_stalled` call is the only shape that actually closes the hole.)
+**Part 2 — closing the counting hole.** Every marker-present / budget-exhausted arm above is terminal once its underlying evidence is current. [INV-149] narrows the `mergeable-unknown` case: the marker proves budget consumption but the historical provider observation must be refreshed before it can justify `mark_stalled`. A current `MERGEABLE`/`CONFLICTING` re-enters review, a provider-read failure defers under INV-128, and a successful fresh `UNKNOWN` retains the direct stall. Other non-substantive causes and the shared dev-new budget still call `mark_stalled` directly. In a park, `count_retries` is frozen by construction (a park posts only an idempotent notice, which `count_retries` never counts — no dispatch, no countable comment), so usable marker-present evidence must never fall through merely to wait for `MAX_RETRIES`.
 
-After this fix, the residual `stale-verdict:<head>` park is reachable ONLY for genuinely transient states: a dev wrapper is still alive (`may_stall_now` defers — Step 5 owns liveness), a concurrent tick holds the `dev-new` dispatch marker ([INV-108] — the helper returns 1, distinct from its `mark_stalled` arms which return 0), or the helper's own comment-read preflight fails (below — the helper also returns 1 here, same as the [INV-108] case).
+After this fix, the residual `stale-verdict:<head>` park is reachable ONLY for genuinely transient states: a dev wrapper is still alive (`may_stall_now` defers — Step 5 owns liveness), a concurrent tick holds the `dev-new` dispatch marker ([INV-108] — the helper returns 1, distinct from its `mark_stalled` arms which return 0), the helper's own comment-read preflight fails, or INV-149 cannot read current mergeability. INV-128 bounds either persistent read outage.
 
 **Comment-fetch-failure preflight (PR #471 review fix).** Every downstream check in the helper — `classify_recent_review_verdict`, and the `self-heal-lost-session`/`crashed-session-retry`/`self-heal-non-substantive` marker-present probes — reads `itp_list_comments` and treats an EMPTY result as a legitimate negative (`verdict=none`, "marker absent"). Left unguarded, a transient comment-fetch failure (rate-limit/auth/network blip) produces the exact same empty shape, so it would misclassify into `mark_stalled` (a fetch failure looks like "budget already spent" — the marker-present checks default fail-CLOSED via `${_budget_spent:-1}`/`${_ns_present:-1}`, i.e. *empty read → treated as marker PRESENT*) or an unwarranted fresh `dev-new` (a fetch failure looks like `verdict=none`, which fails OPEN to a dispatch) against an otherwise-healthy issue — precisely the transient class this invariant reserved the residual park for. Fix: `_same_head_verdict_aware_recovery` preflights `itp_list_comments` once at entry; a non-zero rc returns 1 immediately (before touching `classify_recent_review_verdict` or any marker probe), so the caller falls through to the unchanged residual park instead of misrouting. A same-HEAD branch is only reached after a review-FAILED verdict has already posted at least one comment, so a genuinely empty comment list can never be legitimate here — any empty/failed read at this call site is definitionally transient.
 
@@ -7297,6 +7298,7 @@ After this fix, the residual `stale-verdict:<head>` park is reachable ONLY for g
 - [INV-123](#inv-123-the-completed-session-verdict-none-route-is-bounded--a-no-pr-completed-session-retries-via-dev-new-under-max_retries-branch-c-mirror-no-escalation-ladder-and-a-pr-exists-none-no-qualifying-review-comment-found-still-fails-closed-to-the-inv-12-operator-handoff) — the sibling permanent-park bug this invariant fixes for a different entry condition (a resolved-but-unprovable session id vs. a `verdict=none` completed session); the two share the same "only branch with no bound" shape.
 - [INV-92](#inv-92-a-review-blocking-finding-the-dev-agent-provably-cannot-act-on-protected-path--missing-token-scope-is-not-routed-to-dev-resume--the-wrapper-classifies-each-findings-actionability-and-the-dispatcher-escalates-a-non-actionable-verdict-to-stalled) — the `dev-actionable=false` escalation this invariant's helper reuses (own per-cause marker, no dev-new).
 - [INV-108](#inv-108-every-dispatcher-tick-dispatch-site-acquires-a-controller-side-per-issuemode-marker-atomically-before-any-side-effect--a-losing-acquire-skips-cleanly-never-dispatches-the-marker-expires-via-ttl-never-wedging-the-issue-the-dispatch-token-gains-a-run-field-for-post-hoc-attribution) — the controller-side dedup guard the shared helper's dev-new dispatch adopts, identical sequencing to the pre-existing self-heal call site.
+- [INV-149](#inv-149-a-consumed-same-head-non-substantive-retry-marker-cannot-make-a-historical-mergeable-unknown-observation-terminal-without-a-current-head-pinned-provider-read) — the freshness exception for the mutable `mergeable-unknown` cause.
 - [`docs/designs/issue-466-crashed-session-recovery.md`](../designs/issue-466-crashed-session-recovery.md) — the full design, including the rejected "unconditional dev-new" and "separate per-cause markers" alternatives.
 
 ---
@@ -9751,5 +9753,85 @@ other failure mode unguarded.
 - [INV-17](#inv-17-trunk-protection-requires-defense-in-depth-across-3-layers) — the 3-layer model this is Layer 1 of; the destination comparison narrows Layer 1's *scope* without widening its *gaps*.
 - [INV-146](#inv-146-commit-worktree-enforcement-is-scoped-to-the-resolved-command-repository-and-fails-closed-when-command-context-is-uncertain) — supplies `resolve_git_command_cwd` and the fail-closed philosophy. Its **local-identity** decision is correct for worktree hygiene and is deliberately NOT reused here.
 - [INV-131](#inv-131-the-pipelines-base-branch-is-a-resolved-exported-validated-conf-value--never-a-hardcoded-main-literal-in-a-prompt-hook-or-provider-argv) — the resolve-once/export-once wrapper pattern the project anchor follows.
+
+## INV-149: a consumed same-HEAD non-substantive retry marker cannot make a historical `mergeable-unknown` observation terminal without a current HEAD-pinned provider read
+
+_Triage (issue #236): [machine-checked: tests/unit/test-issue-545-same-head-mergeability-freshness.sh]_
+
+**Rule**: when `_same_head_verdict_aware_recovery` classifies the newest
+same-HEAD verdict as `failed-non-substantive cause=mergeable-unknown` and finds
+`self-heal-non-substantive:<head>` already present, it MUST revalidate provider
+mergeability before calling `mark_stalled`. The durable marker proves that the
+one same-HEAD re-review budget was consumed; it does not prove that the
+provider state observed during review is still current.
+
+The refresh is provider-neutral and HEAD-pinned:
+
+1. Read normalized PR state, full HEAD, and branch.
+2. Require the PR to be open at the expected full HEAD.
+3. Read `chp_mergeable` once while preserving its return code.
+4. Read normalized state and full HEAD again.
+5. Interpret the mergeability token only when both snapshots describe the same
+   open expected HEAD.
+
+The resulting decision table is:
+
+| Fresh result | Dispatcher action |
+|---|---|
+| `MERGEABLE` | `pending-dev -> pending-review`; the normal review preflight, E2E, fan-out, CI, approval, and merge gates remain authoritative. |
+| `CONFLICTING` | `pending-dev -> pending-review`; the normal preflight enters INV-147's canonical conflict/rebase route and writes its required durable evidence. |
+| Successful `UNKNOWN`/empty/unrecognized token | Retain INV-125's direct `mark_stalled`; the historical verdict now has current same-HEAD corroboration. |
+| `chp_mergeable` non-zero, malformed snapshot, or unavailable PR number | Keep the residual `stale-verdict:<head>` notice but return operational defer (`3`), without dispatching, requeueing, or stalling. The tick therefore omits `JUST_DISPATCHED` and INV-128 bounds a persistent outage. A read failure is never fabricated as fresh `UNKNOWN`. |
+| HEAD changed | Requeue `pending-review` without binding the old verdict to the new HEAD. |
+| PR closed/merged | No-op; Step 0 terminal reconciliation owns cleanup. |
+
+**GitLab interaction**: policy states such as `ci_still_running`,
+`ci_must_pass`, `not_approved`, and `discussions_not_resolved` remain normalized
+to `UNKNOWN`. That contract is valid because those states are not structural
+conflicts and have independent wrapper gates. The freshness requirement is on
+the later terminal consumer: once CI or another policy state changes without a
+new commit, the same HEAD can become `MERGEABLE` and must be allowed back into
+normal review. No normalization token is weakened, and no final CI,
+mergeability, approval, discussion, or merge requirement is bypassed.
+
+**Scope**: only the consumed-marker branch for
+`cause=mergeable-unknown` changes. Substantive verdicts,
+`dev-actionable=false`, confirmed-complete sessions, changed-HEAD routing,
+live-wrapper deferral, other non-substantive causes, and shared dev-new budgets
+retain their prior behavior.
+
+**Producer**:
+`lib-review-mergeable.sh::review_refresh_mergeability_once` (one-shot
+provider read with two state/HEAD snapshots);
+`lib-dispatch.sh::_same_head_verdict_aware_recovery` (terminal consumer).
+
+**Consumer**: dispatcher Step 4a.5 pending-dev convergence.
+
+**Status**: **ENFORCED** (closes #545).
+
+**Tests**:
+`tests/unit/test-issue-545-same-head-mergeability-freshness.sh` —
+TC-545-FRESH-001 (`UNKNOWN -> MERGEABLE` avoids stale stall),
+TC-545-FRESH-002 (`UNKNOWN -> CONFLICTING` re-enters the canonical preflight),
+TC-545-FRESH-003 (fresh persistent `UNKNOWN` stalls),
+TC-545-FRESH-004 (provider-read failure defers distinctly),
+TC-545-FRESH-005 (substantive budget behavior unchanged),
+TC-545-FRESH-006 (a changed initial HEAD requeues without reading mergeability),
+TC-545-FRESH-007 (a post-read HEAD change proves the second snapshot is
+load-bearing), and
+TC-545-TRACE-001 (two initial `UNKNOWN` preflights followed by same-HEAD
+`MERGEABLE` reaches normal review with no manual label change or commit).
+`tests/unit/test-dispatcher-review-disposition-routing.sh::TC-E2E-REBASE-054`
+pins operational defer to no `JUST_DISPATCHED` entry and a repeated-tick
+INV-128 stall.
+`tests/unit/test-chp-gitlab-reads.sh::TC-P33-031` separately pins
+`ci_still_running -> UNKNOWN`; the review mergeability and CI-rollup suites pin
+the unchanged final gates.
+
+**Cross-references**:
+- [INV-125](#inv-125-a-resolved-dev-session-id-whose-completion-is_session_completed-cannot-confirm-a-non-terminal-stop-reason-such-as-api_error-a-non-claude-dev-cli-or-an-unreadable-log-with-no-live-wrapper-gets-the-same-bounded-verdict-aware-recovery-as-the-inv-111-self-heal-branch--and-every-marker-present-same-head-fall-through-escalates-to-mark_stalled-never-the-residual-park) — owns the shared retry marker and bounded recovery table; this invariant adds the mutable-provider-evidence freshness exception.
+- [INV-147](#inv-147-a-head-pinned-mergeability-preflight-routes-known-conflicts-before-e2e-and-produces-strict-durable-disposition-evidence) — owns the canonical normal-review outcomes after a fresh requeue.
+- [INV-128](#inv-128-any-non-terminal-issue-whose-observable-state-fingerprint-label-pr-head-non-idempotent-comment-count-marker-digest-stays-unchanged-for-liveness_notice_ticks-default-6-consecutive-dispatcher-ticks-gets-one-operator-visible-tier-1-escalation-and-after-liveness_stall_ticks-default-18-further-unchanged-ticks-is-unconditionally-transitioned-to-stalled-with-a-structured-reasonliveness-timeout-report--the-pipelines-first-global-liveness-invariant-every-non-terminal-issue-either-changes-observable-state-or-is-escalated-within-a-bounded-number-of-ticks) — bounds persistent provider-read failure without misclassifying it as current mergeability evidence.
+- [`docs/designs/issue-545-same-head-mergeability-freshness.md`](../designs/issue-545-same-head-mergeability-freshness.md) — decision record and failure-mode diagram.
 
 ---

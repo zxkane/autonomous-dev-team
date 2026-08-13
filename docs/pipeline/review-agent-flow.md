@@ -170,7 +170,7 @@ before either INV-46 E2E lane can start.
 |---|---|
 | `MERGEABLE` | Emit no disposition and continue through INV-46 and fan-out. |
 | `CONFLICTING` | Skip E2E/fan-out and invoke the canonical conflict route below. |
-| Persistent `UNKNOWN` or empty | Persist `result=mergeable-unknown` plus `failed-non-substantive cause=mergeable-unknown`, then route through `pending-dev` for the existing bounded review-aware retry. No `Auto-merge failed:` marker is emitted. |
+| Persistent `UNKNOWN` or empty | Persist `result=mergeable-unknown` plus `failed-non-substantive cause=mergeable-unknown`, then route through `pending-dev` for the existing bounded review-aware retry. If the same-HEAD retry marker is already consumed, INV-149 refreshes provider state before any terminal stall. No `Auto-merge failed:` marker is emitted. |
 | PR no longer OPEN | Reuse INV-54 remove-only cleanup. Do not emit a disposition, conflict marker, or `pending-dev`. |
 | HEAD changed | Emit no stale-HEAD disposition; route non-substantively to `pending-review` with `cause=head-changed`. |
 | Either snapshot unreadable | The HEAD cannot be pinned safely. Emit no disposition and retry non-substantively through `pending-review`. |

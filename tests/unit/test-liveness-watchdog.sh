@@ -106,7 +106,7 @@ assert_eq "TC-LIVENESS-005 marker-digest change -> different fingerprint" "true"
 # producer shape (lib-dispatch.sh's `_same_head_verdict_aware_recovery`),
 # byte-matched from that call site, not a shortened parenthetical.
 comments_baseline='[{"authorKind":"bot","body":"hello"}]'
-stale_verdict_body006='PR #12 HEAD `sha-A` already reviewed with FAILED verdict; awaiting new commits before re-review. A dev wrapper appears to still be running for this issue, or a concurrent dispatcher tick is mid-dispatch — this is a transient wait, not a permanent park (`stale-verdict:sha-A`).'
+stale_verdict_body006='PR #12 HEAD `sha-A` already reviewed with FAILED verdict; awaiting a safe recovery decision. A dev wrapper may still be running, a concurrent dispatcher tick may be mid-dispatch, or current provider evidence may be unreadable — this is a transient wait bounded by the liveness watchdog (`stale-verdict:sha-A`).'
 comments_with_idempotent=$(jq -n --arg b "$stale_verdict_body006" '[{"authorKind":"bot","body":"hello"},{"authorKind":"bot","body":$b}]')
 count_baseline=$(_liveness_non_idempotent_count "$comments_baseline")
 count_with_idempotent=$(_liveness_non_idempotent_count "$comments_with_idempotent")

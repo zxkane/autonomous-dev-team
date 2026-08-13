@@ -65,6 +65,7 @@ pending_dev --> in_progress: Step 4 review-aware (completed session + substantiv
 pending_dev --> in_progress: Step 4 review-aware (completed session, verdict=none, no PR → dev-new) [INV-123]
 pending_dev --> pending_review: Step 4 review-aware (completed session + non-substantive review failure, under retry cap) [INV-35]
 pending_dev --> pending_review: Step 4 PR-exists short-circuit (a PR already references this issue)
+pending_dev --> pending_review: Same-HEAD terminal refresh is MERGEABLE or CONFLICTING [INV-149]
 pending_dev --> in_progress: Step 4a.5 self-heal (same-HEAD FAILED verdict + no resolvable session id + no live wrapper -> bounded dev-new) [INV-111]
 pending_dev --> in_progress: Step 4a.5 crashed-session recovery (same-HEAD FAILED verdict + resolved session id whose completion is unprovable + no live wrapper -> bounded dev-new) [INV-125]
 pending_dev --> stalled: Step 4 current dev attempt cannot read conflict context on unchanged reviewed HEAD [INV-147]
