@@ -160,6 +160,26 @@ _LIVENESS_GRAMMARS_JSON=$(cat <<'_LIVENESS_GRAMMARS_JSON_EOF'
     "digest": true
   },
   {
+    "name": "same-head-mergeability-requeue:",
+    "re": "^<!-- same-head-mergeability-requeue: issue=[0-9]+ head=[0-9a-f]{40} session=[^ \\n]+ flip=[0-9]+ status=(MERGEABLE|CONFLICTING) -->\\nPR (#[0-9]+|\\(number unknown\\)) HEAD `[0-9a-f]{40}` now has fresh provider mergeability `(MERGEABLE|CONFLICTING)`\\. Re-routing to review so the normal preflight and final gates act on current evidence\\.$",
+    "digest": true
+  },
+  {
+    "name": "same-head-refresh-flip:",
+    "re": "^<!-- review-aware-flip:non-substantive cause=mergeable-unknown session=[^ \\n]+ head=[0-9a-f]{40} source=same-head-refresh flip=[0-9]+ -->$",
+    "digest": true
+  },
+  {
+    "name": "same-head-mergeability-head-changed:",
+    "re": "^<!-- same-head-mergeability-head-changed: issue=[0-9]+ previous=[0-9a-f]{40} current=[0-9a-f]{40} -->\\nPR HEAD changed during same-HEAD mergeability revalidation \\(`[0-9a-f]{40}` -> `[0-9a-f]{40}`\\)\\. Re-queuing review so the current HEAD is evaluated without stale evidence\\.$",
+    "digest": true
+  },
+  {
+    "name": "same-head-mergeability-requeue-limit:",
+    "re": "^<!-- same-head-mergeability-requeue-limit: issue=[0-9]+ head=[0-9a-f]{40} session=[^ \\n]+ count=[0-9]+ limit=[0-9]+ -->\\nPR (#[0-9]+|\\(number unknown\\)) HEAD `[0-9a-f]{40}` reached the same-HEAD mergeability refresh requeue limit \\([0-9]+/[0-9]+\\) without converging through normal review\\. Marking stalled rather than requeueing indefinitely\\. @[a-zA-Z0-9_-]+ please investigate\\.$",
+    "digest": true
+  },
+  {
     "name": "crashed-session-retry:",
     "re": "^PR (#[0-9]+|\\(number unknown\\)) HEAD `[^`\\n]+` was reviewed with a FAILED verdict, and a `Dev Session ID:` was resolved for the prior dev session, but its completion could not be confirmed \\(a non-terminal stop reason such as `api_error`, a non-claude dev CLI, or an unreadable session log\\), and no dev wrapper is currently running\\. Dispatching a fresh dev session rather than parking indefinitely\\. \\(`crashed-session-retry:[^`\\n]*`\\)$",
     "digest": true

@@ -1165,6 +1165,34 @@ genuine_inv25_093='Label hygiene: stripped `foo`, `bar` from `some-issue` issue 
 assert_eq "TC-LIVENESS-093 genuine full-body INV-25-hygiene: registers in the digest" "INV-25-hygiene:" \
   "$(_liveness_marker_digest "$(jq -n --arg b "$genuine_inv25_093" '[{"authorKind":"bot","createdAt":"t","body":$b}]')")"
 
+genuine_samehead_requeue_095=$(cat <<'REQUEUE095'
+<!-- same-head-mergeability-requeue: issue=545 head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa session=sid-545 flip=1 status=MERGEABLE -->
+PR #42 HEAD `aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa` now has fresh provider mergeability `MERGEABLE`. Re-routing to review so the normal preflight and final gates act on current evidence.
+REQUEUE095
+)
+assert_eq "TC-LIVENESS-099 genuine full-body same-HEAD mergeability intent registers in the digest" "same-head-mergeability-requeue:" \
+  "$(_liveness_marker_digest "$(jq -n --arg b "$genuine_samehead_requeue_095" '[{"authorKind":"bot","createdAt":"t","body":$b}]')")"
+
+genuine_samehead_flip_096='<!-- review-aware-flip:non-substantive cause=mergeable-unknown session=sid-545 head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa source=same-head-refresh flip=1 -->'
+assert_eq "TC-LIVENESS-100 genuine full-body same-HEAD completed flip registers in the digest" "same-head-refresh-flip:" \
+  "$(_liveness_marker_digest "$(jq -n --arg b "$genuine_samehead_flip_096" '[{"authorKind":"bot","createdAt":"t","body":$b}]')")"
+
+genuine_samehead_changed_097=$(cat <<'CHANGED097'
+<!-- same-head-mergeability-head-changed: issue=545 previous=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa current=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb -->
+PR HEAD changed during same-HEAD mergeability revalidation (`aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa` -> `bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb`). Re-queuing review so the current HEAD is evaluated without stale evidence.
+CHANGED097
+)
+assert_eq "TC-LIVENESS-101 genuine full-body same-HEAD changed-HEAD intent registers in the digest" "same-head-mergeability-head-changed:" \
+  "$(_liveness_marker_digest "$(jq -n --arg b "$genuine_samehead_changed_097" '[{"authorKind":"bot","createdAt":"t","body":$b}]')")"
+
+genuine_samehead_limit_098=$(cat <<'LIMIT098'
+<!-- same-head-mergeability-requeue-limit: issue=545 head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa session=sid-545 count=2 limit=2 -->
+PR #42 HEAD `aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa` reached the same-HEAD mergeability refresh requeue limit (2/2) without converging through normal review. Marking stalled rather than requeueing indefinitely. @zxkane please investigate.
+LIMIT098
+)
+assert_eq "TC-LIVENESS-102 genuine full-body same-HEAD retry-limit report registers in the digest" "same-head-mergeability-requeue-limit:" \
+  "$(_liveness_marker_digest "$(jq -n --arg b "$genuine_samehead_limit_098" '[{"authorKind":"bot","createdAt":"t","body":$b}]')")"
+
 # TC-LIVENESS-094: dispatcher-gate-fail-breaker: — the SECOND big multi-line
 # breaker report (sibling to dispatcher-convergence-breaker:, pinned by
 # TC-LIVENESS-083 above), transcribed byte-for-byte from its real

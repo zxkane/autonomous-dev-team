@@ -457,12 +457,12 @@
       "to": "pending_review",
       "event": "dispatcher-step4a5-refresh-stale-mergeability",
       "actor": "dispatcher",
-      "guards": ["same-head-reviewed-failed", "verdict-fail-nonsubstantive-mergeable-unknown", "non-substantive-marker-present", "no-live-dev-wrapper", "provider-refresh-same-open-head", "provider-refresh-known"],
+      "guards": ["same-head-reviewed-failed", "verdict-fail-nonsubstantive-mergeable-unknown", "non-substantive-marker-present", "no-live-dev-wrapper", "provider-refresh-same-open-head", "provider-refresh-known", "review-flips-below-limit"],
       "actions": ["remove-label:pending-dev", "add-label:pending-review", "comment:fresh-mergeability-requeue"],
       "code_site": "lib-dispatch.sh _same_head_refresh_requeue_review(): INV-149 freshness requeue",
       "mermaid": "pending_dev --> pending_review: Same-HEAD terminal refresh is MERGEABLE or CONFLICTING [INV-149]",
       "inv_refs": ["INV-149", "INV-147", "INV-125"],
-      "note": "A consumed self-heal-non-substantive:<head> marker cannot make historical mergeable-unknown evidence terminal. A HEAD-pinned current MERGEABLE or CONFLICTING observation re-enters normal review; review preflight then reaches fan-out or the canonical conflict/rebase route. Persistent UNKNOWN stalls through the existing bound. Provider-read failure stays pending-dev with operational-defer rc=3, so JUST_DISPATCHED does not suppress the INV-128 bound."
+      "note": "A consumed self-heal-non-substantive:<head> marker cannot make historical mergeable-unknown evidence terminal. A HEAD-pinned bounded poll that resolves MERGEABLE or CONFLICTING re-enters normal review under the per-session/per-HEAD REVIEW_RETRY_LIMIT; review preflight then reaches fan-out or the canonical conflict/rebase route. Reservations and completion markers union by session+HEAD+ordinal, so pairs and duplicate posts count once, and later completed-session routing observes the same budget. Fully successful persistent UNKNOWN stalls. Provider, malformed accounting, or reservation-I/O failure stays pending-dev with operational-defer rc=3 so INV-128 remains effective. A label failure also returns rc=3, but its durable pre-transition reservation counts toward the cap, so no per-issue failure aborts the project tick or escapes convergence."
     },
     {
       "id": "dispatch-pending-dev-selfheal-lost-session",
@@ -524,10 +524,10 @@
       "actor": "dispatcher",
       "guards": ["review-flips-at-limit"],
       "actions": ["remove-label:pending-dev", "add-label:stalled", "comment:marking-stalled"],
-      "code_site": "lib-dispatch.sh mark_stalled() (from handle_completed_session_routing review cap branch)",
+      "code_site": "lib-dispatch.sh mark_stalled() (from completed-session or INV-149 freshness review-cap branch)",
       "mermaid": "pending_dev --> stalled: Step 4 review-aware (non-substantive review-retry cap reached) [INV-35]",
-      "inv_refs": ["INV-35"],
-      "note": "Non-substantive flip count >= REVIEW_RETRY_LIMIT."
+      "inv_refs": ["INV-35", "INV-149"],
+      "note": "Non-substantive flip count >= REVIEW_RETRY_LIMIT. INV-149 counts durable pre-transition freshness reservations scoped to the current session and full HEAD, including failed or ambiguous label writes."
     },
     {
       "id": "dispatch-stalled-noprogress-substantive",

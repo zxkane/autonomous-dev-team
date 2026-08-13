@@ -130,16 +130,22 @@ _review_optional_run_footer() {
 }
 
 _review_poll_mergeable() {
-  local pr="$1" out_var="$2"
+  local pr="$1" out_var="$2" read_failure_var="${3:-}"
   local retries="${MERGEABLE_RETRIES:-3}" delay="${MERGEABLE_RETRY_DELAY_SECONDS:-10}"
-  local attempt _rpm_status=""
+  local attempt _rpm_status="" _rpm_rc=0 _rpm_had_read_failure=0
   [[ "$retries" =~ ^[1-9][0-9]*$ ]] || retries=3
   [[ "$delay" =~ ^[0-9]+$ ]] || delay=10
 
   for ((attempt = 1; attempt <= retries; attempt++)); do
     # A provider read failure is classified like an empty UNKNOWN response.
-    _rpm_status=$(chp_mergeable "$pr" 2>/dev/null || true)
-    [[ -n "$_rpm_status" && "${_rpm_status^^}" != "UNKNOWN" ]] && break
+    _rpm_rc=0
+    _rpm_status=$(chp_mergeable "$pr" 2>/dev/null) || _rpm_rc=$?
+    if [[ "$_rpm_rc" -ne 0 ]]; then
+      _rpm_had_read_failure=1
+      _rpm_status=""
+    fi
+    [[ "$(_classify_mergeable_gate "$_rpm_status")" != "block-nonsubstantive" ]] \
+      && break
     if [[ "$attempt" -lt "$retries" ]]; then
       if declare -F log >/dev/null 2>&1; then
         log "PR #${pr} mergeable status is '${_rpm_status:-<empty>}' (attempt ${attempt}/${retries}); waiting for the provider to settle..."
@@ -148,6 +154,9 @@ _review_poll_mergeable() {
     fi
   done
   printf -v "$out_var" '%s' "$_rpm_status"
+  if [[ -n "$read_failure_var" ]]; then
+    printf -v "$read_failure_var" '%s' "$_rpm_had_read_failure"
+  fi
 }
 
 _review_pr_snapshot() {
@@ -213,22 +222,22 @@ review_validate_pinned_pr() {
   printf -v "$action_var" '%s' "proceed"
 }
 
-# review_refresh_mergeability_once
+# review_refresh_mergeability
 #   PR EXPECTED_HEAD HEAD_OUT STATUS_OUT ACTION_OUT
 #
-# Revalidates one mutable mergeability observation against provider snapshots
-# of the same open HEAD. Unlike the bounded review preflight below, a
-# chp_mergeable failure remains distinguishable from a successful UNKNOWN read:
-# callers deciding whether historical UNKNOWN evidence is still current must
-# not fabricate a failed read into fresh terminal evidence.
+# Revalidates mutable mergeability against provider snapshots of the same open
+# HEAD. It uses the same bounded settling poll as review preflight, but preserves
+# whether any provider read failed. A terminal UNKNOWN requires every attempted
+# read to succeed; a poll containing only UNKNOWN/read-failure outcomes remains
+# operationally unreadable rather than fabricating fresh terminal evidence.
 #
 # ACTION_OUT uses the review preflight action vocabulary: proceed,
 # conflict-rebase, mergeable-unknown, closed, head-changed, or read-failed.
-review_refresh_mergeability_once() {
+review_refresh_mergeability() {
   local pr="$1" expected_head="$2"
   local head_var="$3" status_var="$4" action_var="$5"
   local state="" head="" branch="" action=""
-  local status="" status_rc=0
+  local status="" had_read_failure=0
 
   printf -v "$head_var" '%s' ""
   printf -v "$status_var" '%s' ""
@@ -242,7 +251,7 @@ review_refresh_mergeability_once() {
     return 0
   fi
 
-  status=$(chp_mergeable "$pr" 2>/dev/null) || status_rc=$?
+  _review_poll_mergeable "$pr" status had_read_failure
 
   review_validate_pinned_pr "$pr" "$head" \
     state head branch action
@@ -252,16 +261,16 @@ review_refresh_mergeability_once() {
     printf -v "$action_var" '%s' "$action"
     return 0
   fi
-  if [[ "$status_rc" -ne 0 ]]; then
-    return 0
-  fi
-
   case "$(_classify_mergeable_gate "$status")" in
     proceed) printf -v "$action_var" '%s' "proceed" ;;
     block-substantive)
       printf -v "$action_var" '%s' "conflict-rebase"
       ;;
-    *) printf -v "$action_var" '%s' "mergeable-unknown" ;;
+    *)
+      if [[ "$had_read_failure" == "0" ]]; then
+        printf -v "$action_var" '%s' "mergeable-unknown"
+      fi
+      ;;
   esac
 }
 

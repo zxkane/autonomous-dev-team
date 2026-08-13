@@ -105,8 +105,10 @@ assert_grep "TC-TOKENBUDGET-080 completed-session admission errors reach the tic
   '_completed_route_rc=\$\?' "$TICK"
 assert_grep "TC-TOKENBUDGET-080 pending-PR router distinguishes unhandled from errors" \
   '_pending_pr_route_rc.*-ne 1' "$TICK"
+assert_grep "TC-TOKENBUDGET-080 completed-session operational defer is preserved" \
+  '_completed_route_rc.*-eq 3' "$DISPATCH"
 assert_grep "TC-TOKENBUDGET-080 nested completed-session errors are propagated" \
-  '_completed_route_rc.*return 2' "$DISPATCH"
+  '_completed_route_rc.*-ne 0' "$DISPATCH"
 assert_grep "TC-TOKENBUDGET-080 self-heal admission errors are propagated" \
   '_recovery_token_gate_rc.*-ne 0' "$DISPATCH"
 assert_grep "TC-TOKENBUDGET-079 dev Step 5 retries pending invocation intents" \

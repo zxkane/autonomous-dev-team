@@ -86,7 +86,7 @@ Guards grounded here: `head-differs-from-reviewed`, `head-equals-reviewed`.
 |---|---|---|
 | `retries.count` | `lib-dispatch.sh:365-380` `count_retries` | `count_agent_failures` + `count_dispatcher_crashes`, gated by `_agent_started_since_stall` ([INV-19](invariants.md#inv-19-retry-counter-requires-confirmed-agent-startup)); counts only since the latest `Marking as stalled` cutoff ([INV-05](invariants.md#inv-05-retry-counter-cutoff-rule)) |
 | `retries.max` | `dispatcher-tick.sh` Step 4 | `MAX_RETRIES` (default 3) |
-| `retries.review_flip_count` | `lib-dispatch.sh:710-717` `count_review_aware_flips` | `gh issue view --json comments` + jq counts `review-aware-flip:non-substantive session=<id>` markers ([INV-35](invariants.md#inv-35-review-aware-resume-routing-for-completed-sessions)) |
+| `retries.review_flip_count` | `lib-dispatch.sh` `count_review_aware_flips` | `itp_list_comments` + strict jq parsing counts ordinary `review-aware-flip:non-substantive session=<id>` comments individually and unions INV-149 reservation/completion markers by `(session, HEAD, ordinal)`. Duplicate freshness posts count once; unreadable or malformed accounting returns nonzero rather than zero ([INV-35](invariants.md#inv-35-review-aware-resume-routing-for-completed-sessions), [INV-149](invariants.md#inv-149-a-consumed-same-head-non-substantive-retry-marker-cannot-make-a-historical-mergeable-unknown-observation-terminal-without-a-current-head-pinned-provider-read)) |
 | `retries.review_flip_limit` | `lib-dispatch.sh` `handle_completed_session_routing` | `REVIEW_RETRY_LIMIT` (default 2) |
 
 Guards grounded here: `retries-below-max`, `retries-at-max`,

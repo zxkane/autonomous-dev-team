@@ -7278,9 +7278,9 @@ Both call sites gate on `may_stall_now` (no live dev wrapper) BEFORE invoking th
 - `failed-non-substantive` → `label_swap pending-dev → pending-review` (re-review, not a `dev-new` — the code isn't the problem), bounded via the **shared** `self-heal-non-substantive:<head>` marker — the SAME marker namespace regardless of which cause requested the re-review, because a re-review costs the same either way; a separate per-cause marker would silently double the budget.
 - `failed-substantive` (dev-actionable=true) or `none` (fail OPEN, the same posture the pre-existing self-heal behavior and the classifier's own legacy no-trailer fallback take) → bounded `dev-new`, gated on a **shared** budget check across BOTH `self-heal-lost-session:<head>` AND `crashed-session-retry:<head>` — either marker present means this HEAD already consumed its one self-heal/crash-recovery `dev-new` with no progress, regardless of which cause is asking now.
 
-**Part 2 — closing the counting hole.** Every marker-present / budget-exhausted arm above is terminal once its underlying evidence is current. [INV-149] narrows the `mergeable-unknown` case: the marker proves budget consumption but the historical provider observation must be refreshed before it can justify `mark_stalled`. A current `MERGEABLE`/`CONFLICTING` re-enters review, a provider-read failure defers under INV-128, and a successful fresh `UNKNOWN` retains the direct stall. Other non-substantive causes and the shared dev-new budget still call `mark_stalled` directly. In a park, `count_retries` is frozen by construction (a park posts only an idempotent notice, which `count_retries` never counts — no dispatch, no countable comment), so usable marker-present evidence must never fall through merely to wait for `MAX_RETRIES`.
+**Part 2 — closing the counting hole.** Every marker-present / budget-exhausted arm above is terminal once its underlying evidence is current. [INV-149] narrows the `mergeable-unknown` case: the marker proves budget consumption but the historical provider observation must be refreshed before it can justify `mark_stalled`. A current `MERGEABLE`/`CONFLICTING` re-enters review under the existing per-session/per-HEAD `REVIEW_RETRY_LIMIT`; an undecided bounded poll containing a provider-read failure defers under INV-128; and only a fully successful poll that remains `UNKNOWN` retains the direct stall. Other non-substantive causes and the shared dev-new budget still call `mark_stalled` directly. In a park, `count_retries` is frozen by construction (a park posts only an idempotent notice, which `count_retries` never counts — no dispatch, no countable comment), so usable marker-present evidence must never fall through merely to wait for `MAX_RETRIES`.
 
-After this fix, the residual `stale-verdict:<head>` park is reachable ONLY for genuinely transient states: a dev wrapper is still alive (`may_stall_now` defers — Step 5 owns liveness), a concurrent tick holds the `dev-new` dispatch marker ([INV-108] — the helper returns 1, distinct from its `mark_stalled` arms which return 0), the helper's own comment-read preflight fails, or INV-149 cannot read current mergeability. INV-128 bounds either persistent read outage.
+After this fix, the residual `stale-verdict:<head>` park is reachable ONLY for genuinely transient states: a dev wrapper is still alive (`may_stall_now` defers — Step 5 owns liveness), a concurrent tick holds the `dev-new` dispatch marker ([INV-108] — the helper returns 1, distinct from its `mark_stalled` arms which return 0), the helper's own comment-read preflight fails, or INV-149 cannot finish its bounded provider poll / reservation read or write / label transition. INV-149 operational failures return `3`, so the caller omits `JUST_DISPATCHED`. Provider and reservation-I/O outages remain bounded by INV-128; repeated label failures are bounded directly because each attempted transition already owns a durable reservation.
 
 **Comment-fetch-failure preflight (PR #471 review fix).** Every downstream check in the helper — `classify_recent_review_verdict`, and the `self-heal-lost-session`/`crashed-session-retry`/`self-heal-non-substantive` marker-present probes — reads `itp_list_comments` and treats an EMPTY result as a legitimate negative (`verdict=none`, "marker absent"). Left unguarded, a transient comment-fetch failure (rate-limit/auth/network blip) produces the exact same empty shape, so it would misclassify into `mark_stalled` (a fetch failure looks like "budget already spent" — the marker-present checks default fail-CLOSED via `${_budget_spent:-1}`/`${_ns_present:-1}`, i.e. *empty read → treated as marker PRESENT*) or an unwarranted fresh `dev-new` (a fetch failure looks like `verdict=none`, which fails OPEN to a dispatch) against an otherwise-healthy issue — precisely the transient class this invariant reserved the residual park for. Fix: `_same_head_verdict_aware_recovery` preflights `itp_list_comments` once at entry; a non-zero rc returns 1 immediately (before touching `classify_recent_review_verdict` or any marker probe), so the caller falls through to the unchanged residual park instead of misrouting. A same-HEAD branch is only reached after a review-FAILED verdict has already posted at least one comment, so a genuinely empty comment list can never be legitimate here — any empty/failed read at this call site is definitionally transient.
 
@@ -9769,7 +9769,9 @@ The refresh is provider-neutral and HEAD-pinned:
 
 1. Read normalized PR state, full HEAD, and branch.
 2. Require the PR to be open at the expected full HEAD.
-3. Read `chp_mergeable` once while preserving its return code.
+3. Poll `chp_mergeable` with the existing `MERGEABLE_RETRIES` /
+   `MERGEABLE_RETRY_DELAY_SECONDS` bound while preserving whether any read
+   failed.
 4. Read normalized state and full HEAD again.
 5. Interpret the mergeability token only when both snapshots describe the same
    open expected HEAD.
@@ -9778,12 +9780,30 @@ The resulting decision table is:
 
 | Fresh result | Dispatcher action |
 |---|---|
-| `MERGEABLE` | `pending-dev -> pending-review`; the normal review preflight, E2E, fan-out, CI, approval, and merge gates remain authoritative. |
-| `CONFLICTING` | `pending-dev -> pending-review`; the normal preflight enters INV-147's canonical conflict/rebase route and writes its required durable evidence. |
-| Successful `UNKNOWN`/empty/unrecognized token | Retain INV-125's direct `mark_stalled`; the historical verdict now has current same-HEAD corroboration. |
-| `chp_mergeable` non-zero, malformed snapshot, or unavailable PR number | Keep the residual `stale-verdict:<head>` notice but return operational defer (`3`), without dispatching, requeueing, or stalling. The tick therefore omits `JUST_DISPATCHED` and INV-128 bounds a persistent outage. A read failure is never fabricated as fresh `UNKNOWN`. |
+| `MERGEABLE` | Under the per-session/per-HEAD `REVIEW_RETRY_LIMIT`, persist a counted requeue intent reservation, then transition `pending-dev -> pending-review`. The normal review preflight, E2E, fan-out, CI, approval, and merge gates remain authoritative. |
+| `CONFLICTING` | Use the same bounded requeue; the normal preflight enters INV-147's canonical conflict/rebase route and writes its required durable evidence. |
+| Every bounded read succeeds but remains `UNKNOWN`/empty/unrecognized | Retain INV-125's direct `mark_stalled`; the historical verdict now has persistent current same-HEAD corroboration. |
+| Poll never becomes decisive and any `chp_mergeable` read fails; malformed snapshot; unavailable PR number | Keep the residual `stale-verdict:<head>` notice but return operational defer (`3`), without dispatching, requeueing, or stalling. The tick omits `JUST_DISPATCHED` and INV-128 bounds the outage. A failed read is never fabricated as fresh `UNKNOWN`. |
+| Requeue reservation count/read/write fails | Return operational defer (`3`) without fabricating a zero count; INV-128 bounds the stable outage. |
+| Label transition fails or reports an ambiguous failure | Return operational defer (`3`) below the cap. The pre-transition reservation still counts, so repeated failures converge at `REVIEW_RETRY_LIMIT`; never return `2` or abort the remaining project tick. |
+| Post-transition completion marker fails | Continue through normal review; the durable pre-transition reservation already consumed the attempt. |
+| Fresh requeue reservation count reaches `REVIEW_RETRY_LIMIT` | `mark_stalled`; neither repeated transitions nor partial comment failures can escape the bound. Duplicate comments carrying the same session + HEAD + ordinal count once. |
 | HEAD changed | Requeue `pending-review` without binding the old verdict to the new HEAD. |
 | PR closed/merged | No-op; Step 0 terminal reconciliation owns cleanup. |
+
+`count_review_aware_flips` is the shared budget reader for both the freshness
+path and later completed-session routing. Ordinary
+`review-aware-flip:non-substantive` comments count individually. An INV-149
+reservation and its optional completion marker form one logical attempt keyed
+by session + full HEAD + ordinal; the union of those keys is counted, so
+reservation/completion pairs and concurrent duplicate posts cannot double
+spend the budget. A reservation without completion still counts. Comment
+transport failure, malformed JSON/schema, or a malformed recognized marker
+returns nonzero; `handle_completed_session_routing` propagates operational
+defer (`3`) without label mutation. Its same-HEAD caller preserves that code,
+and the direct Step 4b caller handles it with `continue`, so neither entry
+point aborts the remaining project scan or adds the issue to `JUST_DISPATCHED`.
+Other nested nonzero errors retain their prior hard-error mapping.
 
 **GitLab interaction**: policy states such as `ci_still_running`,
 `ci_must_pass`, `not_approved`, and `discussions_not_resolved` remain normalized
@@ -9801,8 +9821,8 @@ live-wrapper deferral, other non-substantive causes, and shared dev-new budgets
 retain their prior behavior.
 
 **Producer**:
-`lib-review-mergeable.sh::review_refresh_mergeability_once` (one-shot
-provider read with two state/HEAD snapshots);
+`lib-review-mergeable.sh::review_refresh_mergeability` (bounded poll with two
+state/HEAD snapshots);
 `lib-dispatch.sh::_same_head_verdict_aware_recovery` (terminal consumer).
 
 **Consumer**: dispatcher Step 4a.5 pending-dev convergence.
@@ -9818,7 +9838,18 @@ TC-545-FRESH-004 (provider-read failure defers distinctly),
 TC-545-FRESH-005 (substantive budget behavior unchanged),
 TC-545-FRESH-006 (a changed initial HEAD requeues without reading mergeability),
 TC-545-FRESH-007 (a post-read HEAD change proves the second snapshot is
-load-bearing), and
+load-bearing),
+TC-545-FRESH-008 (one `UNKNOWN` settles to `MERGEABLE` within the poll),
+TC-545-FRESH-009 (fresh-state requeues stop at `REVIEW_RETRY_LIMIT`), and
+TC-545-FRESH-010 (repeated label failure reserves attempts and converges without
+tick-aborting rc=2),
+TC-545-FRESH-011 (reservation-count read failure cannot fabricate zero), and
+TC-545-FRESH-012 (completion-marker failure cannot escape the cap),
+TC-545-FRESH-013 (duplicate reservation/completion posts count once),
+TC-545-FRESH-014 (later completed-session routing inherits freshness spend),
+TC-545-FRESH-015 (completed-session accounting read failure defers), and
+TC-545-FRESH-016 (malformed accounting fails nonzero),
+TC-545-FRESH-017 (the direct tick caller continues after defer), plus
 TC-545-TRACE-001 (two initial `UNKNOWN` preflights followed by same-HEAD
 `MERGEABLE` reaches normal review with no manual label change or commit).
 `tests/unit/test-dispatcher-review-disposition-routing.sh::TC-E2E-REBASE-054`
@@ -9827,6 +9858,9 @@ INV-128 stall.
 `tests/unit/test-chp-gitlab-reads.sh::TC-P33-031` separately pins
 `ci_still_running -> UNKNOWN`; the review mergeability and CI-rollup suites pin
 the unchanged final gates.
+`tests/unit/test-liveness-watchdog.sh` TC-LIVENESS-099..102 pins each new
+producer body to a whole-body grammar so intent, completion, changed-HEAD, and
+retry-limit comments do not reset the watchdog's non-idempotent count.
 
 **Cross-references**:
 - [INV-125](#inv-125-a-resolved-dev-session-id-whose-completion-is_session_completed-cannot-confirm-a-non-terminal-stop-reason-such-as-api_error-a-non-claude-dev-cli-or-an-unreadable-log-with-no-live-wrapper-gets-the-same-bounded-verdict-aware-recovery-as-the-inv-111-self-heal-branch--and-every-marker-present-same-head-fall-through-escalates-to-mark_stalled-never-the-residual-park) — owns the shared retry marker and bounded recovery table; this invariant adds the mutable-provider-evidence freshness exception.
