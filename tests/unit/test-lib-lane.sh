@@ -221,7 +221,7 @@ bash -c '
 ' 2>/dev/null
 LANE_DIR_FROM_TEST=$(cat "$PGID_TEST_ROOT/lanedir.txt" 2>/dev/null || true)
 if [[ -n "$LANE_DIR_FROM_TEST" && -f "$LANE_DIR_FROM_TEST/pgids" ]]; then
-  PGID_LINE_COUNT=$(grep -cE '^[0-9]+ agent [0-9]+$' "$LANE_DIR_FROM_TEST/pgids" 2>/dev/null || echo 0)
+  PGID_LINE_COUNT=$(grep -cE '^[0-9]+ agent [0-9]+ (v2-linux:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}:[0-9]+|v1-bsd:[^[:space:]]+|-)$' "$LANE_DIR_FROM_TEST/pgids" 2>/dev/null || true)
   if [[ "$PGID_LINE_COUNT" -ge 1 ]]; then
     assert_pass "TC-LGC2-030: _run_with_timeout appended a well-formed pgids line"
   else
@@ -283,7 +283,7 @@ bash -c '
     lane_record_pgid "$LANE_DIR" "$((10000 + i))" "fanout:agent$i" &
   done
   wait
-  BAD=$(grep -vcE "^[0-9]+ \S+ [0-9]+\$" "$LANE_DIR/pgids" 2>/dev/null)
+  BAD=$(grep -vcE "^[0-9]+ \S+ [0-9]+ (v2-linux:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}:[0-9]+|v1-bsd:[^[:space:]]+|-)\$" "$LANE_DIR/pgids" 2>/dev/null)
   LINES=$(wc -l < "$LANE_DIR/pgids")
   echo "bad=$BAD lines=$LINES"
 ' > "$TMPROOT/tc034.out" 2>/dev/null
@@ -780,7 +780,7 @@ assert_contains "TC-LGC2-070: lane_set/lane_get round-trips a value containing '
 assert_contains "TC-LGC2-071: lane_set/lane_get round-trips '&[]*' without corruption" "SPECIAL:abc&foo*bar[baz]123" "$OUT7X"
 assert_contains "TC-LGC2-072: lane_set appends a previously-absent key" "NEWKEY:hello" "$OUT7X"
 assert_contains "TC-LGC2-074: lane_set/lane_get preserves a literal backslash-escape sequence verbatim (no awk -v escape interpretation)" "ESCAPES:foo\nbar\tbaz" "$OUT7X"
-assert_contains "TC-LGC2-074b: the lane file is not corrupted with a bogus injected line" "LANE-LINE-COUNT:17" "$OUT7X"
+assert_contains "TC-LGC2-074b: the lane file is not corrupted with a bogus injected line" "LANE-LINE-COUNT:18" "$OUT7X"
 
 # TC-073: concurrent lane_set calls never corrupt the file.
 bash -c '

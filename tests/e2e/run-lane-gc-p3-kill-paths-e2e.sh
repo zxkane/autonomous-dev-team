@@ -79,7 +79,10 @@ run_scenario() {
   fi
 
   local outlog="$TMP/dispatch-out-${label}.log"
-  setsid env AUTONOMOUS_PID_DIR="$piddir" PROJECT_ID="e2e-lgc3-${label}" \
+  # P8 makes the opportunistic GC enforce by default. Keep that real entry
+  # point hermetic: it may mutate this fixture state, never the host registry.
+  setsid env ADT_STATE_ROOT="$TMP/state-${label}" \
+    AUTONOMOUS_PID_DIR="$piddir" PROJECT_ID="e2e-lgc3-${label}" \
     PROJECT_DIR="$projdir" KILL_STALE_PGREP_FALLBACK="$pgrep_fallback" \
     bash "$DISPATCH_LOCAL" dev-new "$issue" >"$outlog" 2>&1 &
   local dispatch_sid=$!
