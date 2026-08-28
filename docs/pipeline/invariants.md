@@ -9419,17 +9419,18 @@ invariant. `tests/unit/test-is-git-command-non-executable-regions.sh`
 git-free shell consumers, generic/quoted/dynamic operation forms, the
 five-second hook budget, and the fail-closed substitution, interpreter,
 pipeline, and shadowing controls. Ambiguous inputs at least 4 KiB take one
-bounded tokenization pass plus conservative literal scanning instead of the
-older repeated fallback passes; approximately 20 KiB operation-bearing and
-git-free cases pin the five-second hook budget.
-`tests/unit/test-block-push-regex.sh` (`TC-BP-35..57`) covers the same budget,
+linear static candidate pass before any bounded tokenization fallback instead
+of the older repeated character scans; approximately 20 KiB
+operation-bearing and git-free cases pin the five-second hook budget.
+`tests/unit/test-block-push-regex.sh` (`TC-BP-35..60`) covers the same budget,
 chained, multiline, and prefixed feature pushes, git-free expansions,
 non-executable and shell-consumed push text, shell redirections, brace groups,
 line continuations, mixed quote fragments, dynamic refspecs, arithmetic
 expansions, ordinary data pipelines, benign versus executable substitutions,
-multi-stage and compound stdin evaluators, substitution-bearing large inputs,
-linear long-pipeline handling, and fail-closed handling for an unreadable
-operation or refspec.
+multi-stage and compound stdin evaluators, compact `env -S` forms, alternate
+shell applets, substitution-bearing large inputs, linear long-pipeline and
+grouped-segment handling, and fail-closed handling for an unreadable operation
+or refspec.
 
 **Cross-reference**:
 [`docs/designs/block-commit-command-context.md`](../designs/block-commit-command-context.md)
@@ -9769,7 +9770,7 @@ TC-BP-35 pins the five-second hook budget and fail-closed fallback when an
 approximately 8 KiB ambiguous command contains a real trunk push but the
 bounded refspec parser cannot produce a destination token.
 
-TC-BP-36..57 pin the review regressions. A single structured token snapshot is
+TC-BP-36..60 pin the review regressions. A single structured token snapshot is
 shared by destination and refspec parsing, with newlines and shell control
 operators preserving command boundaries. Each executable push in chained,
 multiline, subshell, assignment-prefixed, or supported wrapper-prefixed command
@@ -9789,10 +9790,13 @@ executing output process substitutions, and `xargs` commands whose appended
 arguments complete a wrapper. A command-position scan descends through
 `if`/loop/`case`/group bodies and inspects static arguments of otherwise unknown
 launchers, while explicit data commands remain data-only. `env -S` and
-`--split-string` command text is reconstructed with its trailing arguments and
-classified by the same scanner. Classification follows each pipeline once until
-a command-list boundary, so data-only filters cannot hide a later executable
-consumer and a long benign pipeline does not cause repeated downstream walks.
+`--split-string` command text, including attached and clustered short-option
+forms, is reconstructed with its trailing arguments and classified by the same
+scanner. Alternate shell names and BusyBox shell applets execute stdin.
+Classification follows each pipeline once until a command-list boundary, so
+data-only filters cannot hide a later executable consumer. Enclosing compound
+stages are located once per token snapshot and cached, so grouped producers and
+long benign pipelines do not cause repeated downstream walks.
 Literal, ANSI-quoted, quote-concatenated, and dynamic shell input therefore
 fails closed without classifying arithmetic expansion as executable. Command
 and process substitution bodies are analyzed independently by the shared shell
@@ -9803,17 +9807,21 @@ rather than refspecs. A dynamic global argument followed by more global flags
 and then a definite non-push operation remains allowed, while a dynamic refspec
 remains unknown because its runtime value could be trunk. Mixed quote fragments
 cannot hide either the push operation or a trunk refspec.
-Approximately 20–21 KiB git-free, substitution-bearing, PR-body, and
-single-word push-option inputs stay inside the five-second budget. Ambiguous
-substitution-bearing inputs at least 4 KiB use the same bounded tokenization and
-conservative scan as the shared detector instead of the character-wise
-substitution scanner. When that resolver scan proves no push, expansion-only
-data reuses the negative result; data that reaches an executable pipeline
-consumer still enters the fail-closed refspec parser.
-Two hundred data-only pipeline stages complete in approximately 0.21 seconds,
-and a roughly 3 KiB mixed filter pipeline completes in approximately 0.31
-seconds in the pinned regression environment; both remain below the five-second
-hook budget without relying on an early executable-consumer short circuit.
+Approximately 20–21 KiB PR-body and single-word push-option inputs stay inside
+the five-second budget. Ambiguous substitution-bearing inputs at least 4 KiB
+use a linear static command-position scan before the bounded tokenizer. The
+scan preserves quote concatenation, ignores data-command arguments, and can
+prove an explicit trunk destination without paying for full refspec parsing.
+When the resolver proves no push and the command has no pipeline, expansion-only
+data and large heredoc prose reuse that negative result; data that reaches an
+executable pipeline consumer still enters the fail-closed refspec parser.
+Two hundred data-only pipeline stages complete in approximately 0.21–0.34
+seconds. Two hundred grouped data segments complete in approximately 0.71
+seconds through `cat` and 1.01 seconds through `bash`. Approximately 41 KiB
+benign substitution input allows in 0.51 seconds, while literal and
+quote-concatenated trunk controls block in 0.21–0.31 seconds in the pinned
+regression environment. All remain below the five-second hook budget without
+relying on an early executable-consumer short circuit.
 
 Destination parsing consumes the same non-executable-region projection as
 operation detection. The direct-command parser returns `0` when every matched

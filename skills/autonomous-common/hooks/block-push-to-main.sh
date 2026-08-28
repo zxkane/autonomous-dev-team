@@ -50,6 +50,11 @@ if [[ -z "$anchor_dir" || ! -d "$anchor_dir" ]]; then
   anchor_dir="$(pwd -P)"
 fi
 
+# Trunk branch name (issue #478, [INV-131]): BASE_BRANCH (the wrapper
+# resolves+exports it once at startup) -> TRUNK_BRANCH (this hook's pre-#478
+# override, still honored standalone) -> "main" default.
+trunk="${BASE_BRANCH:-${TRUNK_BRANCH:-main}}"
+
 # Which repository issues the push. Only resolver rc=0 yields a usable target;
 # either non-zero result still receives the push parser's narrow executable-data
 # check below. Quoted text piped into a shell can be executable even when the
@@ -60,6 +65,13 @@ if push_dir=$(resolve_git_command_cwd "push" "$command" "$(pwd -P)"); then
 else
   resolve_rc=$?
   push_dir=""
+fi
+
+large_static_trunk_push=0
+if (( resolve_rc == 2 && ${#command} >= 4096 )) &&
+  _large_static_shell_text_contains_git_operation \
+    "push" "$command" "$trunk"; then
+  large_static_trunk_push=1
 fi
 
 substitution_push=0
@@ -89,6 +101,7 @@ esac
 if (( resolve_rc == 1 )) &&
   (( substitution_push == 0 )) &&
   ! _conservative_shell_text_contains_git_operation "push" "$command"; then
+  [[ "$command" == *'|'* ]] || exit 0
   if ! _push_shell_text_may_contain_executable_push_data "$command" ||
     (( _PUSH_EXECUTABLE_DATA_HAS_PIPELINE == 0 )); then
     exit 0
@@ -102,19 +115,22 @@ if stripped_push_command=$(_strip_shell_non_executable_regions "$command"); then
   push_command="$stripped_push_command"
 fi
 
-# Tokenize once in the parent shell. Both parser command substitutions inherit
-# this immutable snapshot, avoiding repeated character scans on large commands.
-_push_prepare_command_tokens "$push_command"
-
 # Parse destination refs before repository scoping. rc=1 positively means no
 # executable push exists; rc=2 remains unknown and therefore fail-closed after
 # scope evaluation. This second opinion is also what distinguishes quoted data
 # piped to a shell from inert documentation text when the resolver returns 1.
 parsed_refs=""
-if parsed_refs=$(parse_push_target_refspec "$push_command"); then
-  parse_rc=0
+if (( large_static_trunk_push == 1 )); then
+  parse_rc=2
 else
-  parse_rc=$?
+  # Tokenize once in the parent shell. Both parser command substitutions
+  # inherit this immutable snapshot, avoiding repeated character scans.
+  _push_prepare_command_tokens "$push_command"
+  if parsed_refs=$(parse_push_target_refspec "$push_command"); then
+    parse_rc=0
+  else
+    parse_rc=$?
+  fi
 fi
 if (( substitution_push == 1 )); then
   parse_rc=2
@@ -163,12 +179,6 @@ if [[ -n "${PUSH_ALLOWED_REMOTE_URLS:-}" && -n "$target_url" ]]; then
     fi
   done
 fi
-
-# Trunk branch name (issue #478, [INV-131]): BASE_BRANCH (the wrapper
-# resolves+exports it once at startup) → TRUNK_BRANCH (this hook's pre-#478
-# override, still honored standalone e.g. for a manually-run hook outside the
-# wrapper) → "main" default. Byte-identical to today when neither is set.
-trunk="${BASE_BRANCH:-${TRUNK_BRANCH:-main}}"
 
 # Parse the destination ref(s) the push would write to. Block if any of
 # them target the trunk (covers --all/--mirror via __ALL__/__MIRROR__).

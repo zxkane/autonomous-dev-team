@@ -54,6 +54,9 @@ _push_prepare_command_tokens() {
   _PUSH_TOKEN_ANSI=()
   _PUSH_TOKEN_UNSAFE=()
   _PUSH_TOKEN_MALFORMED=0
+  _PUSH_ENCLOSING_PIPELINE_CACHE_START=-1
+  _PUSH_ENCLOSING_PIPELINE_CACHE_END=-1
+  _PUSH_ENCLOSING_PIPELINE_CACHE_RESULT=1
 
   if ! declare -F _resolve_git_command_tokenize >/dev/null 2>&1; then
     library_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -169,7 +172,9 @@ _push_skip_redirection() {
 
 _push_shell_command_name_executes_input() {
   case "$1" in
-    sh|*/sh|bash|*/bash|dash|*/dash|ksh|*/ksh|zsh|*/zsh|\
+    sh|*/sh|ash|*/ash|bash|*/bash|csh|*/csh|dash|*/dash|fish|*/fish|\
+      hush|*/hush|ksh|*/ksh|mksh|*/mksh|posh|*/posh|tcsh|*/tcsh|\
+      yash|*/yash|zsh|*/zsh|\
       eval|source|'.'|python|python[0-9]*|*/python|*/python[0-9]*|\
       node|*/node|ruby|*/ruby|perl|*/perl)
       return 0
@@ -215,6 +220,49 @@ _push_env_split_command_text() {
     printf -v quoted '%q' "$_PUSH_STATIC_VALUE"
     _PUSH_ENV_SPLIT_COMMAND+=" $quoted"
   done
+}
+
+_push_env_split_option_command() {
+  local index="$1" end="$2"
+  local option="${_PUSH_TOKEN_VALUES[index]:-}"
+  local body prefix split_text start
+
+  [[ "${_PUSH_TOKEN_TYPES[index]:-}" == "word" &&
+    "${_PUSH_TOKEN_ANSI[index]:-0}" == "0" &&
+    "${_PUSH_TOKEN_UNSAFE[index]:-0}" == "0" &&
+    "$option" != *'$'* && "$option" != *'`'* ]] || return 2
+
+  start=$((index + 1))
+  case "$option" in
+    --split-string=*)
+      split_text="${option#*=}"
+      ;;
+    -S|--split-string)
+      (( start < end )) || return 2
+      _push_token_static_value "$start" || return 2
+      split_text="$_PUSH_STATIC_VALUE"
+      ((start++))
+      ;;
+    -?*)
+      [[ "$option" != --* ]] || return 1
+      body="${option#-}"
+      [[ "$body" == *S* ]] || return 1
+      prefix="${body%%S*}"
+      [[ "$prefix" != *[!i0v]* ]] || return 1
+      split_text="${body#*S}"
+      if [[ -z "$split_text" ]]; then
+        (( start < end )) || return 2
+        _push_token_static_value "$start" || return 2
+        split_text="$_PUSH_STATIC_VALUE"
+        ((start++))
+      fi
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+
+  _push_env_split_command_text "$split_text" "$start" "$end" || return 2
 }
 
 _push_static_command_text_contains_push() {
@@ -327,32 +375,22 @@ _push_simple_command_executes_standard_input() {
             ((j++))
             continue
           fi
-          value="${_PUSH_TOKEN_VALUES[j]:-}"
-          if [[ "$value" == --split-string=* &&
-            "${_PUSH_TOKEN_ANSI[j]:-0}" == "0" &&
-            "${_PUSH_TOKEN_UNSAFE[j]:-0}" == "0" &&
-            "$value" != *'$'* && "$value" != *'`'* ]]; then
-            _push_env_split_command_text "${value#*=}" "$((j + 1))" "$end" ||
-              return 0
+          if _push_env_split_option_command "$j" "$end"; then
             _push_static_command_text_executes_input "$_PUSH_ENV_SPLIT_COMMAND"
             return
+          else
+            rc=$?
+            (( rc != 2 )) || return 0
           fi
           _push_token_static_value "$j" || return 0
           option="$_PUSH_STATIC_VALUE"
           case "$option" in
-            -S|--split-string)
-              (( j + 1 < end )) || return 0
-              _push_token_static_value "$((j + 1))" || return 0
-              _push_env_split_command_text \
-                "$_PUSH_STATIC_VALUE" "$((j + 2))" "$end" || return 0
-              _push_static_command_text_executes_input "$_PUSH_ENV_SPLIT_COMMAND"
-              return
-              ;;
-            -u|-C|--unset|--chdir)
+            -u|-C|-a|-f|--unset|--chdir|--argv0|--file)
               (( j + 1 < end )) || return 0
               j=$((j + 2))
               ;;
-            --unset=*|--chdir=*|-i|--ignore-environment|\
+            -u?*|-C?*|-a?*|-f?*|--unset=*|--chdir=*|--argv0=*|--file=*|\
+              -i|--ignore-environment|\
               -0|--null|-v|--debug|--)
               ((j++))
               ;;
@@ -685,6 +723,22 @@ _push_pipeline_stage_bounds() {
       command_position=0
       continue
     }
+    if _push_token_raw_unquoted_is "$i" "{"; then
+      compound_ends+=("}")
+      command_position=1
+      continue
+    fi
+    if _push_token_raw_unquoted_is "$i" "}"; then
+      if (( ${#compound_ends[@]} > 0 )); then
+        top_index=$((${#compound_ends[@]} - 1))
+        top_end="${compound_ends[top_index]}"
+        if [[ "$top_end" == "}" ]]; then
+          unset 'compound_ends[top_index]'
+        fi
+      fi
+      command_position=0
+      continue
+    fi
     if _push_token_static_value "$i"; then
       value="$_PUSH_STATIC_VALUE"
       if (( ${#compound_ends[@]} > 0 )); then
@@ -700,7 +754,6 @@ _push_pipeline_stage_bounds() {
         while|until|for|select) compound_ends+=("done") ;;
         if) compound_ends+=("fi") ;;
         case) compound_ends+=("esac") ;;
-        '{') compound_ends+=("}") ;;
       esac
     fi
     command_position=0
@@ -727,6 +780,40 @@ _push_pipeline_consumer_executes_input() {
       _PUSH_PIPELINE_SCAN_END="$end"
     fi
     pipe_index="$next_pipe"
+  done
+  return 1
+}
+
+_push_enclosing_pipeline_consumer_executes_input() {
+  local segment_start="$1"
+  local n="${#_PUSH_TOKEN_VALUES[@]}"
+  local boundary=-1 start end next_pipe
+  local cached_start="${_PUSH_ENCLOSING_PIPELINE_CACHE_START:--1}"
+  local cached_end="${_PUSH_ENCLOSING_PIPELINE_CACHE_END:--1}"
+  local cached_result="${_PUSH_ENCLOSING_PIPELINE_CACHE_RESULT:-1}"
+
+  if (( cached_start >= 0 &&
+    segment_start >= cached_start && segment_start < cached_end )); then
+    return "$cached_result"
+  fi
+
+  while (( boundary < n )); do
+    _push_pipeline_stage_bounds "$boundary" "$n"
+    start="$_PUSH_PIPELINE_STAGE_START"
+    end="$_PUSH_PIPELINE_STAGE_END"
+    next_pipe="$_PUSH_PIPELINE_NEXT_PIPE"
+    if (( segment_start >= start && segment_start < end )); then
+      _PUSH_ENCLOSING_PIPELINE_CACHE_START="$start"
+      _PUSH_ENCLOSING_PIPELINE_CACHE_END="$end"
+      _PUSH_ENCLOSING_PIPELINE_CACHE_RESULT=1
+      if (( next_pipe >= 0 )) &&
+        _push_pipeline_consumer_executes_input "$next_pipe" "$n"; then
+        _PUSH_ENCLOSING_PIPELINE_CACHE_RESULT=0
+      fi
+      return "$_PUSH_ENCLOSING_PIPELINE_CACHE_RESULT"
+    fi
+    (( end > boundary )) || return 1
+    boundary="$end"
   done
   return 1
 }
@@ -781,6 +868,12 @@ _push_data_segment_is_safe() {
     '(')
       if (( end > start + 1 )) &&
         _push_process_substitution_executes_input "$((end - 1))"; then
+        _PUSH_DATA_SEGMENT_DYNAMIC_INPUT=1
+        return 1
+      fi
+      ;;
+    *)
+      if _push_enclosing_pipeline_consumer_executes_input "$start"; then
         _PUSH_DATA_SEGMENT_DYNAMIC_INPUT=1
         return 1
       fi
@@ -1067,34 +1160,23 @@ _push_segment_git_start() {
             ((j++))
             continue
           fi
-          value="${_PUSH_TOKEN_VALUES[j]:-}"
-          if [[ "$value" == --split-string=* &&
-            "${_PUSH_TOKEN_ANSI[j]:-0}" == "0" &&
-            "${_PUSH_TOKEN_UNSAFE[j]:-0}" == "0" &&
-            "$value" != *'$'* && "$value" != *'`'* ]]; then
-            _push_env_split_command_text "${value#*=}" "$((j + 1))" "$end" ||
-              return 2
+          if _push_env_split_option_command "$j" "$end"; then
             _push_static_command_text_contains_push \
               "$_PUSH_ENV_SPLIT_COMMAND" && return 2
             return 1
+          else
+            rc=$?
+            (( rc != 2 )) || return 2
           fi
           _push_token_static_value "$j" || return 2
           option="$_PUSH_STATIC_VALUE"
           case "$option" in
-            -S|--split-string)
-              (( j + 1 < end )) || return 2
-              _push_token_static_value "$((j + 1))" || return 2
-              _push_env_split_command_text \
-                "$_PUSH_STATIC_VALUE" "$((j + 2))" "$end" || return 2
-              _push_static_command_text_contains_push \
-                "$_PUSH_ENV_SPLIT_COMMAND" && return 2
-              return 1
-              ;;
-            -u|-C|--unset|--chdir)
+            -u|-C|-a|-f|--unset|--chdir|--argv0|--file)
               (( j + 1 < end )) || return 2
               j=$((j + 2))
               ;;
-            --unset=*|--chdir=*|-i|--ignore-environment|\
+            -u?*|-C?*|-a?*|-f?*|--unset=*|--chdir=*|--argv0=*|--file=*|\
+              -i|--ignore-environment|\
               -0|--null|-v|--debug|--)
               ((j++))
               ;;

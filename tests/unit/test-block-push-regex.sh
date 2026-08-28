@@ -73,10 +73,10 @@ run_hook() {
 }
 
 run_hook_bounded() {
-  local cmd="$1"
+  local cmd="$1" budget="${2:-5}"
   (
     cd "$TMPDIR/repo" &&
-      CLAUDE_PROJECT_DIR="$TMPDIR/repo" timeout 5 bash "$HOOK" \
+      CLAUDE_PROJECT_DIR="$TMPDIR/repo" timeout "$budget" bash "$HOOK" \
         <<<"$(hook_input "$cmd")"
   )
   echo $?
@@ -1193,6 +1193,130 @@ done
 dynamic_pipeline+=" | bash"
 out=$(run_hook_bounded "$dynamic_pipeline")
 assert_exit "two-hundred-stage dynamic pipeline reaches bash within five seconds" "2" "$out"
+
+# ===========================================================================
+# TC-BP-58: grouped producers and consumers preserve executable stdin flow
+# ===========================================================================
+echo ""
+echo "=== TC-BP-58: grouped stdin execution stays visible to the push parser ==="
+setup_repo feat/x
+for command in \
+  'echo git push origin main | { true; bash; }' \
+  'echo git push origin main | { :; bash; }' \
+  'echo git push origin main | { cd /tmp; bash; }' \
+  'echo git push origin main | { true && bash; }' \
+  'echo git push origin main | { { true; }; bash; }' \
+  'echo git push origin main | { (true); bash; }' \
+  'echo git push origin main | { true; { bash; }; }' \
+  'echo git push origin main | { true; source /dev/stdin; }' \
+  '( echo git push origin main ) | bash' \
+  '{ echo git push origin main; } | bash' \
+  'if true; then echo git push origin main; fi | bash' \
+  'for f in x; do echo git push origin main; done | bash' \
+  'case x in x) echo git push origin main;; esac | bash'
+do
+  out=$(run_hook "$command")
+  assert_exit "grouped executable stdin flow blocks: $command" "2" "$out"
+done
+for command in \
+  'echo git push origin main | { true; cat; }' \
+  'echo git push origin main | { :; cat; }' \
+  'echo git push origin main | { cd /tmp; cat; }' \
+  'echo git push origin main | { true && cat; }' \
+  'echo git push origin main | { { true; }; cat; }' \
+  'echo git push origin main | { (true); cat; }' \
+  'echo git push origin main | { true; { cat; }; }' \
+  'echo git push origin main | { true; cat; }' \
+  '( echo git push origin main ) | cat' \
+  '{ echo git push origin main; } | cat' \
+  'if true; then echo git push origin main; fi | cat' \
+  'for f in x; do echo git push origin main; done | cat' \
+  'case x in x) echo git push origin main;; esac | cat'
+do
+  out=$(run_hook "$command")
+  assert_exit "grouped data-only stdin flow allows: $command" "0" "$out"
+done
+
+# ===========================================================================
+# TC-BP-59: compact env options and shell applets execute stdin
+# ===========================================================================
+echo ""
+echo "=== TC-BP-59: compact env options and shell applets stay fail closed ==="
+setup_repo feat/x
+for command in \
+  'echo git push origin main | env -Sbash' \
+  'echo git push origin main | env -vSbash' \
+  'echo git push origin main | env -ivSbash' \
+  'echo git push origin main | env -i -Sbash' \
+  'echo git push origin main | env -C/tmp -Sbash' \
+  'echo git push origin main | env -uFOO -Sbash' \
+  'echo git push origin main | env FOO=1 -Sbash' \
+  'echo git push origin main | ash' \
+  'echo git push origin main | mksh' \
+  'echo git push origin main | yash' \
+  'echo git push origin main | posh' \
+  'echo git push origin main | csh' \
+  'echo git push origin main | tcsh' \
+  'echo git push origin main | fish' \
+  'echo git push origin main | hush' \
+  'echo git push origin main | busybox ash'
+do
+  out=$(run_hook "$command")
+  assert_exit "compact or alternate shell consumer blocks: $command" "2" "$out"
+done
+for command in \
+  'echo git push origin main | env -Scat' \
+  'echo git push origin main | env -vScat' \
+  'echo git push origin main | env -ivScat' \
+  'echo git push origin main | env -i -Scat' \
+  'echo git push origin main | env -C/tmp -Scat' \
+  'echo git push origin main | env -uFOO -Scat' \
+  'echo git push origin main | env FOO=1 -Scat' \
+  'echo git push origin main | busybox cat'
+do
+  out=$(run_hook "$command")
+  assert_exit "compact data-only consumer allows: $command" "0" "$out"
+done
+
+# ===========================================================================
+# TC-BP-60: large benign substitutions retain timeout headroom
+# ===========================================================================
+echo ""
+echo "=== TC-BP-60: larger benign substitution input retains hook headroom ==="
+setup_repo feat/x
+large_command=$'python3 - <<PY\n'
+for ((i = 0; i < 1250; i++)); do
+  large_command+="def f$i(x):"$'\n'
+  large_command+="    return g(x)+$i"$'\n'
+done
+large_command+=$'PY\n'
+large_prefix="$large_command"
+large_command+='printf "%s\n" "$(date)"'
+out=$(run_hook_bounded "$large_command" 3)
+assert_exit "approximately forty KiB benign substitution allows within three seconds" "0" "$out"
+large_command=$'cat > /tmp/issue547-large-doc <<EOF\n'
+for ((i = 0; i < 1500; i++)); do
+  large_command+="documentation line $i"$'\n'
+done
+large_command+=$'git push origin main\nEOF'
+out=$(run_hook_bounded "$large_command" 3)
+assert_exit "large heredoc trunk prose remains non-executable within three seconds" "0" "$out"
+large_command="${large_prefix}git push origin main"
+out=$(run_hook_bounded "$large_command" 3)
+assert_exit "approximately forty KiB literal trunk push blocks within three seconds" "2" "$out"
+large_command="${large_prefix}g'i't p'u'sh origin main"
+out=$(run_hook_bounded "$large_command" 3)
+assert_exit "approximately forty KiB split-quoted trunk push blocks within three seconds" "2" "$out"
+grouped_pipeline="{"
+for ((i = 0; i < 200; i++)); do
+  grouped_pipeline+=" echo git push origin main;"
+done
+grouped_pipeline+=" } | cat"
+out=$(run_hook_bounded "$grouped_pipeline" 3)
+assert_exit "two hundred grouped data segments allow within three seconds" "0" "$out"
+grouped_pipeline="${grouped_pipeline%cat}bash"
+out=$(run_hook_bounded "$grouped_pipeline" 3)
+assert_exit "two hundred grouped data segments reach bash within three seconds" "2" "$out"
 
 # ===========================================================================
 # Summary

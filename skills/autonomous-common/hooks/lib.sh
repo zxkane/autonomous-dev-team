@@ -960,12 +960,211 @@ _conservative_shell_text_contains_git_operation() {
   _git_command_tokens_contain_operation "$operation" "$command"
 }
 
+_large_static_shell_text_contains_git_operation() {
+  local operation="$1"
+  local command="$2"
+  local target_ref="${3:-}"
+
+  printf '%s' "$command" | awk \
+    -v operation="$operation" -v target_ref="$target_ref" '
+    BEGIN {
+      state = "unquoted"
+      value = ""
+      started = 0
+      count = 0
+      single_quote = sprintf("%c", 39)
+    }
+
+    function emit_word() {
+      if (started) {
+        count++
+        types[count] = "word"
+        values[count] = value
+      }
+      value = ""
+      started = 0
+    }
+
+    function emit_operator() {
+      emit_word()
+      count++
+      types[count] = "operator"
+      values[count] = ";"
+    }
+
+    function targets_ref(ref, separator, destination) {
+      destination = ref
+      separator = index(ref, ":")
+      if (separator > 0) {
+        destination = substr(ref, separator + 1)
+      }
+      return destination == target_ref ||
+             destination == "refs/heads/" target_ref
+    }
+
+    {
+      line = $0
+      for (i = 1; i <= length(line); i++) {
+        character = substr(line, i, 1)
+        following = substr(line, i + 1, 1)
+        if (state == "single") {
+          if (character == single_quote) {
+            state = "unquoted"
+          } else {
+            value = value character
+          }
+          continue
+        }
+        if (state == "double") {
+          if (character == "\"") {
+            state = "unquoted"
+          } else if (character == "\\") {
+            if (following != "") {
+              value = value following
+              i++
+            } else {
+              value = value character
+            }
+          } else {
+            value = value character
+          }
+          continue
+        }
+
+        if (character == single_quote) {
+          state = "single"
+          started = 1
+        } else if (character == "\"") {
+          state = "double"
+          started = 1
+        } else if (character == "\\") {
+          started = 1
+          if (following != "") {
+            value = value following
+            i++
+          } else {
+            value = value character
+          }
+        } else if (character == " " || character == "\t") {
+          emit_word()
+        } else if (character == "&" || character == "|" ||
+                   character == ";" || character == "(" ||
+                   character == ")") {
+          emit_operator()
+        } else {
+          started = 1
+          value = value character
+        }
+      }
+      if (state == "unquoted") {
+        emit_operator()
+      } else {
+        value = value "\n"
+      }
+    }
+
+    END {
+      emit_word()
+      command_position = 1
+      for (i = 1; i <= count; i++) {
+        if (types[i] == "operator") {
+          command_position = 1
+          continue
+        }
+        if (!command_position) {
+          continue
+        }
+        if (values[i] == "!" || values[i] == "if" ||
+            values[i] == "then" || values[i] == "elif" ||
+            values[i] == "else" || values[i] == "do" ||
+            values[i] == "while" || values[i] == "until" ||
+            values[i] == "{" || values[i] == "}") {
+          continue
+        }
+        if (values[i] ~ /^[A-Za-z_][A-Za-z0-9_]*=/) {
+          continue
+        }
+        if (values[i] != "git") {
+          command_position = 0
+          continue
+        }
+        j = i + 1
+        while (j <= count && types[j] == "word") {
+          if (values[j] == "-c" || values[j] == "-C" ||
+              values[j] == "--git-dir" || values[j] == "--work-tree" ||
+              values[j] == "--namespace" ||
+              values[j] == "--super-prefix") {
+            j += 2
+          } else if (values[j] ~ /^-/) {
+            j++
+          } else {
+            break
+          }
+        }
+        if (j <= count && types[j] == "word" &&
+            values[j] == operation) {
+          if (target_ref == "") {
+            exit 0
+          }
+          found_remote = 0
+          for (j = j + 1; j <= count && types[j] == "word"; j++) {
+            option = values[j]
+            if (option == "--all" || option == "--mirror") {
+              exit 0
+            }
+            if (option == "--repo") {
+              j++
+              found_remote = 1
+              continue
+            }
+            if (option ~ /^--repo=/) {
+              found_remote = 1
+              continue
+            }
+            if (option == "-o" || option == "--push-option" ||
+                option == "--receive-pack" || option == "--exec") {
+              j++
+              continue
+            }
+            if (option ~ /^-/) {
+              continue
+            }
+            if (!found_remote) {
+              found_remote = 1
+              continue
+            }
+            if (targets_ref(option)) {
+              exit 0
+            }
+          }
+        }
+        command_position = 0
+      }
+      exit 1
+    }
+  '
+}
+
 # Large ambiguous command strings must not enter the quadratic character and
-# token fallback paths. Tokenize once, then use the bounded structured and
-# conservative scanners. A positive result is intentionally fail-closed.
+# token fallback paths unless a static or dynamic git-operation candidate
+# remains. The external pre-scan is linear and understands shell quote
+# concatenation; a positive result is intentionally fail-closed.
 _large_ambiguous_shell_text_contains_git_operation() {
   local operation="$1"
   local command="$2"
+
+  if _large_static_shell_text_contains_git_operation \
+    "$operation" "$command"; then
+    return 0
+  fi
+
+  # ANSI shell strings can encode either candidate word, so retain the full
+  # tokenizer for them. Other dynamic-git forms retain the operation word, and
+  # dynamic-operation forms retain the git word.
+  case "$command" in
+    *"\$'"*|*git*|*"$operation"*) ;;
+    *) return 1 ;;
+  esac
 
   _resolve_git_command_tokenize "$command" 1
   if _resolve_git_tokens_contain_operation "$operation"; then

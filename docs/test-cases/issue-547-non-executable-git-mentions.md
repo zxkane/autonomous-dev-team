@@ -188,6 +188,9 @@ Those shapes retain the original command text and fail closed.
 | `TC-BP-55` | An approximately 20 KiB git-free ambiguous command contains a benign `$(date)` substitution | Trunk-protection hook exits `0` within five seconds; substitution evidence uses the bounded large-input scanner |
 | `TC-BP-56` | Trunk-push text reaches a shell inside `if`, `for`, `select`, single- or multi-arm nested `case`, or an output process substitution, or through an unlisted launcher or `env -S`/`--split-string`; every form has a `cat`-only twin | Executable bodies exit `2`; data-only twins, including `{ cat; }` and `(cat)`, exit `0` |
 | `TC-BP-57` | A benign pipeline has 200 `cat` stages; a dynamic-input control has the same stages followed by `bash` | Both finish within five seconds; benign data exits `0` and the executable control exits `2` |
+| `TC-BP-58` | Trunk-push data is consumed inside nested brace groups, or produced inside subshell, brace, `if`, `for`, or `case` stages whose outer pipeline reaches `bash`; every form has a `cat` twin | Every executable flow exits `2`; grouped data-only flows and boundary-separated unrelated pipelines exit `0` |
+| `TC-BP-59` | Trunk-push data reaches compact or clustered `env -Sbash` forms, including forms after attached `-C`/`-u` operands, alternate shell names, or a BusyBox shell applet; controls use compact `-Scat` forms or `busybox cat` | Shell consumers exit `2`; data-only consumers exit `0` |
+| `TC-BP-60` | Approximately 41 KiB benign, large-heredoc, literal-trunk, and quote-concatenated-trunk inputs are paired with 200 grouped data segments ending in `cat` or `bash` | Every case finishes within three seconds; benign/heredoc/data-only cases exit `0` and trunk/executable cases exit `2` |
 
 ## Evidence contract
 
@@ -199,7 +202,7 @@ changing production code. The controls also prevent a future comment/heredoc
 stripper from hiding a real commit after quoted text or a heredoc terminator.
 
 The review-regression cases `142` through `145` and `TC-BP-36` through
-`TC-BP-57` must fail across the reviewed intermediate fixes: operation-bearing
+`TC-BP-60` must fail across the reviewed intermediate fixes: operation-bearing
 large commands time out, git-free expansion commands are misclassified,
 chained or prefixed feature pushes are blocked, prefixed trunk pushes disappear,
 non-executable push text is treated as executable, executable data is treated
@@ -213,8 +216,11 @@ executable-substitution fail-open, and stdin-evaluator regressions.
 substitution-bearing large-input timeout.
 `TC-BP-56..57` reproduce the seventh review's compound/wrapper fail-open and
 quadratic downstream pipeline scan.
+`TC-BP-58..60` reproduce the eighth review's brace-stage truncation,
+compound-producer bypass, compact `env -S` and alternate-shell bypasses, and
+large-input or repeated-group timeout paths.
 
 The eventual fix is complete only when all one hundred forty-five detector
-cases and all two hundred fifty-seven trunk-protection assertions pass together with the
+cases and all three hundred thirteen trunk-protection assertions pass together with the
 existing `test-is-git-command.sh` and
 `test-block-commit-outside-worktree.sh` suites.
