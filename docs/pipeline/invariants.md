@@ -9422,11 +9422,12 @@ pipeline, and shadowing controls. Ambiguous inputs at least 4 KiB take one
 bounded tokenization pass plus conservative literal scanning instead of the
 older repeated fallback passes; approximately 20 KiB operation-bearing and
 git-free cases pin the five-second hook budget.
-`tests/unit/test-block-push-regex.sh` (`TC-BP-35..47`) covers the same budget,
+`tests/unit/test-block-push-regex.sh` (`TC-BP-35..51`) covers the same budget,
 chained, multiline, and prefixed feature pushes, git-free expansions,
 non-executable and shell-consumed push text, shell redirections, brace groups,
-line continuations, mixed quote fragments, dynamic refspecs, and fail-closed
-handling for an unreadable refspec.
+line continuations, mixed quote fragments, dynamic refspecs, arithmetic
+expansions, ordinary data pipelines, and fail-closed handling for an unreadable
+operation or refspec.
 
 **Cross-reference**:
 [`docs/designs/block-commit-command-context.md`](../designs/block-commit-command-context.md)
@@ -9736,7 +9737,7 @@ they read only what the wrapper exported and never parse conf.
 
 **Status**: **ENFORCED**.
 
-**Test**: `tests/unit/test-block-push-regex.sh` (`TC-BP-01..47`, 155 assertions) —
+**Test**: `tests/unit/test-block-push-regex.sh` (`TC-BP-01..51`, 181 assertions) —
 the 11 pre-existing #64 cases unchanged, plus TC-BP-13b (bare push from inside
 the wiki), TC-BP-13c (no anchor → fail closed), TC-BP-16 (second clone of this
 project's remote, all three command shapes), TC-BP-17 (five URL spellings),
@@ -9766,7 +9767,7 @@ TC-BP-35 pins the five-second hook budget and fail-closed fallback when an
 approximately 8 KiB ambiguous command contains a real trunk push but the
 bounded refspec parser cannot produce a destination token.
 
-TC-BP-36..47 pin the review regressions. A single structured token snapshot is
+TC-BP-36..51 pin the review regressions. A single structured token snapshot is
 shared by destination and refspec parsing, with newlines and shell control
 operators preserving command boundaries. Each executable push in chained,
 multiline, subshell, assignment-prefixed, or supported wrapper-prefixed command
@@ -9778,15 +9779,18 @@ fail-closed because word splitting could change the positional grammar.
 Expansion-bearing commands without a literal Git operation are not treated as
 pushes, while a dynamic command name followed by the literal `push` operation
 remains fail-closed. Builtin `echo`/`printf` arguments and bounded heredoc data
-are non-executable when consumed only as data, but literal push text piped to a
-shell, embedded in command substitution, or sent to process substitution is
-executable and fails closed. The executable-data prefilter recognizes ordinary,
-ANSI-quoted, quote-concatenated, and dynamic shell input without forcing
-git-free literal pipelines through the full parser. Redirections, brace-group
-delimiters, and backslash-newline continuations are shell syntax rather than
-refspecs. A dynamic global argument followed by a definite non-push operation
-remains allowed, while a dynamic refspec remains unknown because its runtime
-value could be trunk. Mixed quote fragments cannot hide a trunk refspec.
+are non-executable when consumed only as data. Variable data piped to ordinary
+consumers such as `jq`, `tee`, `sort`, `gh`, `cut`, remote `cat`, or wrapped
+`jq` remains data; only a shell/interpreter consumer (including supported
+`env`, `command`, `timeout`, remote-shell, and `xargs` wrappers) makes its stdin
+possible executable text. Literal, ANSI-quoted, quote-concatenated, and dynamic
+shell input therefore fails closed, as do command and process substitutions,
+without classifying arithmetic expansion as executable. Redirections,
+brace-group delimiters, and backslash-newline continuations are shell syntax
+rather than refspecs. A dynamic global argument followed by more global flags
+and then a definite non-push operation remains allowed, while a dynamic refspec
+remains unknown because its runtime value could be trunk. Mixed quote fragments
+cannot hide either the push operation or a trunk refspec.
 Approximately 20–21 KiB git-free, PR-body, and single-word push-option inputs
 stay inside the five-second budget.
 

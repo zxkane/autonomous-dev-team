@@ -15,9 +15,9 @@
 # parse_push_target_refspec <command>
 #
 # Given shell command text, echoes every destination ref-name written by each
-# literal `git push`, one per line. Returns 0 when all matched pushes were
-# parsed, 1 when no push was found, and 2 when a push was found but one of its
-# destinations could not be determined.
+# executable `git push`, one per line. Returns 0 when all matched pushes were
+# parsed, 1 when no executable push was found, and 2 when a possible executable
+# push or one of its destinations could not be determined.
 #
 # Handles:
 #   git push                                → <current_branch>
@@ -147,7 +147,8 @@ _push_token_is_redirection() {
 
 _push_token_has_executable_expansion() {
   local value="${_PUSH_TOKEN_VALUES[$1]:-}"
-  [[ "$value" == *'$('* || "$value" == *'`'* ||
+  local without_arithmetic="${value//\$\(\(/}"
+  [[ "$without_arithmetic" == *'$('* || "$value" == *'`'* ||
     "$value" == *'<('* || "$value" == *'>('* ]]
 }
 
@@ -167,19 +168,269 @@ _push_skip_redirection() {
   return 0
 }
 
+_push_shell_command_name_executes_input() {
+  case "$1" in
+    sh|*/sh|bash|*/bash|dash|*/dash|ksh|*/ksh|zsh|*/zsh|\
+      eval|source|'.'|python|python[0-9]*|*/python|*/python[0-9]*|\
+      node|*/node|ruby|*/ruby|perl|*/perl)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+_push_static_command_text_executes_input() {
+  local command="$1"
+  local n
+  local _PUSH_PREPARED_COMMAND=""
+  local _PUSH_TOKEN_MALFORMED=0
+  local -a _PUSH_TOKEN_TYPES=()
+  local -a _PUSH_TOKEN_VALUES=()
+  local -a _PUSH_TOKEN_QUOTES=()
+  local -a _PUSH_TOKEN_ANSI=()
+  local -a _PUSH_TOKEN_UNSAFE=()
+
+  _push_prepare_command_tokens "$command"
+  n=${#_PUSH_TOKEN_VALUES[@]}
+  (( n > 0 )) || return 1
+  _push_command_executes_standard_input 0 "$n"
+}
+
+_push_command_executes_standard_input() {
+  local j="$1" end="$2"
+  local value command_name option rc
+
+  while (( j < end )); do
+    if _push_skip_redirection "$j" "$end"; then
+      j="$_PUSH_AFTER_REDIRECTION"
+      continue
+    else
+      rc=$?
+      (( rc != 2 )) || return 0
+    fi
+    if _push_token_is_assignment "$j"; then
+      ((j++))
+      continue
+    fi
+    _push_token_static_value "$j" || return 0
+    value="$_PUSH_STATIC_VALUE"
+    command_name="${value##*/}"
+    case "$command_name" in
+      '!'|if|then|elif|else|do|while|until|'{')
+        ((j++))
+        ;;
+      command)
+        ((j++))
+        while (( j < end )); do
+          _push_token_static_value "$j" || return 0
+          case "$_PUSH_STATIC_VALUE" in
+            -p|--) ((j++)) ;;
+            -v|-V) return 1 ;;
+            *) break ;;
+          esac
+        done
+        ;;
+      exec)
+        ((j++))
+        while (( j < end )); do
+          _push_token_static_value "$j" || return 0
+          case "$_PUSH_STATIC_VALUE" in
+            -a)
+              (( j + 1 < end )) || return 0
+              j=$((j + 2))
+              ;;
+            -c|-l|--) ((j++)) ;;
+            *) break ;;
+          esac
+        done
+        ;;
+      nohup|time)
+        ((j++))
+        while (( j < end )); do
+          _push_token_static_value "$j" || return 0
+          option="$_PUSH_STATIC_VALUE"
+          [[ "$option" == -* ]] || break
+          case "$option" in
+            -o|--output|-f|--format)
+              (( j + 1 < end )) || return 0
+              j=$((j + 2))
+              ;;
+            *) ((j++)) ;;
+          esac
+        done
+        ;;
+      timeout)
+        ((j++))
+        while (( j < end )); do
+          _push_token_static_value "$j" || return 0
+          option="$_PUSH_STATIC_VALUE"
+          [[ "$option" == -* ]] || break
+          case "$option" in
+            -k|-s|--kill-after|--signal)
+              (( j + 1 < end )) || return 0
+              j=$((j + 2))
+              ;;
+            *) ((j++)) ;;
+          esac
+        done
+        (( j < end )) || return 0
+        ((j++))
+        ;;
+      stdbuf)
+        ((j++))
+        while (( j < end )); do
+          _push_token_static_value "$j" || return 0
+          option="$_PUSH_STATIC_VALUE"
+          case "$option" in
+            -i|-o|-e|--input|--output|--error)
+              (( j + 1 < end )) || return 0
+              j=$((j + 2))
+              ;;
+            -i*|-o*|-e*|--input=*|--output=*|--error=*|--) ((j++)) ;;
+            *) break ;;
+          esac
+        done
+        ;;
+      env)
+        ((j++))
+        while (( j < end )); do
+          if _push_token_is_assignment "$j"; then
+            ((j++))
+            continue
+          fi
+          _push_token_static_value "$j" || return 0
+          option="$_PUSH_STATIC_VALUE"
+          case "$option" in
+            -u|-C|-S|--unset|--chdir|--split-string)
+              (( j + 1 < end )) || return 0
+              j=$((j + 2))
+              ;;
+            --unset=*|--chdir=*|--split-string=*|-i|--ignore-environment|\
+              -0|--null|-v|--debug|--)
+              ((j++))
+              ;;
+            *) break ;;
+          esac
+        done
+        ;;
+      sudo)
+        ((j++))
+        while (( j < end )); do
+          _push_token_static_value "$j" || return 0
+          option="$_PUSH_STATIC_VALUE"
+          case "$option" in
+            -u|-g|-h|-p|-C|-T|-r|-t|--user|--group|--host|--prompt|\
+              --chdir|--command-timeout|--role|--type)
+              (( j + 1 < end )) || return 0
+              j=$((j + 2))
+              ;;
+            --*=*|-u*|-g*|-h*|-p*|-C*|-T*|-r*|-t*|--) ((j++)) ;;
+            -*) ((j++)) ;;
+            *) break ;;
+          esac
+        done
+        ;;
+      ssh)
+        ((j++))
+        while (( j < end )); do
+          _push_token_static_value "$j" || return 0
+          option="$_PUSH_STATIC_VALUE"
+          [[ "$option" == -* ]] || break
+          case "$option" in
+            -B|-b|-c|-D|-E|-e|-F|-I|-i|-J|-L|-l|-m|-O|-o|-p|-Q|-R|-S|-W|-w)
+              (( j + 1 < end )) || return 0
+              j=$((j + 2))
+              ;;
+            -*) ((j++)) ;;
+          esac
+        done
+        (( j < end )) || return 0
+        ((j++))
+        (( j < end )) || return 0
+        if (( j + 1 == end )) &&
+          _push_token_static_value "$j" &&
+          [[ "$_PUSH_STATIC_VALUE" == *[[:space:]]* ]]; then
+          _push_static_command_text_executes_input "$_PUSH_STATIC_VALUE"
+          return
+        fi
+        _push_command_executes_standard_input "$j" "$end"
+        return
+        ;;
+      xargs)
+        ((j++))
+        while (( j < end )); do
+          _push_token_static_value "$j" || return 0
+          option="$_PUSH_STATIC_VALUE"
+          [[ "$option" == -* ]] || break
+          case "$option" in
+            -a|-E|-I|-L|-n|-P|-s|-d|--arg-file|--eof|--replace|\
+              --max-lines|--max-args|--max-procs|--max-chars|--delimiter|\
+              --process-slot-var)
+              (( j + 1 < end )) || return 0
+              j=$((j + 2))
+              ;;
+            -a*|-E*|-I*|-L*|-n*|-P*|-s*|-d*|--*=*|--) ((j++)) ;;
+            -*) ((j++)) ;;
+          esac
+        done
+        (( j < end )) || return 1
+        _push_command_executes_standard_input "$j" "$end"
+        return
+        ;;
+      *)
+        _push_shell_command_name_executes_input "$command_name"
+        return
+        ;;
+    esac
+  done
+  return 1
+}
+
+_push_pipeline_consumer_executes_input() {
+  local pipe_index="$1"
+  local end=$((pipe_index + 1))
+  local n=${#_PUSH_TOKEN_VALUES[@]}
+
+  while (( end < n )) &&
+    [[ "${_PUSH_TOKEN_TYPES[end]:-}" != "operator" ]]; do
+    ((end++))
+  done
+  (( pipe_index + 1 < end )) || return 0
+  _push_command_executes_standard_input "$((pipe_index + 1))" "$end"
+}
+
 _push_next_token_is_definite_other_operation() {
   local index="$1" end="$2"
-  local i candidate
+  local i candidate rc
 
   (( index < end )) || return 1
-  _push_token_static_value "$index" || return 1
-  candidate="$_PUSH_STATIC_VALUE"
-  [[ -n "$candidate" && "$candidate" != -* && "$candidate" != "push" ]] ||
-    return 1
-  for ((i = index + 1; i < end; i++)); do
+  for ((i = index; i < end; i++)); do
     _push_token_static_value "$i" || continue
     [[ "$_PUSH_STATIC_VALUE" == "push" ]] && return 1
   done
+
+  i="$index"
+  while (( i < end )); do
+    if _push_skip_redirection "$i" "$end"; then
+      i="$_PUSH_AFTER_REDIRECTION"
+      continue
+    else
+      rc=$?
+      (( rc != 2 )) || return 1
+    fi
+    _push_token_static_value "$i" || return 1
+    candidate="$_PUSH_STATIC_VALUE"
+    case "$candidate" in
+      -c|-C|--git-dir|--work-tree|--namespace|--super-prefix)
+        (( i + 1 < end )) || return 1
+        i=$((i + 2))
+        ;;
+      --*=*|--*|-*) ((i++)) ;;
+      *) break ;;
+    esac
+  done
+  (( i < end )) || return 1
+  [[ -n "$candidate" && "$candidate" != "push" ]] || return 1
   return 0
 }
 
@@ -188,7 +439,9 @@ _push_data_segment_is_safe() {
   local i rc value
 
   case "$terminator" in
-    '|'|'|&') return 1 ;;
+    '|'|'|&')
+      _push_pipeline_consumer_executes_input "$end" && return 1
+      ;;
   esac
 
   for ((i = start + 1; i < end; i++)); do
@@ -239,18 +492,21 @@ _push_data_segment_contains_possible_push() {
 
 _push_shell_text_may_contain_executable_push_data() {
   local command="$1"
-  local normalized="$command"
+  local i n
 
-  normalized="${normalized//\\/}"
-  normalized="${normalized//\"/}"
-  normalized="${normalized//\'/}"
-  if [[ "$normalized" == *git* && "$normalized" == *push* ]]; then
-    return 0
-  fi
-  if [[ "$command" == *['|<>']* &&
-    ( "$command" == *'$'* || "$command" == *'`'* ) ]]; then
-    return 0
-  fi
+  _push_prepare_command_tokens "$command"
+  n=${#_PUSH_TOKEN_VALUES[@]}
+  for ((i = 0; i < n; i++)); do
+    if [[ "${_PUSH_TOKEN_TYPES[i]:-}" == "operator" ]]; then
+      case "${_PUSH_TOKEN_VALUES[i]:-}" in
+        '|'|'|&')
+          _push_pipeline_consumer_executes_input "$i" && return 0
+          ;;
+      esac
+      continue
+    fi
+    _push_token_has_executable_expansion "$i" && return 0
+  done
   return 1
 }
 
@@ -270,6 +526,9 @@ _push_git_operation_index() {
       (( rc != 2 )) || return 2
     fi
     if ! _push_token_static_value "$j"; then
+      if [[ "${_PUSH_TOKEN_VALUES[j]:-}" == "push" ]]; then
+        return 2
+      fi
       if _push_next_token_is_definite_other_operation "$((j + 1))" "$end"; then
         return 1
       fi

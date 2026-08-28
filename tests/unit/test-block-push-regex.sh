@@ -859,6 +859,10 @@ out=$(run_hook "echo git push origin main | bash -s")
 assert_exit "echo output piped to bash stdin remains blocked" "2" "$out"
 out=$(run_hook "echo git push origin main | ssh host bash")
 assert_exit "echo output piped to a remote shell remains blocked" "2" "$out"
+out=$(run_hook 'printf "%s\n" "$SCRIPT" | ssh host "bash -s"')
+assert_exit "dynamic input piped to a quoted remote shell remains fail-closed" "2" "$out"
+out=$(run_hook 'printf "%s\n" "$SCRIPT" | ssh host "env -i bash -s"')
+assert_exit "dynamic input piped to a wrapped quoted remote shell remains fail-closed" "2" "$out"
 out=$(run_hook "echo git push origin main |& bash")
 assert_exit "echo stdout/stderr pipe to bash remains blocked" "2" "$out"
 out=$(run_hook "printf 'git push origin main\\n' | bash")
@@ -869,6 +873,22 @@ out=$(run_hook "echo g'it push origin main' | bash")
 assert_exit "quote-concatenated push text piped to bash remains blocked" "2" "$out"
 out=$(run_hook 'printf "%s\n" "$SCRIPT" | bash')
 assert_exit "dynamic shell input remains fail-closed" "2" "$out"
+out=$(run_hook 'printf "%s\n" "$SCRIPT" | env -i bash -s')
+assert_exit "dynamic shell input through env remains fail-closed" "2" "$out"
+out=$(run_hook 'printf "%s\n" "$SCRIPT" | /bin/bash -s')
+assert_exit "dynamic shell input through an absolute shell path remains fail-closed" "2" "$out"
+out=$(run_hook 'printf "%s\n" "$SCRIPT" | /usr/bin/env bash -s')
+assert_exit "dynamic shell input through an absolute env path remains fail-closed" "2" "$out"
+out=$(run_hook 'printf "%s\n" "$SCRIPT" | source /dev/stdin')
+assert_exit "dynamic shell input sourced from stdin remains fail-closed" "2" "$out"
+out=$(run_hook 'printf "%s\n" "$SCRIPT" | . /dev/stdin')
+assert_exit "dynamic shell input dot-sourced from stdin remains fail-closed" "2" "$out"
+out=$(run_hook "echo git push origin main | command bash")
+assert_exit "shell input through command remains blocked" "2" "$out"
+out=$(run_hook "echo git push origin main | timeout 5 bash")
+assert_exit "shell input through timeout remains blocked" "2" "$out"
+out=$(run_hook "echo git push origin main | xargs -I{} bash -c '{}'")
+assert_exit "shell input through xargs remains blocked" "2" "$out"
 out=$(run_hook "echo git push origin main > >(bash)")
 assert_exit "echo output redirected to a bash process substitution remains blocked" "2" "$out"
 out=$(run_hook 'echo "$(git push origin main)"')
@@ -932,6 +952,70 @@ for command in \
 do
   out=$(run_hook "$command")
   assert_exit "dynamic refspec remains unreadable: $command" "2" "$out"
+done
+
+# ===========================================================================
+# TC-BP-48: ordinary variable data pipelines remain non-executable
+# ===========================================================================
+echo ""
+echo "=== TC-BP-48: variable data piped to non-shell consumers remains allowed ==="
+setup_repo feat/x
+for command in \
+  'echo "$json" | jq .' \
+  'echo "$msg" | tee -a /tmp/log' \
+  'printf "%s\n" "${arr[@]}" | sort' \
+  'echo "$body" | gh pr comment 12 --body-file -' \
+  'echo "$sha" | cut -c1-7' \
+  'echo "$json" | env jq .' \
+  'echo "$json" | ssh host cat' \
+  'echo "$json" | ssh host "cat > /tmp/data"' \
+  'echo "$json" | xargs jq .'
+do
+  out=$(run_hook "$command")
+  assert_exit "non-shell data pipeline allowed: $command" "0" "$out"
+done
+
+# ===========================================================================
+# TC-BP-49: arithmetic expansion is data, not executable command substitution
+# ===========================================================================
+echo ""
+echo "=== TC-BP-49: arithmetic expansion remains allowed in data commands ==="
+setup_repo feat/x
+for command in \
+  'echo "n=$((x + 1))" > /tmp/x' \
+  'printf "%d\n" "$((total))" > /tmp/y'
+do
+  out=$(run_hook "$command")
+  assert_exit "arithmetic data expansion allowed: $command" "0" "$out"
+done
+
+# ===========================================================================
+# TC-BP-50: dynamic git global values can precede more global flags
+# ===========================================================================
+echo ""
+echo "=== TC-BP-50: dynamic globals before definite non-push operations allow ==="
+setup_repo feat/x
+for command in \
+  'git -C "$D" -c a=b commit -m x 2>&1' \
+  'git -C "$D" -c user.email=t commit -m fix 2>&1' \
+  'git -C "$D" -c core.pager=cat log --oneline | head'
+do
+  out=$(run_hook "$command")
+  assert_exit "definite non-push after dynamic globals allowed: $command" "0" "$out"
+done
+
+# ===========================================================================
+# TC-BP-51: mixed quote fragments cannot disguise the push operation
+# ===========================================================================
+echo ""
+echo "=== TC-BP-51: mixed-quoted push operation remains fail closed ==="
+setup_repo feat/x
+for command in \
+  "git pu'sh' origin main" \
+  'git "pu""sh" origin main'
+do
+  out=$(run_hook "$command")
+  assert_exit "mixed-quoted trunk push operation blocked: $command" "2" "$out"
 done
 
 # ===========================================================================
