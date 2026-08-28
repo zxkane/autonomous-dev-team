@@ -299,11 +299,19 @@ parse_edit_file_paths() {
 # remaining input unchanged so callers retain their fail-closed behavior.
 _strip_shell_non_executable_regions() {
   local cat_is_external=0
+  local gh_is_external=0
+  # Only external binaries have fixed stdin behavior. A shell function named
+  # cat or gh could evaluate the heredoc body and must remain fail-closed.
   if [[ "$(type -t cat 2>/dev/null)" == "file" ]]; then
     cat_is_external=1
   fi
+  if [[ "$(type -t gh 2>/dev/null)" == "file" ]]; then
+    gh_is_external=1
+  fi
 
-  printf '%s' "$1" | awk -v cat_is_external="$cat_is_external" '
+  printf '%s' "$1" | awk \
+    -v cat_is_external="$cat_is_external" \
+    -v gh_is_external="$gh_is_external" '
     BEGIN {
       state = "unquoted"
       word_start = 1
@@ -396,6 +404,18 @@ _strip_shell_non_executable_regions() {
                    (character == "$" && following == "(")) {
           return 1
         }
+      }
+      return 0
+    }
+
+    function is_trusted_heredoc_consumer(line) {
+      if (cat_is_external && line ~ /^[ \t]*cat([ \t<>]|$)/) {
+        return 1
+      }
+      if (gh_is_external &&
+          line ~ /^[ \t]*gh[ \t]+pr[ \t]+(create|comment|edit)([ \t]|$)/ &&
+          line ~ /--body-file([ \t]+|=)-([ \t<]|$)/) {
+        return 1
       }
       return 0
     }
@@ -508,8 +528,8 @@ _strip_shell_non_executable_regions() {
               previous != "<" && after != "<") {
             if (!record_heredoc(line, i)) {
               pending_ambiguous = 1
-            } else if (!cat_is_external || command_seen ||
-                       line !~ /^[ \t]*cat([ \t<>]|$)/ ||
+            } else if (command_seen ||
+                       !is_trusted_heredoc_consumer(line) ||
                        logical_control_seen) {
               pending_ambiguous = 1
             }
@@ -658,9 +678,19 @@ _shell_static_code_contains_git_operation() {
 _shell_code_executor_contains_git_operation() {
   local operation="$1"
   local command="$2"
+  local conservative_result="${3:--1}"
   local i j n executor code option saw_c skip_candidate
   local _SHELL_DATA_BUILTINS_TRUSTED=0
   local -a token_types token_values
+
+  if (( conservative_result < 0 )); then
+    if _conservative_shell_text_contains_git_operation \
+      "$operation" "$command"; then
+      conservative_result=0
+    else
+      conservative_result=1
+    fi
+  fi
 
   _resolve_git_command_tokenize "$command"
   token_types=("${_RGCC_TOKEN_TYPES[@]}")
@@ -690,8 +720,7 @@ _shell_code_executor_contains_git_operation() {
           while (( j < n )) && [[ "${token_types[j]}" == "word" ]]; do
             option="${token_values[j]}"
             if _shell_code_is_dynamic "$option"; then
-              if _conservative_shell_text_contains_git_operation \
-                "$operation" "$command"; then
+              if (( conservative_result == 0 )); then
                 return 0
               fi
               skip_candidate=1
@@ -724,8 +753,7 @@ _shell_code_executor_contains_git_operation() {
           while (( j < n )) && [[ "${token_types[j]}" == "word" ]]; do
             option="${token_values[j]}"
             if _shell_code_is_dynamic "$option"; then
-              if _conservative_shell_text_contains_git_operation \
-                "$operation" "$command"; then
+              if (( conservative_result == 0 )); then
                 return 0
               fi
               skip_candidate=1
@@ -765,8 +793,7 @@ _shell_code_executor_contains_git_operation() {
           while (( j < n )) && [[ "${token_types[j]}" == "word" ]]; do
             option="${token_values[j]}"
             if _shell_code_is_dynamic "$option"; then
-              if _conservative_shell_text_contains_git_operation \
-                "$operation" "$command"; then
+              if (( conservative_result == 0 )); then
                 return 0
               fi
               skip_candidate=1
@@ -809,8 +836,7 @@ _shell_code_executor_contains_git_operation() {
     (( j < n )) && [[ "${token_types[j]}" == "word" ]] || continue
     executor="${token_values[j]}"
     if _shell_code_is_dynamic "$executor"; then
-      if _conservative_shell_text_contains_git_operation \
-        "$operation" "$command"; then
+      if (( conservative_result == 0 )); then
         return 0
       fi
       continue
@@ -829,8 +855,7 @@ _shell_code_executor_contains_git_operation() {
         return 0
       fi
       if _shell_code_is_dynamic "$code" &&
-        _conservative_shell_text_contains_git_operation \
-          "$operation" "$command"; then
+        (( conservative_result == 0 )); then
         return 0
       fi
       continue
@@ -846,8 +871,7 @@ _shell_code_executor_contains_git_operation() {
       [[ "${token_types[j]}" == "word" ]] || break
       option="${token_values[j]}"
       if _shell_code_is_dynamic "$option"; then
-        if _conservative_shell_text_contains_git_operation \
-          "$operation" "$command"; then
+        if (( conservative_result == 0 )); then
           return 0
         fi
         skip_candidate=1
@@ -894,8 +918,7 @@ _shell_code_executor_contains_git_operation() {
       return 0
     fi
     if _shell_code_is_dynamic "$code" &&
-      _conservative_shell_text_contains_git_operation \
-        "$operation" "$command"; then
+      (( conservative_result == 0 )); then
       return 0
     fi
   done
@@ -932,13 +955,32 @@ _shell_code_is_trusted_data_builtin() {
 _shell_code_contains_git_operation() {
   local operation="$1"
   local code="$2"
+  local preprocessed="${3:-0}"
+  local conservative_result
+  local stripped_code strip_rc
 
+  if (( preprocessed == 0 )); then
+    if stripped_code=$(_strip_shell_non_executable_regions "$code"); then
+      code="$stripped_code"
+    else
+      strip_rc=$?
+      if (( strip_rc == 2 )); then
+        code="$stripped_code"
+      fi
+    fi
+  fi
   _shell_code_is_trusted_data_builtin "$code" && return 1
-  if _shell_static_code_contains_git_operation "$operation" "$code" ||
-    _shell_code_executor_contains_git_operation "$operation" "$code"; then
+  _shell_static_code_contains_git_operation "$operation" "$code" && return 0
+  if _conservative_shell_text_contains_git_operation "$operation" "$code"; then
+    conservative_result=0
+  else
+    conservative_result=1
+  fi
+  if _shell_code_executor_contains_git_operation \
+    "$operation" "$code" "$conservative_result"; then
     return 0
   fi
-  if _conservative_shell_text_contains_git_operation "$operation" "$code"; then
+  if (( conservative_result == 0 )); then
     _shell_code_is_trusted_data_builtin "$code" && return 1
     return 0
   fi
@@ -948,9 +990,11 @@ _shell_code_contains_git_operation() {
 _conservative_shell_text_contains_git_operation() {
   local operation="$1"
   local command="$2"
+  local backtick='`'
 
   command="${command//\"/ }"
   command="${command//\'/ }"
+  command="${command//$backtick/ }"
   command="${command//\(/ }"
   command="${command//\)/ }"
   command="${command//\{/ }"
@@ -973,6 +1017,7 @@ _large_static_shell_text_contains_git_operation() {
       started = 0
       count = 0
       single_quote = sprintf("%c", 39)
+      backtick = sprintf("%c", 96)
     }
 
     function emit_word() {
@@ -1049,7 +1094,7 @@ _large_static_shell_text_contains_git_operation() {
           emit_word()
         } else if (character == "&" || character == "|" ||
                    character == ";" || character == "(" ||
-                   character == ")") {
+                   character == ")" || character == backtick) {
           emit_operator()
         } else {
           started = 1
@@ -1177,6 +1222,357 @@ _large_ambiguous_shell_text_contains_git_operation() {
   _conservative_shell_text_contains_git_operation "$operation" "$command"
 }
 
+# Emit the byte spans of executable shell substitutions without copying their
+# bodies through a delimiter-based protocol. Each B record is:
+#   B <start> <length> <top-level> <opener-width> <closing-position>
+# A leading S record reports 0 for balanced input or 2 for malformed input;
+# balanced input then emits at most 4096 B records. LC_ALL=C keeps awk and Bash
+# byte offsets aligned.
+_large_shell_substitution_spans() {
+  local command="$1"
+
+  LC_ALL=C printf '%s' "$command" | LC_ALL=C awk '
+    BEGIN {
+      level = 0
+      type[0] = "root"
+      state[0] = "unquoted"
+      context_start[0] = 0
+      group_depth[0] = 0
+      position = 0
+      malformed = 0
+      single_quote = sprintf("%c", 39)
+      backtick = sprintf("%c", 96)
+    }
+
+    function open_context(kind, body_start, width) {
+      level++
+      type[level] = kind
+      state[level] = "unquoted"
+      context_start[level] = body_start
+      group_depth[level] = 0
+      opener_width[level] = width
+      pending_tag[level] = ""
+      active_tag[level] = ""
+      strip_tabs[level] = 0
+    }
+
+    function close_context(closing_position,   body_length, top) {
+      body_length = closing_position - context_start[level]
+      top = level == 1 ? 1 : 0
+      if (record_count >= 4096) {
+        malformed = 1
+      } else {
+        record_count++
+        record_start[record_count] = context_start[level]
+        record_length[record_count] = body_length
+        record_top[record_count] = top
+        record_width[record_count] = opener_width[level]
+        record_close[record_count] = closing_position
+      }
+      delete type[level]
+      delete state[level]
+      delete context_start[level]
+      delete group_depth[level]
+      delete opener_width[level]
+      delete pending_tag[level]
+      delete active_tag[level]
+      delete strip_tabs[level]
+      level--
+    }
+
+    function record_heredoc(line, opener_index,   cursor, first, quote, start, tag,
+                            boundary, tabs) {
+      cursor = opener_index + 2
+      tabs = 0
+      if (substr(line, cursor, 1) == "-") {
+        tabs = 1
+        cursor++
+      }
+      while (substr(line, cursor, 1) == " " ||
+             substr(line, cursor, 1) == "\t") {
+        cursor++
+      }
+      first = substr(line, cursor, 1)
+      quote = ""
+      if (first == "\\") {
+        cursor++
+      } else if (first == single_quote || first == "\"") {
+        quote = first
+        cursor++
+      }
+      start = cursor
+      while (substr(line, cursor, 1) ~ /[A-Za-z0-9_]/) {
+        cursor++
+      }
+      tag = substr(line, start, cursor - start)
+      if (quote != "") {
+        if (substr(line, cursor, 1) != quote) {
+          return 0
+        }
+        cursor++
+      }
+      boundary = substr(line, cursor, 1)
+      if (tag !~ /^[A-Za-z_][A-Za-z0-9_]*$/ ||
+          (boundary != "" && boundary !~ /[ \t;&|()<>]/)) {
+        return 0
+      }
+      if (pending_tag[level] != "") {
+        malformed = 1
+        return 0
+      }
+      pending_tag[level] = tag
+      pending_strip_tabs[level] = tabs
+      heredoc_end = cursor - 1
+      return 1
+    }
+
+    {
+      line = $0
+      candidate = line
+      if (active_tag[level] != "") {
+        if (strip_tabs[level]) {
+          sub(/^\t+/, "", candidate)
+        }
+        if (candidate == active_tag[level]) {
+          active_tag[level] = ""
+          strip_tabs[level] = 0
+        }
+        position += length(line) + 1
+        next
+      }
+
+      for (i = 1; i <= length(line); i++) {
+        character = substr(line, i, 1)
+        following = substr(line, i + 1, 1)
+        previous = i > 1 ? substr(line, i - 1, 1) : "\n"
+        after = substr(line, i + 2, 1)
+        absolute = position + i - 1
+
+        if (type[level] == "backtick") {
+          if (character == "\\") {
+            i++
+          } else if (character == backtick) {
+            close_context(absolute)
+          }
+          continue
+        }
+
+        if (state[level] == "comment") {
+          continue
+        }
+        if (state[level] == "single") {
+          if (character == single_quote) {
+            state[level] = "unquoted"
+          }
+          continue
+        }
+        if (state[level] == "double") {
+          if (character == "\\") {
+            i++
+          } else if (character == "\"") {
+            state[level] = "unquoted"
+          } else if (character == "$" && following == "(") {
+            open_context("paren", absolute + 2, 2)
+            i++
+          } else if (character == backtick) {
+            open_context("backtick", absolute + 1, 1)
+          }
+          continue
+        }
+
+        if (character == "\\") {
+          i++
+        } else if (character == single_quote) {
+          state[level] = "single"
+        } else if (character == "\"") {
+          state[level] = "double"
+        } else if (character == "#" &&
+                   (absolute == context_start[level] ||
+                    previous == " " || previous == "\t" ||
+                    previous == "\n" || previous == ";" ||
+                    previous == "|" || previous == "&" ||
+                    previous == "(")) {
+          state[level] = "comment"
+        } else if (character == backtick) {
+          open_context("backtick", absolute + 1, 1)
+        } else if (following == "(" &&
+                   (character == "$" || character == "<" ||
+                    character == ">")) {
+          open_context("paren", absolute + 2, 2)
+          i++
+        } else if (level > 0 &&
+                   character == "<" && following == "<" &&
+                   previous != "<" && after != "<") {
+          if (!record_heredoc(line, i)) {
+            malformed = 1
+          } else {
+            i = heredoc_end
+          }
+        } else if (level > 0 && character == "(") {
+          group_depth[level]++
+        } else if (level > 0 && character == ")") {
+          if (group_depth[level] > 0) {
+            group_depth[level]--
+          } else {
+            close_context(absolute)
+          }
+        }
+      }
+
+      if (state[level] == "comment") {
+        state[level] = "unquoted"
+      }
+      if (pending_tag[level] != "") {
+        active_tag[level] = pending_tag[level]
+        strip_tabs[level] = pending_strip_tabs[level]
+        pending_tag[level] = ""
+        pending_strip_tabs[level] = 0
+      }
+      position += length(line) + 1
+    }
+
+    END {
+      if (level != 0 || state[0] == "single" || state[0] == "double" ||
+          active_tag[0] != "" || pending_tag[0] != "") {
+        malformed = 1
+      }
+      print "S\t" (malformed ? 2 : 0)
+      for (record_index = 1; record_index <= record_count; record_index++) {
+        print "B\t" record_start[record_index] \
+          "\t" record_length[record_index] \
+          "\t" record_top[record_index] \
+          "\t" record_width[record_index] \
+          "\t" record_close[record_index]
+      }
+    }
+  '
+}
+
+# Strip top-level comments after substitutions have been projected out. This
+# intentionally does not re-run heredoc recognition: the caller's first pass
+# already masked supported heredoc bodies, including their terminator lines.
+_strip_shell_comments() {
+  printf '%s' "$1" | awk '
+    BEGIN {
+      state = "unquoted"
+      word_start = 1
+      single_quote = sprintf("%c", 39)
+    }
+
+    {
+      cleaned = ""
+      for (i = 1; i <= length($0); i++) {
+        character = substr($0, i, 1)
+        following = substr($0, i + 1, 1)
+        if (state == "single") {
+          cleaned = cleaned character
+          if (character == single_quote) {
+            state = "unquoted"
+          }
+          continue
+        }
+        if (state == "double") {
+          cleaned = cleaned character
+          if (character == "\\") {
+            if (following != "") {
+              cleaned = cleaned following
+              i++
+            }
+          } else if (character == "\"") {
+            state = "unquoted"
+          }
+          continue
+        }
+        if (character == "\\") {
+          cleaned = cleaned character
+          if (following != "") {
+            cleaned = cleaned following
+            i++
+          }
+          word_start = 0
+        } else if (character == single_quote) {
+          cleaned = cleaned character
+          state = "single"
+          word_start = 0
+        } else if (character == "\"") {
+          cleaned = cleaned character
+          state = "double"
+          word_start = 0
+        } else if (character == "#" && word_start) {
+          break
+        } else {
+          cleaned = cleaned character
+          if (character == " " || character == "\t" ||
+              index(";&|(<>" , character) > 0) {
+            word_start = 1
+          } else {
+            word_start = 0
+          }
+        }
+      }
+      print cleaned
+      if (state == "unquoted") {
+        word_start = 1
+      }
+    }
+  '
+}
+
+# Substitution-bearing command strings use the linear span extractor above,
+# then reuse the normal semantic body analyzer. This avoids treating a readable
+# top-level feature push as evidence that an unrelated substitution pushes to
+# trunk.
+_shell_substitutions_contain_git_operation() {
+  local operation="$1"
+  local command="$2"
+  local LC_ALL=C
+  local kind start body_length top_level opener_width closing_position
+  local body prefix suffix data_builtins_trusted malformed=2
+  local projection="" projection_cursor=0 opener_start
+  local substitution_marker='${_ADT_SHELL_SUBSTITUTION}'
+  local _SHELL_DATA_BUILTINS_TRUSTED=0
+  local _SHELL_SUBSTITUTION_ANALYSIS_LIMIT=64
+  local _SHELL_SUBSTITUTION_ANALYSIS_COUNT=0
+  local _SHELL_SUBSTITUTION_ANALYSIS_BYTE_LIMIT=8192
+  local _SHELL_SUBSTITUTION_ANALYSIS_BYTES=0
+  local -a _SHELL_SUBSTITUTION_CACHE_BODIES=()
+  local -a _SHELL_SUBSTITUTION_CACHE_TRUST=()
+  local -a _SHELL_SUBSTITUTION_CACHE_RESULTS=()
+
+  while IFS=$'\t' read -r kind start body_length top_level opener_width \
+    closing_position; do
+    if [[ "$kind" == "S" ]]; then
+      malformed="$start"
+      (( malformed == 0 )) || return 0
+      continue
+    fi
+    [[ "$kind" == "B" ]] || continue
+    body="${command:start:body_length}"
+    data_builtins_trusted=0
+    if (( top_level == 1 )); then
+      opener_start=$((start - opener_width))
+      projection+=\
+"${command:projection_cursor:opener_start-projection_cursor}${substitution_marker}"
+      projection_cursor=$((closing_position + 1))
+      prefix="${command:0:start-opener_width}"
+      suffix="${command:closing_position+1}"
+      if _shell_substitution_data_output_is_safe "$prefix" &&
+        _shell_substitution_data_suffix_is_safe "$suffix"; then
+        data_builtins_trusted=1
+      fi
+    fi
+    if _shell_substitution_body_contains_git_operation \
+      "$operation" "$body" "$data_builtins_trusted"; then
+      return 0
+    fi
+  done < <(_large_shell_substitution_spans "$command")
+
+  (( malformed == 0 )) || return 0
+  projection+="${command:projection_cursor}"
+  _SHELL_SUBSTITUTION_REMAINDER=$(_strip_shell_comments "$projection")
+  return 1
+}
+
 _shell_substitution_data_output_is_safe() {
   local prefix="$1"
   local trimmed
@@ -1190,8 +1586,15 @@ _shell_substitution_data_output_is_safe() {
     "$prefix" != *"$arithmetic_expansion"* &&
     "$prefix" != *"$arithmetic_command"* ]] || return 1
   trimmed="${prefix#"${prefix%%[![:space:]]*}"}"
-  [[ "$trimmed" == "echo" || "$trimmed" == echo[[:space:]]* ]] || return 1
-  [[ "$(type -t echo 2>/dev/null)" == "builtin" ]]
+  if [[ "$trimmed" == "echo" || "$trimmed" == echo[[:space:]]* ]]; then
+    [[ "$(type -t echo 2>/dev/null)" == "builtin" ]]
+    return
+  fi
+  if [[ "$trimmed" =~ ^gh[[:space:]]+pr[[:space:]]+(create|comment|edit)([[:space:]].*)?[[:space:]]+--body(=|[[:space:]]+)[\"\']?$ ]]; then
+    [[ "$(type -t gh 2>/dev/null)" == "file" ]]
+    return
+  fi
+  return 1
 }
 
 _shell_substitution_data_suffix_is_safe() {
@@ -1201,228 +1604,61 @@ _shell_substitution_data_suffix_is_safe() {
     "$suffix" != *'<'* && "$suffix" != *'>'* ]]
 }
 
-# Inspect only executable substitution bodies. A context stack keeps ordinary
-# parentheses inside commands and quoted strings from truncating the body.
-_unsafe_shell_text_contains_git_operation() {
+_shell_substitution_body_contains_git_operation() {
   local operation="$1"
-  local command="$2"
-  local LC_ALL=C
-  local length=${#command}
-  local level=0 i character following previous state body
-  local comment_copy_start=0 top_level_comment=0
-  local prefix data_builtins_trusted
-  local backslash=$'\\'
-  local _SHELL_DATA_BUILTINS_TRUSTED=0
-  local -a context_type context_state context_start context_group_depth
-  local -a context_data_builtins_trusted
+  local body="$2"
+  local data_builtins_trusted="$3"
+  local analysis_body="$body"
+  local stripped_body strip_rc=0
+  local i result
 
-  context_type[0]="root"
-  context_state[0]="unquoted"
-  context_start[0]=0
-  context_group_depth[0]=0
-  _UNSAFE_SHELL_REMAINDER=""
-  _UNSAFE_SHELL_COMMENT_STRIPPED=""
-
-  for ((i = 0; i < length; i++)); do
-    character="${command:i:1}"
-    following=""
-    if (( i + 1 < length )); then
-      following="${command:i+1:1}"
+  for ((i = 0; i < ${#_SHELL_SUBSTITUTION_CACHE_BODIES[@]}; i++)); do
+    if [[ "${_SHELL_SUBSTITUTION_CACHE_BODIES[i]}" == "$body" &&
+      "${_SHELL_SUBSTITUTION_CACHE_TRUST[i]}" == "$data_builtins_trusted" ]]; then
+      return "${_SHELL_SUBSTITUTION_CACHE_RESULTS[i]}"
     fi
-    previous=""
-    if (( i > 0 )); then
-      previous="${command:i-1:1}"
-    fi
-
-    if [[ "${context_type[level]}" == "backtick" ]]; then
-      if [[ "$character" == "$backslash" ]]; then
-        ((i++))
-      elif [[ "$character" == '`' ]]; then
-        body="${command:${context_start[level]}:i-${context_start[level]}}"
-        _SHELL_DATA_BUILTINS_TRUSTED=\
-"${context_data_builtins_trusted[level]:-0}"
-        if [[ "$_SHELL_DATA_BUILTINS_TRUSTED" == "1" ]] &&
-          ! _shell_substitution_data_suffix_is_safe "${command:i+1}"; then
-          _SHELL_DATA_BUILTINS_TRUSTED=0
-        fi
-        if _shell_code_contains_git_operation "$operation" "$body"; then
-          return 0
-        fi
-        ((level--))
-      fi
-      continue
-    fi
-
-    state="${context_state[level]}"
-    case "$state" in
-      comment)
-        if [[ "$character" == $'\n' ]]; then
-          if (( level == 0 )); then
-            _UNSAFE_SHELL_COMMENT_STRIPPED+="$character"
-            _UNSAFE_SHELL_REMAINDER+="$character"
-            comment_copy_start=$((i + 1))
-            top_level_comment=0
-          fi
-          context_state[level]="unquoted"
-        fi
-        ;;
-      single)
-        if (( level == 0 )); then
-          _UNSAFE_SHELL_REMAINDER+="$character"
-        fi
-        if [[ "$character" == "'" ]]; then
-          context_state[level]="unquoted"
-        fi
-        ;;
-      double)
-        if [[ "$character" == "$backslash" ]]; then
-          if (( level == 0 )); then
-            _UNSAFE_SHELL_REMAINDER+="$character$following"
-          fi
-          ((i++))
-        elif [[ "$character" == '"' ]]; then
-          if (( level == 0 )); then
-            _UNSAFE_SHELL_REMAINDER+="$character"
-          fi
-          context_state[level]="unquoted"
-        elif [[ "$character" == '$' && "$following" == '(' ]]; then
-          data_builtins_trusted=0
-          if (( level == 0 )); then
-            prefix="${command:0:i}"
-            if _shell_substitution_data_output_is_safe "$prefix"; then
-              data_builtins_trusted=1
-            fi
-          fi
-          if (( level == 0 )); then
-            _UNSAFE_SHELL_REMAINDER+=" "
-          fi
-          ((level++))
-          context_type[level]="paren"
-          context_state[level]="unquoted"
-          context_start[level]=$((i + 2))
-          context_group_depth[level]=0
-          context_data_builtins_trusted[level]="$data_builtins_trusted"
-          ((i++))
-        elif [[ "$character" == '`' ]]; then
-          data_builtins_trusted=0
-          if (( level == 0 )); then
-            prefix="${command:0:i}"
-            if _shell_substitution_data_output_is_safe "$prefix"; then
-              data_builtins_trusted=1
-            fi
-          fi
-          if (( level == 0 )); then
-            _UNSAFE_SHELL_REMAINDER+=" "
-          fi
-          ((level++))
-          context_type[level]="backtick"
-          context_start[level]=$((i + 1))
-          context_data_builtins_trusted[level]="$data_builtins_trusted"
-        elif (( level == 0 )); then
-          _UNSAFE_SHELL_REMAINDER+="$character"
-        fi
-        ;;
-      unquoted)
-        if [[ "$character" == "$backslash" ]]; then
-          if (( level == 0 )); then
-            _UNSAFE_SHELL_REMAINDER+="$character$following"
-          fi
-          ((i++))
-        elif [[ "$character" == "'" ]]; then
-          if (( level == 0 )); then
-            _UNSAFE_SHELL_REMAINDER+="$character"
-          fi
-          context_state[level]="single"
-        elif [[ "$character" == '"' ]]; then
-          if (( level == 0 )); then
-            _UNSAFE_SHELL_REMAINDER+="$character"
-          fi
-          context_state[level]="double"
-        elif [[ "$character" == "#" ]] &&
-          { (( i == context_start[level] )) ||
-            [[ "$previous" == " " || "$previous" == $'\t' ||
-              "$previous" == $'\n' || "$previous" == ";" ||
-              "$previous" == "|" || "$previous" == "&" ||
-              "$previous" == "(" ]]; }; then
-          if (( level == 0 )); then
-            _UNSAFE_SHELL_COMMENT_STRIPPED+=\
-"${command:comment_copy_start:i-comment_copy_start}"
-            top_level_comment=1
-          fi
-          context_state[level]="comment"
-        elif [[ "$character" == '`' ]]; then
-          data_builtins_trusted=0
-          if (( level == 0 )); then
-            prefix="${command:0:i}"
-            if _shell_substitution_data_output_is_safe "$prefix"; then
-              data_builtins_trusted=1
-            fi
-          fi
-          if (( level == 0 )); then
-            _UNSAFE_SHELL_REMAINDER+=" "
-          fi
-          ((level++))
-          context_type[level]="backtick"
-          context_start[level]=$((i + 1))
-          context_data_builtins_trusted[level]="$data_builtins_trusted"
-        elif [[ "$following" == '(' &&
-          ( "$character" == '$' || "$character" == '<' ||
-            "$character" == '>' ) ]]; then
-          data_builtins_trusted=0
-          if (( level == 0 )); then
-            prefix="${command:0:i}"
-            if _shell_substitution_data_output_is_safe "$prefix"; then
-              data_builtins_trusted=1
-            fi
-          fi
-          if (( level == 0 )); then
-            _UNSAFE_SHELL_REMAINDER+=" "
-          fi
-          ((level++))
-          context_type[level]="paren"
-          context_state[level]="unquoted"
-          context_start[level]=$((i + 2))
-          context_group_depth[level]=0
-          context_data_builtins_trusted[level]="$data_builtins_trusted"
-          ((i++))
-        elif (( level > 0 )) && [[ "$character" == '(' ]]; then
-          context_group_depth[level]=$((context_group_depth[level] + 1))
-        elif (( level > 0 )) && [[ "$character" == ')' ]]; then
-          if (( context_group_depth[level] > 0 )); then
-            context_group_depth[level]=$((context_group_depth[level] - 1))
-          else
-            body="${command:${context_start[level]}:i-${context_start[level]}}"
-            _SHELL_DATA_BUILTINS_TRUSTED=\
-"${context_data_builtins_trusted[level]:-0}"
-            if [[ "$_SHELL_DATA_BUILTINS_TRUSTED" == "1" ]] &&
-              ! _shell_substitution_data_suffix_is_safe "${command:i+1}"; then
-              _SHELL_DATA_BUILTINS_TRUSTED=0
-            fi
-            if _shell_code_contains_git_operation "$operation" "$body"; then
-              return 0
-            fi
-            ((level--))
-          fi
-        elif (( level == 0 )); then
-          _UNSAFE_SHELL_REMAINDER+="$character"
-        fi
-        ;;
-    esac
   done
 
-  if (( top_level_comment == 0 )); then
-    _UNSAFE_SHELL_COMMENT_STRIPPED+=\
-"${command:comment_copy_start:length-comment_copy_start}"
+  if stripped_body=$(_strip_shell_non_executable_regions "$body"); then
+    analysis_body="$stripped_body"
+  else
+    strip_rc=$?
+    if (( strip_rc == 2 )); then
+      analysis_body="$stripped_body"
+    fi
   fi
-  if (( level != 0 )) ||
-    [[ "${context_state[0]}" == "single" ||
-      "${context_state[0]}" == "double" ]]; then
-    _UNSAFE_SHELL_REMAINDER="$command"
-    _UNSAFE_SHELL_COMMENT_STRIPPED="$command"
-    _conservative_shell_text_contains_git_operation "$operation" "$command"
-    return
+
+  local _SHELL_DATA_BUILTINS_TRUSTED="$data_builtins_trusted"
+  if _shell_code_is_trusted_data_builtin "$analysis_body"; then
+    result=1
+  else
+    # Bound both the number and cumulative size of nested parses per top-level
+    # scan. Excess work is unknown and therefore fails closed; repeated bodies
+    # reuse the cached result without consuming either budget. Proven static
+    # data builtins in a proven data context bypass this semantic-parse budget.
+    if (( _SHELL_SUBSTITUTION_ANALYSIS_COUNT >=
+        _SHELL_SUBSTITUTION_ANALYSIS_LIMIT ||
+      ${#analysis_body} > _SHELL_SUBSTITUTION_ANALYSIS_BYTE_LIMIT -
+        _SHELL_SUBSTITUTION_ANALYSIS_BYTES )); then
+      return 0
+    fi
+    _SHELL_SUBSTITUTION_ANALYSIS_COUNT=\
+$((_SHELL_SUBSTITUTION_ANALYSIS_COUNT + 1))
+    _SHELL_SUBSTITUTION_ANALYSIS_BYTES=\
+$((_SHELL_SUBSTITUTION_ANALYSIS_BYTES + ${#analysis_body}))
+
+    if _shell_code_contains_git_operation "$operation" "$analysis_body" 1; then
+      result=0
+    else
+      result=1
+    fi
   fi
-  return 1
+
+  i=${#_SHELL_SUBSTITUTION_CACHE_BODIES[@]}
+  _SHELL_SUBSTITUTION_CACHE_BODIES[i]="$body"
+  _SHELL_SUBSTITUTION_CACHE_TRUST[i]="$data_builtins_trusted"
+  _SHELL_SUBSTITUTION_CACHE_RESULTS[i]="$result"
+  return "$result"
 }
 
 # Check if command invokes a given git subcommand.
@@ -1447,8 +1683,6 @@ is_git_command() {
   local command="$2"
   local stripped_command
   local strip_rc=0
-  local _UNSAFE_SHELL_REMAINDER="$command"
-  local _UNSAFE_SHELL_COMMENT_STRIPPED="$command"
 
   if stripped_command=$(_strip_shell_non_executable_regions "$command"); then
     command="$stripped_command"
@@ -1461,20 +1695,25 @@ is_git_command() {
       "$operation" "$stripped_command"; then
       return 0
     fi
-    if (( ${#stripped_command} >= 4096 )); then
-      _large_ambiguous_shell_text_contains_git_operation \
+    if (( ${#command} >= 4096 )); then
+      if _large_ambiguous_shell_text_contains_git_operation \
+        "$operation" "$stripped_command"; then
+        return 0
+      fi
+      _shell_substitutions_contain_git_operation \
         "$operation" "$stripped_command"
       return
     fi
-    if _unsafe_shell_text_contains_git_operation "$operation" "$command"; then
+    if _shell_substitutions_contain_git_operation \
+      "$operation" "$stripped_command"; then
       return 0
     fi
-    _resolve_git_command_tokenize "$_UNSAFE_SHELL_COMMENT_STRIPPED"
+    _resolve_git_command_tokenize "$_SHELL_SUBSTITUTION_REMAINDER" 1
     if (( _RGCC_UNSAFE == 1 )) &&
       _resolve_git_unsafe_tokens_contain_operation "$operation"; then
       return 0
     fi
-    command="$_UNSAFE_SHELL_REMAINDER"
+    command="$_SHELL_SUBSTITUTION_REMAINDER"
   fi
 
   # Strip simple quoted regions so prose such as "see git push docs" cannot
@@ -2154,8 +2393,6 @@ resolve_git_command_cwd() {
   local canonical_base resolved stripped_command
   local strip_rc=0
   local command_preprocessed=0
-  local _UNSAFE_SHELL_REMAINDER="$command"
-  local _UNSAFE_SHELL_COMMENT_STRIPPED="$command"
   local separator=-1
   local i n
 
@@ -2171,22 +2408,28 @@ resolve_git_command_cwd() {
       "$operation" "$stripped_command"; then
       return 2
     fi
-    if (( ${#stripped_command} >= 4096 )); then
+    if (( ${#command} >= 4096 )); then
       if _large_ambiguous_shell_text_contains_git_operation \
+        "$operation" "$stripped_command"; then
+        return 2
+      fi
+      if _shell_substitutions_contain_git_operation \
         "$operation" "$stripped_command"; then
         return 2
       fi
       return 1
     fi
-    if _unsafe_shell_text_contains_git_operation "$operation" "$command"; then
+    if _shell_substitutions_contain_git_operation \
+      "$operation" "$stripped_command"; then
       return 2
     fi
-    _resolve_git_command_tokenize "$_UNSAFE_SHELL_COMMENT_STRIPPED"
+    _resolve_git_command_tokenize "$_SHELL_SUBSTITUTION_REMAINDER" 1
     if (( _RGCC_UNSAFE == 1 )) &&
       _resolve_git_unsafe_tokens_contain_operation "$operation"; then
       return 2
     fi
-    command="$_UNSAFE_SHELL_REMAINDER"
+    command="$_SHELL_SUBSTITUTION_REMAINDER"
+    command_preprocessed=1
   fi
   _resolve_git_command_tokenize "$command" "$command_preprocessed"
 

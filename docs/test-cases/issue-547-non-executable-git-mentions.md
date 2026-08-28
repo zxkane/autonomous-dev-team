@@ -165,6 +165,36 @@ Those shapes retain the original command text and fail closed.
 | `TC-IGC-547-143` | An approximately 20 KiB ambiguous command ends with `git 'commit'` | Main-workspace hook exits `2` within five seconds |
 | `TC-IGC-547-144` | An approximately 20 KiB ambiguous command ends with `git ${G} commit` | Main-workspace hook exits `2` within five seconds |
 | `TC-IGC-547-145` | An approximately 20 KiB ambiguous command contains no literal `git` word | Main-workspace hook exits `0` within five seconds |
+| `TC-IGC-547-146` | A real commit command contains one substitution body with 500 dynamic command-position tokens | Detector still matches within five seconds |
+| `TC-IGC-547-147` | A git-free command contains the same dense substitution body | Detector returns no match within five seconds |
+| `TC-IGC-547-148` | An approximately 35 KiB masked heredoc is followed by a benign substitution | Detector returns no match within five seconds |
+| `TC-IGC-547-149` | The same masked heredoc is followed by a substitution-hidden commit | Detector matches within five seconds |
+| `TC-IGC-547-150` | Main-workspace hook receives the benign masked-heredoc command | Hook exits `0` within five seconds |
+| `TC-IGC-547-151` | Main-workspace hook receives the hidden-commit masked-heredoc command | Hook exits `2` within five seconds |
+| `TC-IGC-547-152` | A sub-4 KiB git-free substitution has 62 padded nesting levels | Detector terminates within five seconds and fails closed when cumulative analysis exceeds 8 KiB |
+| `TC-IGC-547-153` | The same deep substitution hides a commit in its outer body | Detector matches within five seconds |
+| `TC-IGC-547-154` | Main-workspace hook receives the deeply nested git-free command | Hook terminates fail-closed with exit `2` within five seconds |
+| `TC-IGC-547-155` | Main-workspace hook receives the deeply nested hidden commit | Hook exits `2` within five seconds |
+| `TC-IGC-547-156` | A greater-than-4 KiB command contains a benign backtick substitution | Detector returns no match within five seconds |
+| `TC-IGC-547-157` | The same large command contains a backtick-hidden commit | Detector matches within five seconds |
+| `TC-IGC-547-158` | Main-workspace hook receives the large benign backtick command | Hook exits `0` within five seconds |
+| `TC-IGC-547-159` | Main-workspace hook receives the large backtick-hidden commit | Hook exits `2` within five seconds |
+| `TC-IGC-547-160` | A 4090-byte command alternates deeply nested `$()` and backtick substitutions | Detector terminates fail-closed within three seconds |
+| `TC-IGC-547-161` | Main-workspace hook receives that worst-case mixed nesting | Hook exits `2` within three seconds |
+| `TC-IGC-547-162` | A greater-than-4 KiB backtick body assembles `git commit` with ANSI-C quoted words | Detector still matches the executable commit |
+| `TC-IGC-547-163` | Main-workspace hook receives that ANSI-C quoted backtick commit | Hook exits `2` |
+| `TC-IGC-547-164` | A sub-4 KiB masked heredoc contains commit prose and is followed by `$(date)` | Detector keeps the heredoc prose hidden |
+| `TC-IGC-547-165` | Main-workspace hook receives that masked heredoc plus benign substitution | Hook exits `0` |
+| `TC-IGC-547-166` | A generated PR body contains backtick-formatted `git commit` prose inside a quoted heredoc | Detector keeps the body prose hidden |
+| `TC-IGC-547-167` | Main-workspace hook receives that generated PR body | Hook exits `0` |
+| `TC-IGC-547-168` | A real substitution-hidden commit follows the generated PR body | Detector still matches the executable sibling |
+| `TC-IGC-547-169` | Main-workspace hook receives the generated body plus real hidden commit | Hook exits `2` |
+| `TC-IGC-547-170` | UTF-8 text precedes a substitution-hidden commit | Byte offsets remain aligned and the detector matches |
+| `TC-IGC-547-171` | Main-workspace hook receives that UTF-8-prefixed hidden commit | Hook exits `2` |
+| `TC-IGC-547-172` | `git com$(echo mit)` dynamically completes the operation word | Detector remains fail-closed and matches |
+| `TC-IGC-547-173` | Main-workspace hook receives that split commit operation | Hook exits `2` |
+| `TC-IGC-547-174` | `git "com"$(echo mit)` combines a quoted prefix and dynamic suffix | Detector remains fail-closed and matches |
+| `TC-IGC-547-175` | Main-workspace hook receives that quoted split operation | Hook exits `2` |
 | `TC-BP-35` | An approximately 8 KiB ambiguous command ends with `git push origin main` | Trunk-protection hook exits `2` within five seconds; unresolved refspec parsing cannot grant the push |
 | `TC-BP-36` | Chained/multiline workflows and a quoted dynamic remote end with a literal feature refspec | Trunk-protection hook exits `0`; the equivalent trunk push and an unquoted dynamic remote exit `2` |
 | `TC-BP-37` | Expansion-bearing commands contain no literal `git push`; control uses `$GIT push origin main` | Git-free commands exit `0`; the explicit dynamic Git operation remains fail-closed |
@@ -183,14 +213,15 @@ Those shapes retain the original command text and fail closed.
 | `TC-BP-50` | Dynamic `git -C` is followed by one or more static global options and then `commit` or `log` | Hook exits `0`; the definite non-push operation remains readable after intervening flags |
 | `TC-BP-51` | The `push` operation word itself is assembled from mixed quote fragments and targets trunk | Hook exits `2`; resolver uncertainty cannot be discarded as a parser no-match |
 | `TC-BP-52` | Benign command substitutions (`$(date)`, `$(cat ...)`, backticks, or a nested `echo` that only generates push text) appear in builtin data commands; controls execute a trunk push from top-level command/process substitution, assignment, `eval`, an arithmetic expression, or an `if` command | Benign substitutions exit `0`; substitution bodies that execute a possible push exit `2` |
-| `TC-BP-53` | Trunk-push text is piped to `awk system($0)`, a dynamic `while` body, `tee >(bash)`, or `xargs env`; controls use print/echo/cat-only equivalents | Stdin evaluators exit `2`; data-only consumers exit `0` |
+| `TC-BP-53` | Trunk-push text is piped to awk `system()` or command-pipe forms, external awk source forms including gawk `-E`/`--exec`, `-i`/`--include`, `@load`, and accepted long-option abbreviations, sed `e` forms, dynamic/unknown executors such as `parallel`, `at`, or `crontab`, a dynamic `while` body, `tee >(bash)`, or `xargs env`; controls use safe awk `-F`/`-v`/`--` forms, statically safe sed programs, and explicitly classified text filters | Stdin evaluators and unknown consumers exit `2`; explicit data-only consumers exit `0` |
 | `TC-BP-54` | Trunk-push text passes through one or more data-only filters before reaching a shell, interpreter, source command, compound command, nested process substitution, or `|&` consumer; controls remain data-only through every stage or place an unrelated shell pipeline after a command-list boundary | Any downstream executable consumer exits `2`; multi-stage data-only and boundary-separated pipelines exit `0` |
-| `TC-BP-55` | An approximately 20 KiB git-free ambiguous command contains a benign `$(date)` substitution | Trunk-protection hook exits `0` within five seconds; substitution evidence uses the bounded large-input scanner |
+| `TC-BP-55` | An approximately 20 KiB unmasked git-free ambiguous command contains a benign `$(date)` substitution | Trunk-protection hook exits `0` within five seconds; substitution evidence uses the bounded large-input scanner |
 | `TC-BP-56` | Trunk-push text reaches a shell inside `if`, `for`, `select`, single- or multi-arm nested `case`, or an output process substitution, or through an unlisted launcher or `env -S`/`--split-string`; every form has a `cat`-only twin | Executable bodies exit `2`; data-only twins, including `{ cat; }` and `(cat)`, exit `0` |
-| `TC-BP-57` | A benign pipeline has 200 `cat` stages; a dynamic-input control has the same stages followed by `bash` | Both finish within five seconds; benign data exits `0` and the executable control exits `2` |
-| `TC-BP-58` | Trunk-push data is consumed inside nested brace groups, or produced inside subshell, brace, `if`, `for`, or `case` stages whose outer pipeline reaches `bash`; every form has a `cat` twin | Every executable flow exits `2`; grouped data-only flows and boundary-separated unrelated pipelines exit `0` |
+| `TC-BP-57` | A benign pipeline has 200 `cat` stages; additional data/executable controls use 200 distinct `echo` producer stages, including inside an outer group, plus 40 nested output process substitutions | Every form finishes within three to five seconds as pinned; benign data exits `0` and executable controls exit `2` |
+| `TC-BP-58` | Trunk-push data is consumed inside nested brace groups, or produced inside subshell, brace, `if`, `for`, `while`, or `case` stages whose outer pipeline or output process substitution reaches a shell, including an inner data-only pipeline before that outer consumer; every form has a data-only twin | Every executable flow exits `2`; grouped data-only flows and boundary-separated unrelated pipelines exit `0` |
 | `TC-BP-59` | Trunk-push data reaches compact or clustered `env -Sbash` forms, including forms after attached `-C`/`-u` operands, alternate shell names, or a BusyBox shell applet; controls use compact `-Scat` forms or `busybox cat` | Shell consumers exit `2`; data-only consumers exit `0` |
-| `TC-BP-60` | Approximately 41 KiB benign, large-heredoc, literal-trunk, and quote-concatenated-trunk inputs are paired with 200 grouped data segments ending in `cat` or `bash` | Every case finishes within three seconds; benign/heredoc/data-only cases exit `0` and trunk/executable cases exit `2` |
+| `TC-BP-60` | Approximately 41 KiB unmasked inputs, a 35 KiB masked heredoc, 53 KiB of comment-masked text, greater-than-4 KiB backtick substitutions, 200 grouped data segments ending in `cat` or `bash`, 400 distinct data-only command-list stages, hundreds of repeated command/backtick/process substitutions, the 64/65 unique-body boundary, one body containing 500 dynamic command-position tokens, 62-level padded nesting, and a 4090-byte alternating `$()`/backtick nest | Every case finishes within three to five seconds; masked and large-backtick benign substitutions remain allowed, hidden trunk pushes exit `2`, repeated/dense benign bodies and exactly 64 small unique bodies remain allowed, and count- or cumulative-byte-budget overflow fails closed |
+| `TC-BP-61` | Large ANSI-C quoted backtick pushes, UTF-8-prefixed hidden pushes, dynamically split operation words, feature pushes beside benign command/process substitutions, 3 KiB data-only process substitutions, sub-4 KiB masked heredocs, compact/large generated PR bodies, an 8.3 KiB inline `printf` body, and `gh pr comment --body-file -` heredoc input | Hidden trunk pushes exit `2`; feature pushes and push prose that remain data exit `0`, including both generated-body and stdin-body PR workflows |
 
 ## Evidence contract
 
@@ -201,8 +232,8 @@ false-positive detector behavior and its user-visible hook impact without
 changing production code. The controls also prevent a future comment/heredoc
 stripper from hiding a real commit after quoted text or a heredoc terminator.
 
-The review-regression cases `142` through `145` and `TC-BP-36` through
-`TC-BP-60` must fail across the reviewed intermediate fixes: operation-bearing
+The review-regression cases `142` through `175` and `TC-BP-36` through
+`TC-BP-61` must fail across the reviewed intermediate fixes: operation-bearing
 large commands time out, git-free expansion commands are misclassified,
 chained or prefixed feature pushes are blocked, prefixed trunk pushes disappear,
 non-executable push text is treated as executable, executable data is treated
@@ -218,9 +249,25 @@ substitution-bearing large-input timeout.
 quadratic downstream pipeline scan.
 `TC-BP-58..60` reproduce the eighth review's brace-stage truncation,
 compound-producer bypass, compact `env -S` and alternate-shell bypasses, and
-large-input or repeated-group timeout paths.
+large-input or repeated-group timeout paths. The expanded `TC-BP-58` and
+`TC-BP-60` cases reproduce the ninth review's grouped inner-pipeline bypass,
+output-process-substitution variant, and quadratic scan across distinct
+command-list stages. The expanded `TC-BP-53` and `TC-BP-57` cases reproduce the
+tenth review's flat-pipeline quadratic scan and the sed, awk, and unknown
+stdin-executor fail-open paths. The expanded `TC-BP-53` and `TC-BP-60` cases
+reproduce the eleventh review's omitted gawk include/load executors and
+substitution-count timeout paths. The expanded `TC-BP-53`, `TC-BP-57`, and
+`TC-BP-60` cases reproduce the twelfth review's gawk `-E`/abbreviation bypass,
+deep process-substitution timeout, and repeated whole-body executor scan.
+`TC-IGC-547-162..169` and `TC-BP-61` reproduce the thirteenth review's
+large ANSI-C backtick bypass, whole-command feature-push false positive,
+resolver-uncertainty false positive, discarded top-level heredoc mask, and
+generated-PR-body heredoc false positive.
+`TC-IGC-547-170..175` and the expanded `TC-BP-61` reproduce the fourteenth
+review's UTF-8 byte/character offset bypass, split-operation-word bypass,
+8 KiB inline-body false positive, and stdin PR-body heredoc false positive.
 
-The eventual fix is complete only when all one hundred forty-five detector
-cases and all three hundred thirteen trunk-protection assertions pass together with the
-existing `test-is-git-command.sh` and
+The eventual fix is complete only when all one hundred seventy-five detector
+cases and all four hundred ten trunk-protection assertions pass
+together with the existing `test-is-git-command.sh` and
 `test-block-commit-outside-worktree.sh` suites.

@@ -155,6 +155,49 @@ assert_large_ambiguous_hook_bounded() {
   fi
 }
 
+assert_dense_detector_bounded() {
+  local id="$1"
+  local expected="$2"
+  local command="$3"
+  local budget="${4:-5}"
+  local rc
+
+  if timeout "$budget" bash -c '
+    source "$1"
+    if is_git_command commit "$2"; then
+      actual=0
+    else
+      actual=1
+    fi
+    [[ "$actual" -eq "$3" ]]
+  ' _ "$LIB" "$command" "$expected"; then
+    record_pass "$id (detector rc=$expected within ${budget}s)"
+  else
+    rc=$?
+    record_fail "$id (expected detector rc=$expected within ${budget}s, got rc=$rc)"
+  fi
+}
+
+assert_hook_bounded_rc() {
+  local id="$1"
+  local expected="$2"
+  local command="$3"
+  local budget="${4:-5}"
+  local payload output rc
+
+  payload=$(jq -cn --arg command "$command" '{tool_input:{command:$command}}')
+  output=$(
+    cd "$REPO_A" &&
+      printf '%s' "$payload" | timeout "$budget" bash "$HOOK" 2>&1
+  )
+  rc=$?
+  if [[ "$rc" -eq "$expected" ]]; then
+    record_pass "$id (hook rc=$rc within ${budget}s)"
+  else
+    record_fail "$id (expected hook rc=$expected within ${budget}s, got rc=$rc: $output)"
+  fi
+}
+
 assert_preprocessor_failure_detector() {
   local id="$1"
 
@@ -312,7 +355,7 @@ BENIGN_COMMAND_DYNAMIC_SCRIPT='echo "$(command bash "$f")"'
 BENIGN_DYNAMIC_EVAL='echo "$(eval "$generated")"'
 
 echo ""
-echo "=== TC-IGC-547-001..145: non-executable git mentions ==="
+echo "=== TC-IGC-547-001..175: non-executable git mentions ==="
 echo ""
 
 assert_detector_no_match \
@@ -756,6 +799,139 @@ assert_large_ambiguous_hook_bounded \
 assert_large_ambiguous_hook_bounded \
   "TC-IGC-547-145 git-free ambiguous input stays allowed within hook budget" \
   0 "printf '%s\n' done" 625
+dense_substitution='$('
+for ((i = 0; i < 500; i++)); do
+  dense_substitution+='$a;'
+done
+dense_substitution+=')'
+assert_dense_detector_bounded \
+  "TC-IGC-547-146 dense substitution keeps a real commit visible" 0 \
+  "git commit -m real $dense_substitution"
+assert_dense_detector_bounded \
+  "TC-IGC-547-147 dense benign substitution stays allowed" 1 \
+  "echo ok $dense_substitution"
+masked_large_command="cat > /tmp/issue547-masked-commit <<'EOF'"$'\n'
+for ((i = 0; i < 1500; i++)); do
+  masked_large_command+="documentation line $i"$'\n'
+done
+masked_large_command+=$'EOF\n'
+assert_dense_detector_bounded \
+  "TC-IGC-547-148 large masked benign substitution stays bounded" 1 \
+  "${masked_large_command}"'echo "$(date)"'
+assert_dense_detector_bounded \
+  "TC-IGC-547-149 large masked hidden commit stays visible" 0 \
+  "${masked_large_command}"'echo "$(git commit -m x)"'
+assert_hook_bounded_rc \
+  "TC-IGC-547-150 hook allows large masked benign substitution" 0 \
+  "${masked_large_command}"'echo "$(date)"'
+assert_hook_bounded_rc \
+  "TC-IGC-547-151 hook blocks large masked hidden commit" 2 \
+  "${masked_large_command}"'echo "$(git commit -m x)"'
+deep_padding=$(printf 'x%.0s' {1..47})
+deep_substitution='date'
+for ((i = 1; i <= 62; i++)); do
+  deep_substitution="printf %s_${deep_padding}${i} \$($deep_substitution)"
+done
+assert_dense_detector_bounded \
+  "TC-IGC-547-152 deeply nested benign substitution terminates fail-closed" 0 \
+  "echo \$($deep_substitution)"
+assert_dense_detector_bounded \
+  "TC-IGC-547-153 deeply nested hidden commit terminates fail-closed" 0 \
+  "echo \$(git commit -m x; $deep_substitution)"
+assert_hook_bounded_rc \
+  "TC-IGC-547-154 hook bounds deeply nested benign substitution" 2 \
+  "echo \$($deep_substitution)"
+assert_hook_bounded_rc \
+  "TC-IGC-547-155 hook blocks deeply nested hidden commit" 2 \
+  "echo \$(git commit -m x; $deep_substitution)"
+large_backtick_padding=$(printf 'x%.0s' {1..5000})
+assert_dense_detector_bounded \
+  "TC-IGC-547-156 large benign backtick substitution stays allowed" 1 \
+  "echo $large_backtick_padding; echo \`date\`"
+assert_dense_detector_bounded \
+  "TC-IGC-547-157 large hidden backtick commit stays visible" 0 \
+  "echo $large_backtick_padding; echo \`git commit -m x\`"
+assert_hook_bounded_rc \
+  "TC-IGC-547-158 hook allows large benign backtick substitution" 0 \
+  "echo $large_backtick_padding; echo \`date\`"
+assert_hook_bounded_rc \
+  "TC-IGC-547-159 hook blocks large hidden backtick commit" 2 \
+  "echo $large_backtick_padding; echo \`git commit -m x\`"
+mixed_substitution='date'
+for ((i = 0; i < 1635; i++)); do
+  if (( i % 2 == 0 )); then
+    mixed_substitution="\$($mixed_substitution)"
+  else
+    mixed_substitution="\`$mixed_substitution\`"
+  fi
+done
+mixed_substitution="${mixed_substitution:0:4090}"
+assert_dense_detector_bounded \
+  "TC-IGC-547-160 worst-case mixed substitution terminates fail-closed" 0 \
+  "$mixed_substitution" 3
+assert_hook_bounded_rc \
+  "TC-IGC-547-161 hook bounds worst-case mixed substitution" 2 \
+  "$mixed_substitution" 3
+
+large_ansi_padding=$(printf 'x%.0s' {1..4100})
+large_ansi_backtick="echo \`\$'git' \$'commit' -m x\`; echo $large_ansi_padding"
+assert_dense_detector_bounded \
+  "TC-IGC-547-162 large ANSI-C quoted backtick commit stays visible" 0 \
+  "$large_ansi_backtick"
+assert_hook_bounded_rc \
+  "TC-IGC-547-163 hook blocks large ANSI-C quoted backtick commit" 2 \
+  "$large_ansi_backtick"
+
+small_heredoc_substitution=$'cat > /tmp/issue547-commit-doc <<\'EOF\'\n'
+small_heredoc_substitution+=$'git commit -m documentation-only\n'
+small_heredoc_substitution+="$(printf 'documentation %.0s' {1..100})"
+small_heredoc_substitution+=$'\nEOF\necho "$(date)"'
+assert_detector_no_match \
+  "TC-IGC-547-164 heredoc commit prose beside benign substitution stays hidden" \
+  "$small_heredoc_substitution"
+assert_hook_rc \
+  "TC-IGC-547-165 hook allows heredoc commit prose beside benign substitution" 0 \
+  "$small_heredoc_substitution"
+
+commit_pr_body=$'gh pr create --title "fix: example" --body "$(cat <<\'PRBODY\'\n'
+commit_pr_body+=$'- The example workflow runs `git commit -m example` before review.\n'
+commit_pr_body+=$'PRBODY\n)"'
+assert_detector_no_match \
+  "TC-IGC-547-166 generated PR body commit prose stays hidden" \
+  "$commit_pr_body"
+assert_hook_rc \
+  "TC-IGC-547-167 hook allows generated PR body commit prose" 0 \
+  "$commit_pr_body"
+commit_pr_body_with_real_commit="${commit_pr_body}"'; echo "$(git commit -m real)"'
+assert_detector_match \
+  "TC-IGC-547-168 real commit beside generated PR body stays visible" \
+  "$commit_pr_body_with_real_commit"
+assert_hook_rc \
+  "TC-IGC-547-169 hook blocks real commit beside generated PR body" 2 \
+  "$commit_pr_body_with_real_commit"
+
+UNICODE_HIDDEN_COMMIT=$'echo "\u2615\u2615\u2615\u2615" && x=$(git commit -m real)'
+assert_detector_match \
+  "TC-IGC-547-170 UTF-8 prefix does not shift hidden commit body" \
+  "$UNICODE_HIDDEN_COMMIT"
+assert_hook_rc \
+  "TC-IGC-547-171 hook blocks hidden commit after UTF-8 prefix" 2 \
+  "$UNICODE_HIDDEN_COMMIT"
+
+SPLIT_COMMIT_OPERATION='git com$(echo mit) -m real'
+assert_detector_match \
+  "TC-IGC-547-172 dynamic suffix does not hide split commit operation" \
+  "$SPLIT_COMMIT_OPERATION"
+assert_hook_rc \
+  "TC-IGC-547-173 hook blocks split commit operation" 2 \
+  "$SPLIT_COMMIT_OPERATION"
+QUOTED_SPLIT_COMMIT_OPERATION='git "com"$(echo mit) -m real'
+assert_detector_match \
+  "TC-IGC-547-174 quoted prefix does not hide split commit operation" \
+  "$QUOTED_SPLIT_COMMIT_OPERATION"
+assert_hook_rc \
+  "TC-IGC-547-175 hook blocks quoted split commit operation" 2 \
+  "$QUOTED_SPLIT_COMMIT_OPERATION"
 
 echo ""
 echo "========================================"

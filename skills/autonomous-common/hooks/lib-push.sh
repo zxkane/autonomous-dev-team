@@ -54,9 +54,15 @@ _push_prepare_command_tokens() {
   _PUSH_TOKEN_ANSI=()
   _PUSH_TOKEN_UNSAFE=()
   _PUSH_TOKEN_MALFORMED=0
-  _PUSH_ENCLOSING_PIPELINE_CACHE_START=-1
-  _PUSH_ENCLOSING_PIPELINE_CACHE_END=-1
-  _PUSH_ENCLOSING_PIPELINE_CACHE_RESULT=1
+  _PUSH_STAGE_TABLE_READY=0
+  _PUSH_STAGE_BY_TOKEN=()
+  _PUSH_STAGE_NEXT_PIPES=()
+  _PUSH_STAGE_PROCESS_SUBS=()
+  _PUSH_STAGE_RESULTS=()
+  _PUSH_PIPE_RESULT_LIMITS=()
+  _PUSH_PIPE_RESULTS=()
+  _PUSH_PIPE_SCAN_ENDS=()
+  _PUSH_PROCESS_SUB_RESULTS=()
 
   if ! declare -F _resolve_git_command_tokenize >/dev/null 2>&1; then
     library_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -185,8 +191,11 @@ _push_shell_command_name_executes_input() {
 
 _push_shell_command_name_is_data_only() {
   case "$1" in
-    ':'|'['|'[['|cat|comm|cut|diff|echo|false|fmt|fold|gh|grep|egrep|fgrep|\
-      head|jq|nl|paste|printf|read|sed|sort|tail|tee|test|tr|true|uniq|wc)
+    ':'|'['|'[['|base32|base64|cat|cd|cksum|column|comm|cut|dd|diff|echo|\
+      expand|false|fmt|fold|gh|grep|egrep|fgrep|head|hexdump|iconv|jq|\
+      md5sum|nl|od|paste|printf|read|rev|sha1sum|sha224sum|sha256sum|\
+      sha384sum|sha512sum|sort|strings|tac|tail|tee|test|tr|true|\
+      unexpand|uniq|wc|xxd)
       return 0
       ;;
   esac
@@ -203,6 +212,15 @@ _push_static_command_text_executes_input() {
   local -a _PUSH_TOKEN_QUOTES=()
   local -a _PUSH_TOKEN_ANSI=()
   local -a _PUSH_TOKEN_UNSAFE=()
+  local _PUSH_STAGE_TABLE_READY=0
+  local -a _PUSH_STAGE_BY_TOKEN=()
+  local -a _PUSH_STAGE_NEXT_PIPES=()
+  local -a _PUSH_STAGE_PROCESS_SUBS=()
+  local -a _PUSH_STAGE_RESULTS=()
+  local -a _PUSH_PIPE_RESULT_LIMITS=()
+  local -a _PUSH_PIPE_RESULTS=()
+  local -a _PUSH_PIPE_SCAN_ENDS=()
+  local -a _PUSH_PROCESS_SUB_RESULTS=()
 
   _push_prepare_command_tokens "$command"
   n=${#_PUSH_TOKEN_VALUES[@]}
@@ -265,6 +283,123 @@ _push_env_split_option_command() {
   _push_env_split_command_text "$split_text" "$start" "$end" || return 2
 }
 
+_push_sed_command_executes_standard_input() {
+  local j="$1" end="$2"
+  local value script
+  local program_supplied=0
+
+  ((j++))
+  while (( j < end )); do
+    _push_token_static_value "$j" || return 0
+    value="$_PUSH_STATIC_VALUE"
+    case "$value" in
+      -e|--expression)
+        (( j + 1 < end )) || return 0
+        _push_token_static_value "$((j + 1))" || return 0
+        script="$_PUSH_STATIC_VALUE"
+        # sed's lowercase e command/flag executes generated shell text.
+        [[ "$script" != *e* ]] || return 0
+        program_supplied=1
+        j=$((j + 2))
+        ;;
+      --expression=*)
+        script="${value#*=}"
+        [[ "$script" != *e* ]] || return 0
+        program_supplied=1
+        ((j++))
+        ;;
+      -f|--file|-f?*|--file=*)
+        return 0
+        ;;
+      -l|--line-length)
+        (( j + 1 < end )) || return 0
+        _push_token_static_value "$((j + 1))" || return 0
+        j=$((j + 2))
+        ;;
+      -i|--in-place)
+        return 0
+        ;;
+      -l?*|--line-length=*|-n|--quiet|--silent|-E|-r|\
+        --regexp-extended|-s|--separate|-u|--unbuffered|-z|--null-data|\
+        --debug|--sandbox|-i?*|--in-place=*)
+        ((j++))
+        ;;
+      --)
+        ((j++))
+        if (( program_supplied == 0 )); then
+          (( j < end )) || return 0
+          _push_token_static_value "$j" || return 0
+          script="$_PUSH_STATIC_VALUE"
+          [[ "$script" != *e* ]] || return 0
+          program_supplied=1
+          ((j++))
+        fi
+        ;;
+      -*)
+        return 0
+        ;;
+      *)
+        if (( program_supplied == 0 )); then
+          script="$value"
+          [[ "$script" != *e* ]] || return 0
+          program_supplied=1
+        fi
+        ((j++))
+        ;;
+    esac
+  done
+  (( program_supplied == 1 )) || return 0
+  return 1
+}
+
+_push_awk_command_executes_standard_input() {
+  local j="$1" end="$2"
+  local value program
+  local options=1
+
+  ((j++))
+  while (( j < end )); do
+    if _push_token_static_value "$j"; then
+      value="$_PUSH_STATIC_VALUE"
+    elif [[ "${_PUSH_TOKEN_QUOTES[j]:-}" == "single" &&
+      "${_PUSH_TOKEN_ANSI[j]:-0}" == "0" ]]; then
+      value="${_PUSH_TOKEN_VALUES[j]:-}"
+    else
+      return 0
+    fi
+
+    if (( options == 1 )); then
+      case "$value" in
+        -F|--field-separator|-v|--assign)
+          (( j + 1 < end )) || return 0
+          _push_token_static_value "$((j + 1))" || return 0
+          j=$((j + 2))
+          continue
+          ;;
+        -F?*|-v?*|--field-separator=*|--assign=*)
+          ((j++))
+          continue
+          ;;
+        --)
+          options=0
+          ((j++))
+          continue
+          ;;
+        -*)
+          return 0
+          ;;
+      esac
+    fi
+
+    program="$value"
+    [[ "$program" != *@include* && "$program" != *@load* ]] || return 0
+    [[ ! "$program" =~ system[[:space:]]*\( && "$program" != *'|'* ]] ||
+      return 0
+    return 1
+  done
+  return 0
+}
+
 _push_static_command_text_contains_push() {
   if declare -F _shell_static_code_contains_git_operation >/dev/null 2>&1; then
     _shell_static_code_contains_git_operation "push" "$1"
@@ -275,7 +410,7 @@ _push_static_command_text_contains_push() {
 
 _push_simple_command_executes_standard_input() {
   local j="$1" end="$2"
-  local value command_name option rc candidate
+  local value command_name option rc
 
   while (( j < end )); do
     if _push_skip_redirection "$j" "$end"; then
@@ -463,29 +598,77 @@ _push_simple_command_executes_standard_input() {
         _push_command_executes_standard_input "$j" "$end"
         return
         ;;
-      awk|gawk|mawk|nawk)
-        for ((j = j + 1; j < end; j++)); do
-          if _push_token_static_value "$j"; then
-            value="$_PUSH_STATIC_VALUE"
-          elif [[ "${_PUSH_TOKEN_QUOTES[j]:-}" == "single" &&
-            "${_PUSH_TOKEN_ANSI[j]:-0}" == "0" ]]; then
-            value="${_PUSH_TOKEN_VALUES[j]:-}"
-          else
-            return 0
-          fi
-          [[ "$value" =~ system[[:space:]]*\( ]] && return 0
+      nice)
+        ((j++))
+        while (( j < end )); do
+          _push_token_static_value "$j" || return 0
+          option="$_PUSH_STATIC_VALUE"
+          case "$option" in
+            -n|--adjustment)
+              (( j + 1 < end )) || return 0
+              j=$((j + 2))
+              ;;
+            -n?*|--adjustment=*|-[0-9]*|--) ((j++)) ;;
+            -*) ((j++)) ;;
+            *) break ;;
+          esac
         done
-        return 1
+        (( j < end )) || return 1
+        _push_command_executes_standard_input "$j" "$end"
+        return
+        ;;
+      setsid)
+        ((j++))
+        while (( j < end )); do
+          _push_token_static_value "$j" || return 0
+          option="$_PUSH_STATIC_VALUE"
+          case "$option" in
+            -c|-f|-w|--ctty|--fork|--wait|--) ((j++)) ;;
+            -*) ((j++)) ;;
+            *) break ;;
+          esac
+        done
+        (( j < end )) || return 1
+        _push_command_executes_standard_input "$j" "$end"
+        return
+        ;;
+      ionice)
+        ((j++))
+        while (( j < end )); do
+          _push_token_static_value "$j" || return 0
+          option="$_PUSH_STATIC_VALUE"
+          case "$option" in
+            -c|-n|-p|-P|-u|--class|--classdata|--pid|--pgid|--uid)
+              (( j + 1 < end )) || return 0
+              j=$((j + 2))
+              ;;
+            -c?*|-n?*|-p?*|-P?*|-u?*|--*=*|-t|--ignore|--) ((j++)) ;;
+            -*) ((j++)) ;;
+            *) break ;;
+          esac
+        done
+        (( j < end )) || return 1
+        _push_command_executes_standard_input "$j" "$end"
+        return
+        ;;
+      busybox)
+        ((j++))
+        (( j < end )) || return 1
+        _push_command_executes_standard_input "$j" "$end"
+        return
+        ;;
+      sed)
+        _push_sed_command_executes_standard_input "$j" "$end"
+        return
+        ;;
+      awk|gawk|mawk|nawk)
+        _push_awk_command_executes_standard_input "$j" "$end"
+        return
         ;;
       *)
         _push_shell_command_name_executes_input "$command_name" && return 0
         _push_shell_command_name_is_data_only "$command_name" && return 1
-        for ((j = j + 1; j < end; j++)); do
-          _push_token_static_value "$j" || return 0
-          candidate="${_PUSH_STATIC_VALUE##*/}"
-          _push_shell_command_name_executes_input "$candidate" && return 0
-        done
-        return 1
+        return 0
         ;;
     esac
   done
@@ -611,7 +794,7 @@ _push_command_executes_standard_input() {
   return 1
 }
 
-_push_process_substitution_executes_input() {
+_push_process_substitution_executes_input_uncached() {
   local opener_index="$1"
   local paren_index=$((opener_index + 1))
   local body_start=$((opener_index + 2))
@@ -649,6 +832,23 @@ _push_process_substitution_executes_input() {
   return 0
 }
 
+_push_process_substitution_executes_input() {
+  local opener_index="$1"
+  local cached="${_PUSH_PROCESS_SUB_RESULTS[opener_index]:--1}"
+  local result
+
+  if (( cached >= 0 )); then
+    return "$cached"
+  fi
+  if _push_process_substitution_executes_input_uncached "$opener_index"; then
+    result=0
+  else
+    result=1
+  fi
+  _PUSH_PROCESS_SUB_RESULTS[opener_index]="$result"
+  return "$result"
+}
+
 _push_pipeline_has_executing_process_substitution() {
   local pipe_index="$1"
   local n="${2:-${#_PUSH_TOKEN_VALUES[@]}}"
@@ -675,11 +875,13 @@ _push_pipeline_stage_bounds() {
   local value top_end top_index
   local paren_depth=0
   local command_position=1
+  local has_executing_process_sub=0
   local -a compound_ends=()
 
   _PUSH_PIPELINE_STAGE_START="$start"
   _PUSH_PIPELINE_STAGE_END="$n"
   _PUSH_PIPELINE_NEXT_PIPE=-1
+  _PUSH_PIPELINE_STAGE_PROCESS_SUB=0
 
   for ((i = start; i < n; i++)); do
     if [[ "${_PUSH_TOKEN_TYPES[i]:-}" == "operator" ]]; then
@@ -697,6 +899,7 @@ _push_pipeline_stage_bounds() {
           fi
           if (( ${#compound_ends[@]} == 0 )); then
             _PUSH_PIPELINE_STAGE_END="$i"
+            _PUSH_PIPELINE_STAGE_PROCESS_SUB="$has_executing_process_sub"
             return 0
           fi
           ;;
@@ -707,10 +910,12 @@ _push_pipeline_stage_bounds() {
           '|'|'|&')
             _PUSH_PIPELINE_STAGE_END="$i"
             _PUSH_PIPELINE_NEXT_PIPE="$i"
+            _PUSH_PIPELINE_STAGE_PROCESS_SUB="$has_executing_process_sub"
             return 0
             ;;
           '&&'|'||'|';'|'&')
             _PUSH_PIPELINE_STAGE_END="$i"
+            _PUSH_PIPELINE_STAGE_PROCESS_SUB="$has_executing_process_sub"
             return 0
             ;;
         esac
@@ -719,6 +924,16 @@ _push_pipeline_stage_bounds() {
       continue
     fi
 
+    if (( paren_depth == 0 && ${#compound_ends[@]} == 0 )); then
+      if _push_process_substitution_executes_input "$i"; then
+        has_executing_process_sub=1
+      fi
+      # The nested scan reuses these output globals; restore this stage before
+      # continuing its boundary walk.
+      _PUSH_PIPELINE_STAGE_START="$start"
+      _PUSH_PIPELINE_STAGE_END="$n"
+      _PUSH_PIPELINE_NEXT_PIPE=-1
+    fi
     (( paren_depth == 0 && command_position == 1 )) || {
       command_position=0
       continue
@@ -758,64 +973,102 @@ _push_pipeline_stage_bounds() {
     fi
     command_position=0
   done
+  _PUSH_PIPELINE_STAGE_PROCESS_SUB="$has_executing_process_sub"
 }
 
 _push_pipeline_consumer_executes_input() {
   local pipe_index="$1"
   local limit="${2:-${#_PUSH_TOKEN_VALUES[@]}}"
-  local start end next_pipe
+  local start end next_pipe result=1 scan_end="$limit"
+  local cached_limit="${_PUSH_PIPE_RESULT_LIMITS[pipe_index]:--1}"
+  local cached_result="${_PUSH_PIPE_RESULTS[pipe_index]:--1}"
 
-  _PUSH_PIPELINE_SCAN_END="$limit"
-  while (( pipe_index >= 0 )); do
-    _push_pipeline_stage_bounds "$pipe_index" "$limit"
-    start="$_PUSH_PIPELINE_STAGE_START"
-    end="$_PUSH_PIPELINE_STAGE_END"
-    next_pipe="$_PUSH_PIPELINE_NEXT_PIPE"
-
-    _push_pipeline_has_executing_process_substitution \
-      "$pipe_index" "$limit" && return 0
-    (( start < end )) || return 0
-    _push_command_executes_standard_input "$start" "$end" && return 0
-    if (( next_pipe < 0 )); then
-      _PUSH_PIPELINE_SCAN_END="$end"
-    fi
-    pipe_index="$next_pipe"
-  done
-  return 1
-}
-
-_push_enclosing_pipeline_consumer_executes_input() {
-  local segment_start="$1"
-  local n="${#_PUSH_TOKEN_VALUES[@]}"
-  local boundary=-1 start end next_pipe
-  local cached_start="${_PUSH_ENCLOSING_PIPELINE_CACHE_START:--1}"
-  local cached_end="${_PUSH_ENCLOSING_PIPELINE_CACHE_END:--1}"
-  local cached_result="${_PUSH_ENCLOSING_PIPELINE_CACHE_RESULT:-1}"
-
-  if (( cached_start >= 0 &&
-    segment_start >= cached_start && segment_start < cached_end )); then
+  # Each pipe token belongs to one pipeline. Memoizing its transitive consumer
+  # result keeps both top-level and grouped pipelines linear.
+  if (( cached_limit == limit && cached_result >= 0 )); then
+    _PUSH_PIPELINE_SCAN_END="${_PUSH_PIPE_SCAN_ENDS[pipe_index]:-$limit}"
     return "$cached_result"
   fi
+  _PUSH_PIPELINE_SCAN_END="$limit"
+  _push_pipeline_stage_bounds "$pipe_index" "$limit"
+  start="$_PUSH_PIPELINE_STAGE_START"
+  end="$_PUSH_PIPELINE_STAGE_END"
+  next_pipe="$_PUSH_PIPELINE_NEXT_PIPE"
+
+  if _push_pipeline_has_executing_process_substitution \
+    "$pipe_index" "$limit"; then
+    result=0
+  elif (( start >= end )); then
+    result=0
+  elif _push_command_executes_standard_input "$start" "$end"; then
+    result=0
+  elif (( next_pipe >= 0 )); then
+    if _push_pipeline_consumer_executes_input "$next_pipe" "$limit"; then
+      result=0
+    fi
+    scan_end="$_PUSH_PIPELINE_SCAN_END"
+  else
+    scan_end="$end"
+  fi
+
+  _PUSH_PIPE_RESULT_LIMITS[pipe_index]="$limit"
+  _PUSH_PIPE_RESULTS[pipe_index]="$result"
+  _PUSH_PIPE_SCAN_ENDS[pipe_index]="$scan_end"
+  _PUSH_PIPELINE_SCAN_END="$scan_end"
+  return "$result"
+}
+
+_push_prepare_pipeline_stage_table() {
+  local n="${#_PUSH_TOKEN_VALUES[@]}"
+  local boundary=-1 start end next_pipe process_sub
+  local stage_index=0 i
+
+  (( ${_PUSH_STAGE_TABLE_READY:-0} == 0 )) || return 0
 
   while (( boundary < n )); do
     _push_pipeline_stage_bounds "$boundary" "$n"
     start="$_PUSH_PIPELINE_STAGE_START"
     end="$_PUSH_PIPELINE_STAGE_END"
     next_pipe="$_PUSH_PIPELINE_NEXT_PIPE"
-    if (( segment_start >= start && segment_start < end )); then
-      _PUSH_ENCLOSING_PIPELINE_CACHE_START="$start"
-      _PUSH_ENCLOSING_PIPELINE_CACHE_END="$end"
-      _PUSH_ENCLOSING_PIPELINE_CACHE_RESULT=1
-      if (( next_pipe >= 0 )) &&
-        _push_pipeline_consumer_executes_input "$next_pipe" "$n"; then
-        _PUSH_ENCLOSING_PIPELINE_CACHE_RESULT=0
-      fi
-      return "$_PUSH_ENCLOSING_PIPELINE_CACHE_RESULT"
-    fi
-    (( end > boundary )) || return 1
+    process_sub="${_PUSH_PIPELINE_STAGE_PROCESS_SUB:-0}"
+    (( end > boundary )) || break
+    _PUSH_STAGE_NEXT_PIPES[stage_index]="$next_pipe"
+    _PUSH_STAGE_PROCESS_SUBS[stage_index]="$process_sub"
+    _PUSH_STAGE_RESULTS[stage_index]=-1
+    for ((i = start; i < end; i++)); do
+      _PUSH_STAGE_BY_TOKEN[i]="$stage_index"
+    done
+    ((stage_index++))
     boundary="$end"
   done
-  return 1
+  _PUSH_STAGE_TABLE_READY=1
+}
+
+_push_enclosing_pipeline_consumer_executes_input() {
+  local segment_start="$1"
+  local n="${#_PUSH_TOKEN_VALUES[@]}"
+  local stage_index result next_pipe
+
+  _push_prepare_pipeline_stage_table
+  stage_index="${_PUSH_STAGE_BY_TOKEN[segment_start]:--1}"
+  (( stage_index >= 0 )) || return 1
+  result="${_PUSH_STAGE_RESULTS[stage_index]:--1}"
+  if (( result >= 0 )); then
+    return "$result"
+  fi
+
+  result=1
+  if (( ${_PUSH_STAGE_PROCESS_SUBS[stage_index]:-0} == 1 )); then
+    result=0
+  else
+    next_pipe="${_PUSH_STAGE_NEXT_PIPES[stage_index]:--1}"
+    if (( next_pipe >= 0 )) &&
+      _push_pipeline_consumer_executes_input "$next_pipe" "$n"; then
+      result=0
+    fi
+  fi
+  _PUSH_STAGE_RESULTS[stage_index]="$result"
+  return "$result"
 }
 
 _push_next_token_is_definite_other_operation() {
@@ -872,13 +1125,11 @@ _push_data_segment_is_safe() {
         return 1
       fi
       ;;
-    *)
-      if _push_enclosing_pipeline_consumer_executes_input "$start"; then
-        _PUSH_DATA_SEGMENT_DYNAMIC_INPUT=1
-        return 1
-      fi
-      ;;
   esac
+  if _push_enclosing_pipeline_consumer_executes_input "$start"; then
+    _PUSH_DATA_SEGMENT_DYNAMIC_INPUT=1
+    return 1
+  fi
 
   for ((i = start + 1; i < end; i++)); do
     if _push_skip_redirection "$i" "$end"; then

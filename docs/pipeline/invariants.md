@@ -9397,11 +9397,14 @@ are unsupported and take the rc `2` fail-closed path.
 Before detection and cwd resolution, shell comments and bounded file-generation
 heredocs are removed from consideration so documentation text is not mistaken
 for an invocation (#547). Heredoc masking applies only to simple external
-`cat` commands that are the first executable command, use identifier
-delimiters, and have no control operators or physical-line continuations.
+`cat` commands or external `gh pr create|comment|edit --body-file -` commands
+that are the first executable command, use identifier delimiters, and have no
+control operators or physical-line continuations.
 Unquoted heredoc substitutions, preceding setup commands, shell consumers,
 pipelines, ambiguous syntax, and unsupported quote contexts retain the original
-command text and fail closed. The preprocessor never evaluates command text.
+command text and fail closed. Once an ambiguous expansion is reached, later
+heredocs are intentionally not reclassified. The preprocessor never evaluates
+command text.
 
 **Producer**: `lib.sh::resolve_git_command_cwd`.
 
@@ -9410,27 +9413,31 @@ command text and fail closed. The preprocessor never evaluates command text.
 **Status**: **ENFORCED**.
 
 **Test**: `tests/unit/test-block-commit-outside-worktree.sh`
-(`TC-BCOW-001..013`) covers both repository identities and main/linked
+(`TC-BCOW-001..015`) covers both repository identities and main/linked
 worktrees, all supported path forms, helper return codes, the fail-closed
 syntax matrix, and non-execution sentinels. The exact unrelated-repository
 reproduction is red on the parent implementation and green with this
 invariant. `tests/unit/test-is-git-command-non-executable-regions.sh`
-(`TC-IGC-547-001..145`) covers comment/heredoc false positives, dynamic
+(`TC-IGC-547-001..175`) covers comment/heredoc false positives, dynamic
 git-free shell consumers, generic/quoted/dynamic operation forms, the
 five-second hook budget, and the fail-closed substitution, interpreter,
 pipeline, and shadowing controls. Ambiguous inputs at least 4 KiB take one
-linear static candidate pass before any bounded tokenization fallback instead
-of the older repeated character scans; approximately 20 KiB
-operation-bearing and git-free cases pin the five-second hook budget.
-`tests/unit/test-block-push-regex.sh` (`TC-BP-35..60`) covers the same budget,
+linear static candidate pass plus a bounded substitution-span pass instead of
+the older repeated character scans. Substitution bodies are masked
+independently before the 64-body/8 KiB semantic-analysis budget is charged, so
+generated PR bodies remain data while executable siblings remain visible.
+Approximately 20 KiB unmasked inputs, 35 KiB masked heredocs, 53 KiB
+comment-masked inputs, and sub-4 KiB deeply nested substitutions pin the
+five-second hook budget.
+`tests/unit/test-block-push-regex.sh` (`TC-BP-35..61`) covers the same budget,
 chained, multiline, and prefixed feature pushes, git-free expansions,
 non-executable and shell-consumed push text, shell redirections, brace groups,
 line continuations, mixed quote fragments, dynamic refspecs, arithmetic
 expansions, ordinary data pipelines, benign versus executable substitutions,
 multi-stage and compound stdin evaluators, compact `env -S` forms, alternate
 shell applets, substitution-bearing large inputs, linear long-pipeline and
-grouped-segment handling, and fail-closed handling for an unreadable operation
-or refspec.
+indexed grouped-segment and command-list handling, and fail-closed handling for
+an unreadable operation or refspec.
 
 **Cross-reference**:
 [`docs/designs/block-commit-command-context.md`](../designs/block-commit-command-context.md)
@@ -9740,7 +9747,7 @@ they read only what the wrapper exported and never parse conf.
 
 **Status**: **ENFORCED**.
 
-**Test**: `tests/unit/test-block-push-regex.sh` (`TC-BP-01..53`, 206 assertions) —
+**Test**: `tests/unit/test-block-push-regex.sh` (`TC-BP-01..61`, 410 assertions) —
 the 11 pre-existing #64 cases unchanged, plus TC-BP-13b (bare push from inside
 the wiki), TC-BP-13c (no anchor → fail closed), TC-BP-16 (second clone of this
 project's remote, all three command shapes), TC-BP-17 (five URL spellings),
@@ -9780,58 +9787,105 @@ fail-closed. A quoted dynamic remote remains one shell word, so a following
 literal feature refspec stays readable; an unquoted dynamic remote remains
 fail-closed because word splitting could change the positional grammar.
 Expansion-bearing commands without a literal Git operation are not treated as
-pushes, while a dynamic command name followed by the literal `push` operation
-remains fail-closed. Builtin `echo`/`printf` arguments and bounded heredoc data
-are non-executable when consumed only as data. Variable data piped to ordinary
-consumers such as `jq`, `tee`, `sort`, `gh`, `cut`, remote `cat`, or wrapped
-`jq` remains data. Consumers that execute stdin are recognized structurally:
-shell/interpreter commands, evaluated `awk` programs, dynamic commands,
-executing output process substitutions, and `xargs` commands whose appended
-arguments complete a wrapper. A command-position scan descends through
+pushes, while a single dynamic command-word token such as `$GIT` followed by the
+literal `push` operation remains fail-closed. Builtin `echo`/`printf` arguments
+and bounded heredoc data are non-executable when consumed only as data. Variable
+data piped to ordinary consumers such as `jq`, `tee`, `sort`, `gh`, `cut`,
+remote `cat`, or wrapped `jq` remains data. Consumers that execute stdin are
+recognized structurally:
+shell/interpreter commands, awk programs containing `system()` or command
+pipes, and awk source-loading options or directives. Awk classification permits
+only the statically safe `-F`/`--field-separator`, `-v`/`--assign`, and `--`
+option forms; every other option fails closed, covering gawk `-E`/`--exec`,
+source-loading forms, accepted long-option abbreviations, and future extension
+options. Sed programs that may contain the lowercase `e` execution command/flag,
+dynamic or unknown commands, executing output process substitutions, and
+`xargs` commands whose appended arguments complete a wrapper are likewise
+executable. Only explicit data commands and statically safe awk/sed programs
+remain data-only. A command-position scan descends through
 `if`/loop/`case`/group bodies and inspects static arguments of otherwise unknown
-launchers, while explicit data commands remain data-only. `env -S` and
+wrappers, while unclassified consumers fail closed. `env -S` and
 `--split-string` command text, including attached and clustered short-option
 forms, is reconstructed with its trailing arguments and classified by the same
 scanner. Alternate shell names and BusyBox shell applets execute stdin.
 Classification follows each pipeline once until a command-list boundary, so
 data-only filters cannot hide a later executable consumer. Enclosing compound
-stages are located once per token snapshot and cached, so grouped producers and
-long benign pipelines do not cause repeated downstream walks.
+stages are indexed once per token snapshot, and each stage's downstream result
+is memoized. Each pipe token also memoizes its bounded transitive consumer
+result, and every token index memoizes whether it opens an executing process
+substitution. Flat and nested multi-producer pipelines therefore remain linear;
+deep output-process-substitution chains do not recursively rescan each enclosing
+stage. Inner data-only pipelines cannot hide an outer shell or executing process
+substitution, while grouped producers, long benign pipelines, and many distinct
+command-list stages avoid repeated downstream walks.
 Literal, ANSI-quoted, quote-concatenated, and dynamic shell input therefore
 fails closed without classifying arithmetic expansion as executable. Command
 and process substitution bodies are analyzed independently by the shared shell
 code scanner: benign `$(date)`-style data remains allowed, while a body that
-executes a possible push keeps the trunk check armed. Redirections,
-brace-group delimiters, and backslash-newline continuations are shell syntax
-rather than refspecs. A dynamic global argument followed by more global flags
-and then a definite non-push operation remains allowed, while a dynamic refspec
-remains unknown because its runtime value could be trunk. Mixed quote fragments
-cannot hide either the push operation or a trunk refspec.
-Approximately 20–21 KiB PR-body and single-word push-option inputs stay inside
-the five-second budget. Ambiguous substitution-bearing inputs at least 4 KiB
-use a linear static command-position scan before the bounded tokenizer. The
-scan preserves quote concatenation, ignores data-command arguments, and can
-prove an explicit trunk destination without paying for full refspec parsing.
-When the resolver proves no push and the command has no pipeline, expansion-only
-data and large heredoc prose reuse that negative result; data that reaches an
-executable pipeline consumer still enters the fail-closed refspec parser.
+executes a possible push keeps the trunk check armed. Identical bodies reuse a
+per-scan result keyed by body text and trusted-data context. At most 64 distinct
+bodies and 8 KiB of cumulative uncached body text receive recursive parsing per
+top-level command. Exceeding either budget is unknown and fails closed,
+including deeply nested benign substitutions whose cumulative work crosses the
+byte cap. This keeps repeated command, backtick, and process substitutions
+bounded without allowing nested or unique-body input to exhaust the hook
+timeout. Within each body, the conservative whole-body verdict is computed once
+and reused by every dynamic command-position candidate rather than rescanning
+the same text per token. Redirections, brace-group delimiters, and
+backslash-newline continuations are shell syntax rather than refspecs. A dynamic
+global argument followed by more global flags and then a definite non-push
+operation remains allowed, while a dynamic refspec remains unknown because its
+runtime value could be trunk. Mixed quote fragments cannot hide either the push
+operation or a trunk refspec.
+Approximately 20–21 KiB unmasked PR-body and single-word push-option inputs stay
+inside the five-second budget. Ambiguous substitution-bearing inputs at least
+4 KiB use the preprocessor's bounded partial projection for the linear static
+command-position scan and refspec parser instead of rescanning masked heredoc or
+comment text. The scan preserves quote concatenation, ignores data-command
+arguments, and can prove an explicit trunk destination without paying for full
+refspec parsing. When the resolver proves no push and the command has no
+pipeline, expansion-only data and large heredoc prose reuse that negative
+result; data that reaches an executable pipeline consumer still enters the
+fail-closed refspec parser.
 Two hundred data-only pipeline stages complete in approximately 0.21–0.34
 seconds. Two hundred grouped data segments complete in approximately 0.71
 seconds through `cat` and 1.01 seconds through `bash`. Approximately 41 KiB
 benign substitution input allows in 0.51 seconds, while literal and
 quote-concatenated trunk controls block in 0.21–0.31 seconds in the pinned
-regression environment. All remain below the five-second hook budget without
-relying on an early executable-consumer short circuit.
+regression environment. Four hundred and eight hundred distinct command-list
+stages complete in approximately 0.91 and 2.01 seconds respectively. Flat
+50/100/200-stage producer pipelines complete in approximately 0.21/0.51/1.01
+seconds as data and 0.41/0.71/1.51 seconds with a trailing shell; the grouped
+200-stage forms have the same 1.01/1.51-second profile. Repeated command,
+backtick, and process-substitution controls complete in approximately
+0.45–0.68 seconds, a 300-unique-body trunk control in 1.12 seconds, the
+64-body benign boundary in 1.22 seconds, and its fail-closed 65th body in
+2.28 seconds. A 1.5 KiB body containing 500 dynamic command-position tokens
+completes in 0.34–0.43 seconds, and 40 nested output process substitutions
+complete in 1.47–1.50 seconds. All pinned forms remain below the five-second
+hook budget without relying on an early executable-consumer short circuit.
 
 Destination parsing consumes the same non-executable-region projection as
 operation detection. The direct-command parser returns `0` when every matched
 push is readable, `1` when its token stream contains no executable push, and `2`
 when a possible push is unreadable. The cwd resolver's substitution-aware result
 is reused before the parser's rc `1` early exit: resolver rc `1` already proves
-its bounded scanner found no push, while resolved or ambiguous commands receive
-an independent substitution-body scan for a nested invocation. Thus only a
-parser rc `1` with no substitution-push evidence is a positive data-only result;
-combined rc `2` keeps the trunk check armed.
+its bounded scanner found no push, while resolved or ambiguous commands without
+an already-readable trunk ref receive an independent substitution-body scan for
+a nested invocation. An already-readable trunk ref skips that potentially
+expensive scan because it has already proved the block. Thus only a parser rc
+`1` with no substitution-push evidence is a positive data-only result; combined
+rc `2` keeps the trunk check armed.
+Substitution spans are measured and sliced under `LC_ALL=C`, so byte offsets
+remain aligned even when UTF-8 text precedes the body. The top-level projection
+replaces each substitution with an adjacent dynamic marker rather than spaces,
+preserving split words such as `p$(echo ush)` as one unsafe operation token.
+Each body is masked independently before the 64-body/8 KiB semantic budget is
+charged. A static builtin `echo`/`printf` body may bypass the byte budget only
+when both the body and its outer `echo` or `gh pr ... --body` argument are
+proven data-only. The 4090-byte alternating `$()`/backtick stress case remains
+within its three-second serial test budget and concurrent verification remains
+below the five-second hook budget.
 
 Measured red/green: **20 of 56 red on PR #539's parent** (`216a906` — the wiki
 and allowlist allows, the second-clone forms, the URL spellings, the

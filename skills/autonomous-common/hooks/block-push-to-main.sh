@@ -74,32 +74,11 @@ if (( resolve_rc == 2 && ${#command} >= 4096 )) &&
   large_static_trunk_push=1
 fi
 
-substitution_push=0
-case "$command" in
-  *'$('*|*'`'*|*'<('*|*'>('*)
-    # Resolver rc=1 already means its substitution-aware scanner found no push;
-    # do not repeat that bounded pass on large commands. Resolved or ambiguous
-    # commands still need the precise substitution check: benign process
-    # substitutions such as `>(cat)` also make the resolver return rc=2.
-    if (( resolve_rc != 1 )); then
-      if (( ${#command} >= 4096 )); then
-        substitution_scanner=_large_ambiguous_shell_text_contains_git_operation
-      else
-        substitution_scanner=_unsafe_shell_text_contains_git_operation
-      fi
-      if "$substitution_scanner" "push" "$command"; then
-        substitution_push=1
-      fi
-    fi
-    ;;
-esac
-
 # Most resolver no-matches are ordinary git-free commands. Only pay for the
 # structured second opinion when a cheap conservative scan still sees literal
 # push-shaped text or data can flow into an executable consumer. Expansion-only
 # input reuses the resolver's substitution-aware negative result.
 if (( resolve_rc == 1 )) &&
-  (( substitution_push == 0 )) &&
   ! _conservative_shell_text_contains_git_operation "push" "$command"; then
   [[ "$command" == *'|'* ]] || exit 0
   if ! _push_shell_text_may_contain_executable_push_data "$command" ||
@@ -109,10 +88,24 @@ if (( resolve_rc == 1 )) &&
 fi
 
 # Apply the resolver's non-executable-region policy to destination parsing too.
-# On uncertain syntax, retain the original text so parsing stays fail-closed.
+# Ambiguous input uses the resolver's bounded partial projection. The separate
+# substitution scan below keeps hidden pushes fail-closed without sending
+# masked prose through the destination parser.
 push_command="$command"
+substitution_scan_command="$command"
 if stripped_push_command=$(_strip_shell_non_executable_regions "$command"); then
   push_command="$stripped_push_command"
+  substitution_scan_command="$stripped_push_command"
+else
+  strip_push_rc=$?
+  # For large ambiguous input, the linear scanner consumes the same bounded
+  # partial projection as resolve_git_command_cwd. Substitution bodies receive
+  # their own semantic scan below, so ref parsing must never reinterpret masked
+  # heredoc prose as a top-level push destination.
+  if (( strip_push_rc == 2 )); then
+    substitution_scan_command="$stripped_push_command"
+    push_command="$stripped_push_command"
+  fi
 fi
 
 # Parse destination refs before repository scoping. rc=1 positively means no
@@ -132,8 +125,32 @@ else
     parse_rc=$?
   fi
 fi
-if (( substitution_push == 1 )); then
-  parse_rc=2
+
+# A statically readable trunk ref already proves the command must block, so do
+# not spend the remaining hook budget recursively classifying unrelated
+# substitutions. Feature-only refs still need that second opinion because
+# push_command has executable substitution bodies masked out; one of those
+# bodies may contain a separate trunk push. Resolver rc=1 already includes the
+# same substitution-aware negative result and does not need a duplicate scan.
+parsed_trunk_ref=0
+if (( parse_rc == 0 )); then
+  while IFS= read -r ref; do
+    [[ -z "$ref" ]] && continue
+    if is_trunk_ref "$ref" "$trunk"; then
+      parsed_trunk_ref=1
+      break
+    fi
+  done <<<"$parsed_refs"
+fi
+if (( parse_rc != 2 && parsed_trunk_ref == 0 && resolve_rc != 1 )); then
+  case "$command" in
+    *'$('*|*'`'*|*'<('*|*'>('*)
+      if _shell_substitutions_contain_git_operation \
+        "push" "$substitution_scan_command"; then
+        parse_rc=2
+      fi
+      ;;
+  esac
 fi
 if (( parse_rc == 1 )); then
   exit 0
@@ -182,14 +199,7 @@ fi
 
 # Parse the destination ref(s) the push would write to. Block if any of
 # them target the trunk (covers --all/--mirror via __ALL__/__MIRROR__).
-should_block=0
-while IFS= read -r ref; do
-  [[ -z "$ref" ]] && continue
-  if is_trunk_ref "$ref" "$trunk"; then
-    should_block=1
-    break
-  fi
-done <<<"$parsed_refs"
+should_block=$parsed_trunk_ref
 
 # Parser rc=2 means an executable push was found but its destination was
 # unreadable. rc=1 was handled above as a proven data-only resolver match.

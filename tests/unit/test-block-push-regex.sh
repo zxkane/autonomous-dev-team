@@ -1046,6 +1046,7 @@ for command in \
   'out="$(git push origin main)"' \
   'eval $(echo git push origin main)' \
   'echo "n=$(( $(git push origin main) + 1 ))"' \
+  'git push origin feat/x; echo "$(git push origin main)"' \
   'if $(echo git push origin main); then echo hi; fi'
 do
   out=$(run_hook "$command")
@@ -1060,6 +1061,23 @@ echo "=== TC-BP-53: stdin evaluators block code without blocking data controls =
 setup_repo feat/x
 for command in \
   "echo git push origin main | awk '{system(\$0)}'" \
+  "echo git push origin main | awk '{print | \"sh\"}'" \
+  "echo git push origin main | awk '{ \"sh\" | getline x }'" \
+  "echo git push origin main | sed 's/.*/&/e'" \
+  "echo git push origin main | sed 'e'" \
+  "echo git push origin main | sed -i '' 'e'" \
+  "echo git push origin main | awk -f script.awk" \
+  "echo git push origin main | gawk -i script.awk ''" \
+  "echo git push origin main | gawk --include=script.awk '{print}'" \
+  "echo git push origin main | gawk '@load \"filefuncs\"; {print}'" \
+  "echo git push origin main | gawk -E script.awk" \
+  "echo git push origin main | gawk --exec=script.awk" \
+  "echo git push origin main | gawk --fil=script.awk" \
+  "echo git push origin main | gawk --incl=script.awk '{print}'" \
+  "echo git push origin main | gawk --lo=plugin '{print}'" \
+  'echo git push origin main | parallel' \
+  'echo git push origin main | at now' \
+  'echo git push origin main | crontab -' \
   'echo git push origin main | while read l; do $l; done' \
   'echo git push origin main | tee >(bash)' \
   'echo git push origin main | xargs env'
@@ -1069,6 +1087,18 @@ do
 done
 for command in \
   "echo git push origin main | awk '{print \$0}'" \
+  "echo git push origin main | sed 's/x/y/'" \
+  "echo git push origin main | sed -e 's/x/y/'" \
+  "echo git push origin main | sed -n 'p'" \
+  "echo git push origin main | awk -F: '{print \$1}'" \
+  "echo git push origin main | awk --field-separator=: '{print \$1}'" \
+  "echo git push origin main | awk -v prefix=x '{print prefix \$0}'" \
+  "echo git push origin main | gawk --assign=prefix=x '{print prefix \$0}'" \
+  "echo git push origin main | awk -- '{print \$0}'" \
+  'echo git push origin main | rev' \
+  'echo git push origin main | base64' \
+  'echo git push origin main | tac' \
+  'echo git push origin main | dd of=/tmp/push-copy' \
   'echo git push origin main | while read l; do echo "$l"; done' \
   'echo git push origin main | tee >(cat >/tmp/push-copy)' \
   'echo git push origin main | xargs echo'
@@ -1193,6 +1223,33 @@ done
 dynamic_pipeline+=" | bash"
 out=$(run_hook_bounded "$dynamic_pipeline")
 assert_exit "two-hundred-stage dynamic pipeline reaches bash within five seconds" "2" "$out"
+producer_pipeline="echo git push origin main"
+for ((i = 0; i < 200; i++)); do
+  producer_pipeline+=" | echo a$i"
+done
+out=$(run_hook_bounded "$producer_pipeline" 3)
+assert_exit "two-hundred-stage producer pipeline is allowed within three seconds" "0" "$out"
+grouped_producer_pipeline="{ $producer_pipeline; } | cat"
+out=$(run_hook_bounded "$grouped_producer_pipeline" 3)
+assert_exit "grouped two-hundred-stage producer pipeline is allowed within three seconds" "0" "$out"
+grouped_producer_pipeline="${grouped_producer_pipeline%cat}bash"
+out=$(run_hook_bounded "$grouped_producer_pipeline" 3)
+assert_exit "grouped two-hundred-stage producer pipeline reaches bash within three seconds" "2" "$out"
+producer_pipeline+=" | bash"
+out=$(run_hook_bounded "$producer_pipeline" 3)
+assert_exit "two-hundred-stage producer pipeline reaches bash within three seconds" "2" "$out"
+deep_process_pipeline=""
+deep_process_closers=""
+for ((i = 0; i < 40; i++)); do
+  deep_process_pipeline+="cat > >("
+  deep_process_closers+=")"
+done
+deep_process_pipeline+="cat $deep_process_closers"
+out=$(run_hook_bounded \
+  "git push origin main; echo x | $deep_process_pipeline")
+assert_exit "forty nested process substitutions keep trunk push within five seconds" "2" "$out"
+out=$(run_hook_bounded "echo ok; echo x | $deep_process_pipeline")
+assert_exit "forty nested data-only process substitutions allow within five seconds" "0" "$out"
 
 # ===========================================================================
 # TC-BP-58: grouped producers and consumers preserve executable stdin flow
@@ -1213,7 +1270,21 @@ for command in \
   '{ echo git push origin main; } | bash' \
   'if true; then echo git push origin main; fi | bash' \
   'for f in x; do echo git push origin main; done | bash' \
-  'case x in x) echo git push origin main;; esac | bash'
+  'case x in x) echo git push origin main;; esac | bash' \
+  '{ echo git push origin main | cat; } | bash' \
+  '( echo git push origin main | cat ) | bash' \
+  '{ echo git push origin main | cat; } | sh' \
+  '{ echo git push origin main | cat; } | cat | bash' \
+  '{ echo git push origin main | cat; } | env -Sbash' \
+  '{ echo git push origin main | grep push; } | bash' \
+  '{ echo git push origin main | tee /dev/null | cat; } | bash' \
+  "{ printf '%s' git push origin main | cat; } | bash" \
+  '{ ( echo git push origin main | cat ); } | bash' \
+  'if true; then echo git push origin main | cat; fi | bash' \
+  'for f in x; do echo git push origin main | cat; done | bash' \
+  'while :; do echo git push origin main | cat; break; done | bash' \
+  'case x in x) echo git push origin main | cat;; esac | bash' \
+  '{ echo git push origin main | cat; } > >(bash)'
 do
   out=$(run_hook "$command")
   assert_exit "grouped executable stdin flow blocks: $command" "2" "$out"
@@ -1231,7 +1302,15 @@ for command in \
   '{ echo git push origin main; } | cat' \
   'if true; then echo git push origin main; fi | cat' \
   'for f in x; do echo git push origin main; done | cat' \
-  'case x in x) echo git push origin main;; esac | cat'
+  'case x in x) echo git push origin main;; esac | cat' \
+  '{ echo git push origin main | cat; } | cat' \
+  '( echo git push origin main | cat ) | cat' \
+  'if true; then echo git push origin main | cat; fi | cat' \
+  'for f in x; do echo git push origin main | cat; done | cat' \
+  'while :; do echo git push origin main | cat; break; done | cat' \
+  'case x in x) echo git push origin main | cat;; esac | cat' \
+  '{ echo git push origin main | cat; } > >(cat)' \
+  'echo a | cat; echo git push origin main | cat'
 do
   out=$(run_hook "$command")
   assert_exit "grouped data-only stdin flow allows: $command" "0" "$out"
@@ -1317,6 +1396,191 @@ assert_exit "two hundred grouped data segments allow within three seconds" "0" "
 grouped_pipeline="${grouped_pipeline%cat}bash"
 out=$(run_hook_bounded "$grouped_pipeline" 3)
 assert_exit "two hundred grouped data segments reach bash within three seconds" "2" "$out"
+distinct_stages='git push -u origin feat/x;'
+for ((i = 0; i < 400; i++)); do
+  distinct_stages+=" echo w$i;"
+done
+out=$(run_hook_bounded "$distinct_stages" 3)
+assert_exit "four hundred distinct data stages allow within three seconds" "0" "$out"
+substitution_dense='git push origin main'
+for ((i = 0; i < 450; i++)); do
+  substitution_dense+=' $(:)'
+done
+out=$(run_hook_bounded "$substitution_dense" 3)
+assert_exit "four hundred fifty repeated substitutions keep trunk push within three seconds" "2" "$out"
+substitution_dense='git push origin main'
+for ((i = 0; i < 700; i++)); do
+  substitution_dense+=' `:`'
+done
+out=$(run_hook_bounded "$substitution_dense" 3)
+assert_exit "seven hundred repeated backticks keep trunk push within three seconds" "2" "$out"
+substitution_dense='git push origin main'
+for ((i = 0; i < 500; i++)); do
+  substitution_dense+=' > >(:)'
+done
+out=$(run_hook_bounded "$substitution_dense" 3)
+assert_exit "five hundred process substitutions keep trunk push within three seconds" "2" "$out"
+substitution_dense='git push origin main'
+for ((i = 0; i < 300; i++)); do
+  substitution_dense+=" \$(:$i)"
+done
+out=$(run_hook_bounded "$substitution_dense" 3)
+assert_exit "three hundred unique substitutions fail closed within three seconds" "2" "$out"
+substitution_dense='echo ok'
+for ((i = 0; i < 64; i++)); do
+  substitution_dense+=" \$(:$i)"
+done
+out=$(run_hook_bounded "$substitution_dense")
+assert_exit "sixty-four unique benign substitutions remain allowed within five seconds" "0" "$out"
+substitution_dense+=' $(:64)'
+out=$(run_hook_bounded "$substitution_dense")
+assert_exit "sixty-fifth unique benign substitution fails closed within five seconds" "2" "$out"
+substitution_dense='echo ok'
+for ((i = 0; i < 450; i++)); do
+  substitution_dense+=' $(:)'
+done
+out=$(run_hook_bounded "$substitution_dense" 3)
+assert_exit "repeated benign substitutions remain allowed within three seconds" "0" "$out"
+executor_dense='git push origin main $('
+for ((i = 0; i < 500; i++)); do
+  executor_dense+='$a;'
+done
+executor_dense+=')'
+out=$(run_hook_bounded "$executor_dense")
+assert_exit "single dense substitution keeps trunk push within five seconds" "2" "$out"
+executor_dense="echo ok ${executor_dense#git push origin main }"
+out=$(run_hook_bounded "$executor_dense")
+assert_exit "single dense benign substitution remains allowed within five seconds" "0" "$out"
+deep_padding=$(printf 'x%.0s' {1..47})
+deep_substitution='date'
+for ((i = 1; i <= 62; i++)); do
+  deep_substitution="printf %s_${deep_padding}${i} \$($deep_substitution)"
+done
+deep_command="git push origin main; echo \$($deep_substitution)"
+out=$(run_hook_bounded "$deep_command")
+assert_exit "direct trunk push precedes deep benign substitutions within five seconds" "2" "$out"
+masked_large_command="cat > /tmp/issue547-masked-push <<'EOF'"$'\n'
+for ((i = 0; i < 1500; i++)); do
+  masked_large_command+="documentation line $i"$'\n'
+done
+masked_large_command+=$'EOF\n'
+out=$(run_hook_bounded "${masked_large_command}"'echo "$(date)"')
+assert_exit "large masked benign substitution allows within five seconds" "0" "$out"
+out=$(run_hook_bounded "${masked_large_command}"'echo "$(git push origin main)"')
+assert_exit "large masked hidden trunk push blocks within five seconds" "2" "$out"
+comment_padding=$(printf 'x%.0s' {1..47})
+large_comments=""
+for ((i = 0; i < 1000; i++)); do
+  large_comments+="# ${comment_padding}${i}"$'\n'
+done
+out=$(run_hook_bounded "${large_comments}"'echo "$(date)"')
+assert_exit "large comment-masked benign substitution allows within five seconds" "0" "$out"
+out=$(run_hook_bounded "${large_comments}"'echo "$(git push origin main)"')
+assert_exit "large comment-masked hidden trunk push blocks within five seconds" "2" "$out"
+out=$(run_hook_bounded "echo \$($deep_substitution)")
+assert_exit "deeply nested benign substitution terminates fail-closed within five seconds" "2" "$out"
+out=$(run_hook_bounded "echo \$(git push origin main; $deep_substitution)")
+assert_exit "deeply nested hidden trunk push blocks within five seconds" "2" "$out"
+large_backtick_padding=$(printf 'x%.0s' {1..5000})
+out=$(run_hook_bounded "echo $large_backtick_padding; echo \`date\`")
+assert_exit "large benign backtick substitution remains allowed" "0" "$out"
+out=$(run_hook_bounded "echo $large_backtick_padding; echo \`git push origin main\`")
+assert_exit "large hidden backtick trunk push remains blocked" "2" "$out"
+mixed_substitution='date'
+for ((i = 0; i < 1635; i++)); do
+  if (( i % 2 == 0 )); then
+    mixed_substitution="\$($mixed_substitution)"
+  else
+    mixed_substitution="\`$mixed_substitution\`"
+  fi
+done
+mixed_substitution="${mixed_substitution:0:4090}"
+out=$(run_hook_bounded "$mixed_substitution" 3)
+assert_exit "worst-case mixed substitution fails closed within three seconds" "2" "$out"
+
+# ===========================================================================
+# TC-BP-61: large substitutions preserve executable and data-only boundaries
+# ===========================================================================
+echo ""
+echo "=== TC-BP-61: large substitution scans stay scoped to executable bodies ==="
+setup_repo feat/x
+threshold_padding=$(printf 'x%.0s' {1..4100})
+out=$(run_hook_bounded \
+  "echo \`\$'git' \$'push' origin main\`; echo $threshold_padding")
+assert_exit "large ANSI-C quoted backtick trunk push remains blocked" "2" "$out"
+out=$(run_hook_bounded \
+  "git push origin feat/x; echo \$(date); echo $threshold_padding")
+assert_exit "large feature push beside benign command substitution remains allowed" "0" "$out"
+out=$(run_hook_bounded \
+  "git push origin feat/x; echo data > >(cat); echo $threshold_padding")
+assert_exit "large feature push beside data-only process substitution remains allowed" "0" "$out"
+
+near_threshold_padding=$(printf 'x%.0s' {1..3200})
+out=$(run_hook_bounded \
+  "echo git push origin main | tee >(cat); echo $near_threshold_padding")
+assert_exit "large data-only tee process substitution remains allowed" "0" "$out"
+out=$(run_hook_bounded \
+  "{ echo git push origin main; } > >(cat); echo $near_threshold_padding")
+assert_exit "large grouped data-only process substitution remains allowed" "0" "$out"
+out=$(run_hook_bounded \
+  "echo \"git push origin main\"; echo \$(date); echo $near_threshold_padding")
+assert_exit "large quoted push prose beside benign substitution remains allowed" "0" "$out"
+
+small_heredoc_command=$'cat > /tmp/issue547-push-doc <<\'EOF\'\n'
+small_heredoc_command+=$'git push origin main\n'
+small_heredoc_command+="$(printf 'documentation %.0s' {1..100})"
+small_heredoc_command+=$'\nEOF\necho "$(date)"'
+out=$(run_hook_bounded "$small_heredoc_command")
+assert_exit "sub-four-KiB heredoc push prose beside benign substitution remains allowed" "0" "$out"
+
+skill_pr_command=$'gh pr create --title "fix: example" --body "$(cat <<\'PRBODY\'\n'
+skill_pr_command+=$'- Feature work is published with `git push origin feat/x`.\n'
+skill_pr_command+=$'PRBODY\n)"'
+out=$(run_hook_bounded "$skill_pr_command")
+assert_exit "skill PR body feature-push prose remains allowed" "0" "$out"
+out=$(run_hook_bounded \
+  "${skill_pr_command}"'; echo "$(git push origin main)"')
+assert_exit "real trunk push beside skill PR body remains blocked" "2" "$out"
+compact_pr_command="git push -u origin feat/x && ${skill_pr_command}"
+out=$(run_hook_bounded "$compact_pr_command")
+assert_exit "compact feature push and generated PR body remain allowed" "0" "$out"
+
+large_pr_command=$'git push -u origin feat/x && gh pr create --body "$(cat <<\'PRBODY\'\n'
+for ((i = 0; i < 220; i++)); do
+  large_pr_command+="release note $i records feature branch publication"$'\n'
+done
+large_pr_command+=$'- Feature work is published with `git push origin feat/x`.\n'
+large_pr_command+=$'PRBODY\n)"'
+out=$(run_hook_bounded "$large_pr_command")
+assert_exit "large real-world feature push and generated PR body remain allowed" "0" "$out"
+
+unicode_prefix=$'\u2615\u2615\u2615\u2615'
+out=$(run_hook_bounded \
+  "echo \"$unicode_prefix\" && x=\$(eval \"git push origin main\")")
+assert_exit "UTF-8 text before hidden trunk push remains blocked" "2" "$out"
+for command in \
+  'git p$(echo ush) origin main' \
+  'git "pu"$(echo sh) origin main' \
+  'git -c a=b pu$(echo sh) origin main'
+do
+  out=$(run_hook_bounded "$command")
+  assert_exit "split dynamic trunk-push operation remains blocked: $command" "2" "$out"
+done
+
+large_inline_body=$(printf 'A%.0s' {1..8300})
+inline_pr_command="gh pr create --title x --body \"\$(printf '%s\\n' '$large_inline_body')\""
+out=$(run_hook_bounded "$inline_pr_command")
+assert_exit "greater-than-eight-KiB inline PR body remains allowed" "0" "$out"
+out=$(run_hook_bounded \
+  "${inline_pr_command}"'; echo "$(git push origin main)"')
+assert_exit "real trunk push beside large inline PR body remains blocked" "2" "$out"
+
+body_file_pr=$'gh pr comment 12 --body-file - <<\'EOF\'\n'
+body_file_pr+=$'Run `git push origin main` only through a pull request.\nEOF'
+out=$(run_hook_bounded "$body_file_pr")
+assert_exit "stdin PR body heredoc push prose remains allowed" "0" "$out"
+out=$(run_hook_bounded "${body_file_pr}"$'\ngit push origin main')
+assert_exit "real trunk push after stdin PR body heredoc remains blocked" "2" "$out"
 
 # ===========================================================================
 # Summary
