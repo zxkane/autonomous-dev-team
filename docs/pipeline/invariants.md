@@ -9415,11 +9415,15 @@ worktrees, all supported path forms, helper return codes, the fail-closed
 syntax matrix, and non-execution sentinels. The exact unrelated-repository
 reproduction is red on the parent implementation and green with this
 invariant. `tests/unit/test-is-git-command-non-executable-regions.sh`
-(`TC-IGC-547-001..141`) covers comment/heredoc false positives, dynamic
-git-free shell consumers, the five-second hook budget, and the fail-closed
-substitution, interpreter, pipeline, and shadowing controls.
-`tests/unit/test-block-push-regex.sh` (`TC-BP-35`) covers the same budget and
-fail-closed requirement for an ambiguous push whose refspec is unparseable.
+(`TC-IGC-547-001..145`) covers comment/heredoc false positives, dynamic
+git-free shell consumers, generic/quoted/dynamic operation forms, the
+five-second hook budget, and the fail-closed substitution, interpreter,
+pipeline, and shadowing controls. Ambiguous inputs at least 4 KiB take one
+bounded tokenization pass plus conservative literal scanning; they do not enter
+the quadratic fallback paths. `tests/unit/test-block-push-regex.sh`
+(`TC-BP-35..39`) covers the same budget, chained and multiline feature pushes,
+git-free expansions, and non-executable push text while preserving fail-closed
+handling for an unreadable refspec.
 
 **Cross-reference**:
 [`docs/designs/block-commit-command-context.md`](../designs/block-commit-command-context.md)
@@ -9729,7 +9733,7 @@ they read only what the wrapper exported and never parse conf.
 
 **Status**: **ENFORCED**.
 
-**Test**: `tests/unit/test-block-push-regex.sh` (`TC-BP-01..35`, 75 assertions) —
+**Test**: `tests/unit/test-block-push-regex.sh` (`TC-BP-01..39`, 93 assertions) —
 the 11 pre-existing #64 cases unchanged, plus TC-BP-13b (bare push from inside
 the wiki), TC-BP-13c (no anchor → fail closed), TC-BP-16 (second clone of this
 project's remote, all three command shapes), TC-BP-17 (five URL spellings),
@@ -9758,6 +9762,21 @@ trunk (26), and an unreadable anchor read as "not mine" (27).
 TC-BP-35 pins the five-second hook budget and fail-closed fallback when an
 approximately 8 KiB ambiguous command contains a real trunk push but the
 bounded refspec parser cannot produce a destination token.
+
+TC-BP-36..39 pin the review regressions: every literal push in chained or
+multiline command text is classified independently; feature-only workflows are
+allowed while any trunk destination blocks. A quoted dynamic remote remains one
+shell word, so a following literal feature refspec stays readable; an unquoted
+dynamic remote remains fail-closed because word splitting could change the
+positional grammar. Expansion-bearing commands without a literal Git operation
+are not treated as pushes, while a dynamic command name followed by the literal
+`push` operation remains fail-closed. Large git-free inputs stay inside the
+five-second budget, and `echo` arguments or heredoc data cannot override the
+destination of a real push. Destination parsing consumes the same
+non-executable-region projection as operation detection. Its tri-state contract
+is `0` when all literal pushes are readable, `1` when no literal push is found,
+and `2` when any matched push is unreadable; both non-zero results fail closed
+after the resolver has established that a push exists.
 
 Measured red/green: **20 of 56 red on PR #539's parent** (`216a906` — the wiki
 and allowlist allows, the second-clone forms, the URL spellings, the

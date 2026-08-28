@@ -602,7 +602,7 @@ _git_command_tokens_contain_operation() {
         -c|-C|--git-dir|--work-tree|--namespace|--super-prefix)
           i=$(( i + 2 > n ? n : i + 2 ))
           ;;
-        --*=*|--*)
+        --*=*|--*|-*)
           ((i++))
           ;;
         *)
@@ -953,6 +953,24 @@ _conservative_shell_text_contains_git_operation() {
   _git_command_tokens_contain_operation "$operation" "$command"
 }
 
+# Large ambiguous command strings must not enter the quadratic character and
+# token fallback paths. Tokenize once, then use the bounded structured and
+# conservative scanners. A positive result is intentionally fail-closed.
+_large_ambiguous_shell_text_contains_git_operation() {
+  local operation="$1"
+  local command="$2"
+
+  _resolve_git_command_tokenize "$command" 1
+  if _resolve_git_tokens_contain_operation "$operation"; then
+    return 0
+  fi
+  if (( _RGCC_UNSAFE == 1 )) &&
+    _resolve_git_unsafe_tokens_contain_operation "$operation"; then
+    return 0
+  fi
+  _conservative_shell_text_contains_git_operation "$operation" "$command"
+}
+
 _shell_substitution_data_output_is_safe() {
   local prefix="$1"
   local trimmed
@@ -1236,6 +1254,11 @@ is_git_command() {
     if _shell_text_outside_simple_quotes_contains_git_operation \
       "$operation" "$stripped_command"; then
       return 0
+    fi
+    if (( ${#stripped_command} >= 4096 )); then
+      _large_ambiguous_shell_text_contains_git_operation \
+        "$operation" "$stripped_command"
+      return
     fi
     if _unsafe_shell_text_contains_git_operation "$operation" "$command"; then
       return 0
@@ -1633,7 +1656,7 @@ _resolve_git_static_token_value() {
     value="${value/"$match"/}"
   done
   value="${value//\\/}"
-  printf '%s\n' "$value"
+  _RGCC_STATIC_TOKEN_VALUE="$value"
 }
 
 _resolve_git_flag_token_has_unsafe_expansion() {
@@ -1655,17 +1678,42 @@ _resolve_git_flag_token_has_unsafe_expansion() {
   [[ "$value" == *"$braced"* ]]
 }
 
+_resolve_git_next_token_is_definite_other_operation() {
+  local index="$1"
+  local operation="$2"
+  local value candidate
+  local i n=${#_RGCC_TOKEN_TYPES[@]}
+
+  [[ "${_RGCC_TOKEN_TYPES[index]:-}" == "word" ]] || return 1
+  [[ "${_RGCC_TOKEN_ANSI[index]:-0}" != "1" ]] || return 1
+  [[ "${_RGCC_TOKEN_UNQUOTED_UNSAFE[index]:-0}" != "1" ]] || return 1
+  _resolve_git_static_token_value "$index"
+  value="$_RGCC_STATIC_TOKEN_VALUE"
+  [[ -n "$value" && "$value" != -* && "$value" != "$operation" ]] || return 1
+
+  for ((i = index + 1; i < n; i++)); do
+    [[ "${_RGCC_TOKEN_TYPES[i]}" == "word" ]] || break
+    _resolve_git_static_token_value "$i"
+    candidate="$_RGCC_STATIC_TOKEN_VALUE"
+    [[ "$candidate" == "$operation" ]] && return 1
+  done
+  return 0
+}
+
 # Identify operation words obscured only by rejected expansion/escape syntax.
 # A quoted variable token consumed by a git global flag is not an operation.
 # This is conservative static analysis; it never expands the input.
 _resolve_git_unsafe_tokens_contain_operation() {
   local operation="$1"
   local i j git_word operation_word option_word token_word
+  local dynamic_git_word
   local n=${#_RGCC_TOKEN_VALUES[@]}
 
   for ((i = 0; i < n; i++)); do
     [[ "${_RGCC_TOKEN_TYPES[i]}" == "word" ]] || continue
-    git_word=$(_resolve_git_static_token_value "$i")
+    dynamic_git_word=0
+    _resolve_git_static_token_value "$i"
+    git_word="$_RGCC_STATIC_TOKEN_VALUE"
     if [[ "$git_word" != "git" ]]; then
       if (( i != 0 )) && [[ "${_RGCC_TOKEN_TYPES[i-1]}" != "operator" ]]; then
         continue
@@ -1673,12 +1721,19 @@ _resolve_git_unsafe_tokens_contain_operation() {
       if [[ -n "$git_word" || "${_RGCC_TOKEN_ANSI[i]}" == "1" ]]; then
         continue
       fi
+      if [[ "${_RGCC_TOKEN_VALUES[i]}" != *'$'* &&
+        "${_RGCC_TOKEN_VALUES[i]}" != *'`'* &&
+        "${_RGCC_TOKEN_UNQUOTED_UNSAFE[i]}" != "1" ]]; then
+        continue
+      fi
+      dynamic_git_word=1
     fi
 
     j=$((i + 1))
     while (( j < n )) && [[ "${_RGCC_TOKEN_TYPES[j]}" == "word" ]]; do
       token_word="${_RGCC_TOKEN_VALUES[j]}"
-      option_word=$(_resolve_git_static_token_value "$j")
+      _resolve_git_static_token_value "$j"
+      option_word="$_RGCC_STATIC_TOKEN_VALUE"
       case "$option_word" in
         -c|-C|--git-dir|--work-tree|--namespace|--super-prefix)
           [[ "$token_word" != *'$'* && "$token_word" != *'`'* ]] || return 0
@@ -1686,7 +1741,14 @@ _resolve_git_unsafe_tokens_contain_operation() {
           [[ "${_RGCC_TOKEN_UNQUOTED_UNSAFE[j]}" != "1" ]] || return 0
           (( j + 1 < n )) &&
             [[ "${_RGCC_TOKEN_TYPES[j+1]}" == "word" ]] || return 0
-          [[ "${_RGCC_TOKEN_UNQUOTED_UNSAFE[j+1]}" != "1" ]] || return 0
+          if [[ "${_RGCC_TOKEN_UNQUOTED_UNSAFE[j+1]}" == "1" ]]; then
+            if _resolve_git_next_token_is_definite_other_operation \
+              "$((j + 2))" "$operation"; then
+              j=$((j + 2))
+              continue
+            fi
+            return 0
+          fi
           if _resolve_git_flag_token_has_unsafe_expansion \
             "${_RGCC_TOKEN_VALUES[j+1]}"; then
             return 0
@@ -1695,7 +1757,14 @@ _resolve_git_unsafe_tokens_contain_operation() {
           ;;
         --git-dir=*|--work-tree=*|--namespace=*|--super-prefix=*)
           [[ "${_RGCC_TOKEN_ANSI[j]}" != "1" ]] || return 0
-          [[ "${_RGCC_TOKEN_UNQUOTED_UNSAFE[j]}" != "1" ]] || return 0
+          if [[ "${_RGCC_TOKEN_UNQUOTED_UNSAFE[j]}" == "1" ]]; then
+            if _resolve_git_next_token_is_definite_other_operation \
+              "$((j + 1))" "$operation"; then
+              ((j++))
+              continue
+            fi
+            return 0
+          fi
           if _resolve_git_flag_token_has_unsafe_expansion "$token_word"; then
             return 0
           fi
@@ -1722,11 +1791,15 @@ _resolve_git_unsafe_tokens_contain_operation() {
       esac
     done
     (( j < n )) && [[ "${_RGCC_TOKEN_TYPES[j]}" == "word" ]] || continue
-    operation_word=$(_resolve_git_static_token_value "$j")
-    if [[ "$operation_word" == "$operation" ]] ||
-      [[ "${_RGCC_TOKEN_VALUES[j]}" == *'$'* ]] ||
-      [[ "${_RGCC_TOKEN_VALUES[j]}" == *'`'* ]] ||
-      [[ "${_RGCC_TOKEN_UNQUOTED_UNSAFE[j]}" == "1" ]]; then
+    _resolve_git_static_token_value "$j"
+    operation_word="$_RGCC_STATIC_TOKEN_VALUE"
+    if [[ "$operation_word" == "$operation" ]]; then
+      return 0
+    fi
+    if (( dynamic_git_word == 0 )) &&
+      { [[ "${_RGCC_TOKEN_VALUES[j]}" == *'$'* ]] ||
+        [[ "${_RGCC_TOKEN_VALUES[j]}" == *'`'* ]] ||
+        [[ "${_RGCC_TOKEN_UNQUOTED_UNSAFE[j]}" == "1" ]]; }; then
       return 0
     fi
   done
@@ -1854,6 +1927,13 @@ resolve_git_command_cwd() {
     if _shell_text_outside_simple_quotes_contains_git_operation \
       "$operation" "$stripped_command"; then
       return 2
+    fi
+    if (( ${#stripped_command} >= 4096 )); then
+      if _large_ambiguous_shell_text_contains_git_operation \
+        "$operation" "$stripped_command"; then
+        return 2
+      fi
+      return 1
     fi
     if _unsafe_shell_text_contains_git_operation "$operation" "$command"; then
       return 2

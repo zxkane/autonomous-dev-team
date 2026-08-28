@@ -688,6 +688,74 @@ out=$(run_hook_bounded "$large_command")
 assert_exit "large uncertain trunk push blocks within five seconds" "2" "$out"
 
 # ===========================================================================
+# TC-BP-36: chained and multi-line feature pushes remain allowed
+# ===========================================================================
+echo ""
+echo "=== TC-BP-36: chained and multi-line feature pushes remain allowed ==="
+setup_repo feat/x
+out=$(run_hook "git add -A && git commit -m x && git push origin feat/x")
+assert_exit "feature push after add and commit is allowed" "0" "$out"
+out=$(run_hook "git rebase --autostash origin/main && git push --force-with-lease origin feat/x")
+assert_exit "feature push after rebase is allowed" "0" "$out"
+out=$(run_hook $'cd /tmp\ngit push origin feat/x')
+assert_exit "feature push on a later physical line is allowed" "0" "$out"
+out=$(run_hook $'git add a.txt\ngit commit -m "feat(x): y"\ngit push -u origin feat/x')
+assert_exit "documented multi-line feature workflow is allowed" "0" "$out"
+out=$(run_hook "git add -A && git commit -m x && git push origin main")
+assert_exit "equivalent chained trunk push remains blocked" "2" "$out"
+out=$(run_hook 'git push "$REMOTE" feat/x')
+assert_exit "quoted dynamic remote keeps the literal feature refspec readable" "0" "$out"
+out=$(run_hook 'git push $REMOTE feat/x')
+assert_exit "unquoted dynamic remote remains fail-closed" "2" "$out"
+
+# ===========================================================================
+# TC-BP-37: git-free expansion commands are not treated as pushes
+# ===========================================================================
+echo ""
+echo "=== TC-BP-37: git-free expansion commands remain allowed ==="
+for command in \
+  'git -C $dir status' \
+  '$PYTHON $SCRIPT' \
+  '"$PYTHON" "$SCRIPT"' \
+  '${TOOL} ${ARG}' \
+  '$CMD --flag $x' \
+  './run.sh && $CMD $ARG'
+do
+  out=$(run_hook "$command")
+  assert_exit "git-free command allowed: $command" "0" "$out"
+done
+out=$(run_hook '$GIT push origin main')
+assert_exit "dynamic git command with a literal trunk push stays fail-closed" "2" "$out"
+
+# ===========================================================================
+# TC-BP-38: large git-free ambiguous input stays within the hook budget
+# ===========================================================================
+echo ""
+echo "=== TC-BP-38: large git-free ambiguous input remains bounded ==="
+setup_repo feat/x
+large_command=$'python3 - <<PY\n'
+for ((i = 0; i < 625; i++)); do
+  large_command+="def f$i(x):"$'\n'
+  large_command+="    return g(x)+$i"$'\n'
+done
+large_command+=$'PY\nprintf done'
+out=$(run_hook_bounded "$large_command")
+assert_exit "large git-free ambiguous command is allowed within five seconds" "0" "$out"
+
+# ===========================================================================
+# TC-BP-39: non-executable push text does not override a real feature push
+# ===========================================================================
+echo ""
+echo "=== TC-BP-39: non-executable push text remains ignored ==="
+setup_repo feat/x
+out=$(run_hook "echo git push origin main && git push origin feat/x")
+assert_exit "echo arguments mentioning a trunk push stay non-executable" "0" "$out"
+out=$(run_hook $'cat <<EOF\ngit push origin main\nEOF\ngit push origin feat/x')
+assert_exit "heredoc data mentioning a trunk push stays non-executable" "0" "$out"
+out=$(run_hook "echo git push origin feat/x && git push origin main")
+assert_exit "a real trunk push still blocks after benign push text" "2" "$out"
+
+# ===========================================================================
 # Summary
 # ===========================================================================
 echo ""

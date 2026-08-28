@@ -64,10 +64,17 @@ if [[ "$resolve_rc" -eq 1 ]]; then
   exit 0
 fi
 
+# Apply the resolver's non-executable-region policy to destination parsing too.
+# On uncertain syntax, retain the original text so parsing stays fail-closed.
+push_command="$command"
+if stripped_push_command=$(_strip_shell_non_executable_regions "$command"); then
+  push_command="$stripped_push_command"
+fi
+
 # Both destinations must be PROVEN before the push may be waved through. Each
 # of these can report "unknown", and any unknown leaves the trunk check armed.
 target_url=""
-if [[ -n "$push_dir" ]] && remote_operand=$(parse_push_remote_operand "$command"); then
+if [[ -n "$push_dir" ]] && remote_operand=$(parse_push_remote_operand "$push_command"); then
   target_url=$(push_destination_url "$push_dir" "$remote_operand") || target_url=""
 fi
 
@@ -114,20 +121,24 @@ trunk="${BASE_BRANCH:-${TRUNK_BRANCH:-main}}"
 # Parse the destination ref(s) the push would write to. Block if any of
 # them target the trunk (covers --all/--mirror via __ALL__/__MIRROR__).
 should_block=0
-found_ref=0
+parsed_refs=""
+if parsed_refs=$(parse_push_target_refspec "$push_command"); then
+  parse_rc=0
+else
+  parse_rc=$?
+fi
 while IFS= read -r ref; do
   [[ -z "$ref" ]] && continue
-  found_ref=1
   if is_trunk_ref "$ref" "$trunk"; then
     should_block=1
     break
   fi
-done < <(parse_push_target_refspec "$command")
+done <<<"$parsed_refs"
 
-# A matched but unsupported push with no parseable destination is UNKNOWN.
-# The hook's existing fail-closed contract must not turn parser uncertainty
-# into permission to push.
-if (( resolve_rc == 2 && found_ref == 0 )); then
+# Parser rc=1 means no literal push was found, while rc=2 means one was found
+# but its destination was unreadable. The resolver already proved this command
+# contains a push, so either non-zero parser result remains fail-closed.
+if (( parse_rc != 0 )); then
   should_block=1
 fi
 

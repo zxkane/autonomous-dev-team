@@ -307,6 +307,9 @@ assert_unsupported "z12" "ANSI-C control NUL inside git word" \
   "$'git\\c@ignored' commit --dry-run"
 assert_unsupported "z13" "ANSI-C invalid Unicode escape inside git word" \
   "$'g\\U80000067it' commit --dry-run"
+# shellcheck disable=SC2016
+assert_unsupported "z17" "dynamic git command word with literal operation" \
+  '$GIT commit --dry-run'
 
 for sentinel_case in \
   "TC-BCOW-010z14 command substitution:$COMMAND_SENTINEL" \

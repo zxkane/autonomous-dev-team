@@ -161,7 +161,15 @@ Those shapes retain the original command text and fail closed.
 | `TC-IGC-547-139` | An approximately 8 KiB ambiguous command ends with a genuine `git commit` | Main-workspace hook exits `2` within its configured five-second timeout |
 | `TC-IGC-547-140` | A masked heredoc terminator is followed by a genuine commit | Resolver returns `2` for a visible but unsupported matching invocation instead of reprocessing and hiding it |
 | `TC-IGC-547-141` | An approximately 20 KiB ambiguous command ends with a genuine `git commit` | Main-workspace hook still exits `2` within five seconds, proving the operation-bearing path does not retain quadratic scaling |
+| `TC-IGC-547-142` | An approximately 20 KiB ambiguous command ends with `git -p commit` | Main-workspace hook exits `2` within five seconds |
+| `TC-IGC-547-143` | An approximately 20 KiB ambiguous command ends with `git 'commit'` | Main-workspace hook exits `2` within five seconds |
+| `TC-IGC-547-144` | An approximately 20 KiB ambiguous command ends with `git ${G} commit` | Main-workspace hook exits `2` within five seconds |
+| `TC-IGC-547-145` | An approximately 20 KiB ambiguous command contains no literal `git` word | Main-workspace hook exits `0` within five seconds |
 | `TC-BP-35` | An approximately 8 KiB ambiguous command ends with `git push origin main` | Trunk-protection hook exits `2` within five seconds; unresolved refspec parsing cannot grant the push |
+| `TC-BP-36` | Chained/multiline workflows and a quoted dynamic remote end with a literal feature refspec | Trunk-protection hook exits `0`; the equivalent trunk push and an unquoted dynamic remote exit `2` |
+| `TC-BP-37` | Expansion-bearing commands contain no literal `git push`; control uses `$GIT push origin main` | Git-free commands exit `0`; the explicit dynamic Git operation remains fail-closed |
+| `TC-BP-38` | An approximately 20 KiB ambiguous command contains no literal `git` word | Trunk-protection hook exits `0` within five seconds |
+| `TC-BP-39` | `echo` arguments or heredoc data mention a trunk push before a real feature push | Non-executable push text is ignored; a real trunk push remains blocked |
 
 ## Evidence contract
 
@@ -172,6 +180,13 @@ false-positive detector behavior and its user-visible hook impact without
 changing production code. The controls also prevent a future comment/heredoc
 stripper from hiding a real commit after quoted text or a heredoc terminator.
 
-The eventual fix is complete only when all one hundred forty-one cases pass together with the
+The review-regression cases `142` through `145` and `TC-BP-36` through
+`TC-BP-39` must fail on the first reviewed fix: operation-bearing large
+commands time out, git-free expansion commands are misclassified, chained
+feature pushes are blocked, or non-executable push text overrides the real
+refspec.
+
+The eventual fix is complete only when all one hundred forty-five detector
+cases and all ninety-three trunk-protection assertions pass together with the
 existing `test-is-git-command.sh` and
 `test-block-commit-outside-worktree.sh` suites.

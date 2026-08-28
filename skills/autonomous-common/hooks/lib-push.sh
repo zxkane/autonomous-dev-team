@@ -14,9 +14,10 @@
 # ---------------------------------------------------------------------------
 # parse_push_target_refspec <command>
 #
-# Given a git-push command line, echoes the destination ref-name(s) the push
-# would write to, one per line. Returns 0 if at least one destination was
-# identified, 1 if the command is not a push or could not be parsed.
+# Given shell command text, echoes every destination ref-name written by each
+# literal `git push`, one per line. Returns 0 when all matched pushes were
+# parsed, 1 when no push was found, and 2 when a push was found but one of its
+# destinations could not be determined.
 #
 # Handles:
 #   git push                                → <current_branch>
@@ -34,117 +35,243 @@
 # Bulk markers (__ALL__, __MIRROR__) are returned uppercase-bracketed so
 # callers can branch without ambiguity vs. a real ref named "all".
 #
-# Caller is expected to have already verified `is_git_command "push" ...`.
-parse_push_target_refspec() {
+# Emit shell command segments without evaluating them. Unquoted newlines and
+# control operators terminate a segment; comments are discarded. Quotes stay
+# in the text so the bounded token parser can reject non-literal operands.
+_push_command_segments() {
   local command="$1"
-  local current_branch
-  current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+  local state="unquoted" segment="" character next
+  local word_start=1 i length=${#command}
 
-  # Tokenize. Strip leading `cd ... &&` etc. by trimming up to the `git` token.
-  # Match is_git_command's quote-stripping minimally — quotes around a refspec
-  # are valid (e.g. "git push origin 'feat:bar'") but rare; treat them as
-  # literal here.
-  local -a tokens
-  read -ra tokens <<<"$command"
+  for ((i = 0; i < length; i++)); do
+    character="${command:i:1}"
+    next=""
+    (( i + 1 < length )) && next="${command:i+1:1}"
 
-  # Find the `git` token
-  local i=0 n=${#tokens[@]}
-  while (( i < n )) && [[ "${tokens[i]}" != "git" ]]; do
-    i=$((i+1))
-  done
-  if (( i >= n )); then return 1; fi
-  i=$((i+1))
-
-  # Skip git global flags (same logic as is_git_command's flag-skip).
-  while (( i < n )); do
-    case "${tokens[i]}" in
-      -c|-C|--git-dir|--work-tree|--namespace|--super-prefix)
-        i=$(( i + 2 > n ? n : i + 2 ))
+    case "$state" in
+      single)
+        segment+="$character"
+        [[ "$character" == "'" ]] && state="unquoted"
         ;;
-      --*=*|--*)
-        i=$((i+1))
-        ;;
-      *)
-        break
-        ;;
-    esac
-  done
-
-  # Expect `push`
-  if (( i >= n )); then return 1; fi
-  if [[ "${tokens[i]}" != "push" ]]; then return 1; fi
-  i=$((i+1))
-
-  # Walk push args. Track state.
-  local found_remote=0
-  local -a refspecs=()
-  local saw_all=0 saw_mirror=0 saw_tags_flag=0 saw_delete=0
-  while (( i < n )); do
-    local tok="${tokens[i]}"
-    case "$tok" in
-      --all|--all=*)        saw_all=1 ;;
-      --mirror|--mirror=*)  saw_mirror=1 ;;
-      --tags|--tags=*)      saw_tags_flag=1 ;;
-      --delete|-d)          saw_delete=1 ;;
-      # Skip flags that take a separate value. Bare --signed is one token.
-      --repo|-o|--push-option|--receive-pack|--exec)
-        i=$(( i + 2 > n ? n : i + 2 )); continue ;;
-      # Remaining short, long, or --flag=value options consume 1 token.
-      -*) ;;
-      # Positional: first one is the remote, rest are refspecs (or
-      # `tag <name>` pair).
-      *)
-        if (( found_remote == 0 )); then
-          found_remote=1
-        elif [[ "$tok" == "tag" ]] && (( i + 1 < n )); then
-          refspecs+=("refs/tags/${tokens[i+1]}")
-          i=$((i+1))
-        else
-          refspecs+=("$tok")
+      double)
+        segment+="$character"
+        if [[ "$character" == "\\" && -n "$next" ]]; then
+          segment+="$next"
+          ((i++))
+        elif [[ "$character" == '"' ]]; then
+          state="unquoted"
         fi
         ;;
+      unquoted)
+        case "$character" in
+          "'")
+            segment+="$character"
+            state="single"
+            word_start=0
+            ;;
+          '"')
+            segment+="$character"
+            state="double"
+            word_start=0
+            ;;
+          \\)
+            segment+="$character"
+            if [[ -n "$next" ]]; then
+              segment+="$next"
+              ((i++))
+            fi
+            word_start=0
+            ;;
+          '#')
+            if (( word_start == 1 )); then
+              while (( i + 1 < length )) &&
+                [[ "${command:i+1:1}" != $'\n' ]]; do
+                ((i++))
+              done
+            else
+              segment+="$character"
+              word_start=0
+            fi
+            ;;
+          $'\n'|$'\r'|';'|'|'|'&')
+            printf '%s\n' "$segment"
+            segment=""
+            word_start=1
+            if { [[ "$character" == '|' || "$character" == '&' ]]; } &&
+              [[ "$next" == "$character" ]]; then
+              ((i++))
+            fi
+            ;;
+          ' '|$'\t')
+            segment+="$character"
+            word_start=1
+            ;;
+          *)
+            segment+="$character"
+            word_start=0
+            ;;
+        esac
+        ;;
     esac
-    i=$((i+1))
   done
+  printf '%s\n' "$segment"
+}
 
-  # --all / --mirror / --tags shortcut
-  if (( saw_all == 1 )); then echo "__ALL__"; return 0; fi
-  if (( saw_mirror == 1 )); then echo "__MIRROR__"; return 0; fi
-  if (( saw_tags_flag == 1 )) && (( ${#refspecs[@]} == 0 )); then
-    echo "__TAGS__"; return 0
-  fi
+_push_decode_literal_token() {
+  local token="$1"
+  local first="${token:0:1}"
+  local last="${token: -1}"
 
-  # No explicit refspec: implicit destination is the *current branch*'s
-  # configured upstream (matrix or default). For our purposes, treat that as
-  # the current branch name — `git push` with default config pushes
-  # HEAD → <upstream of HEAD>, where upstream typically matches the current
-  # branch name on origin.
-  if (( ${#refspecs[@]} == 0 )); then
-    if [[ -n "$current_branch" && "$current_branch" != "HEAD" ]]; then
-      echo "$current_branch"
-      return 0
-    fi
+  if [[ ${#token} -ge 2 ]] &&
+    { [[ "$first" == "'" && "$last" == "'" ]] ||
+      [[ "$first" == '"' && "$last" == '"' ]]; }; then
+    token="${token:1:${#token}-2}"
+  elif [[ "$token" == *["'"]* ]]; then
     return 1
   fi
+  [[ "$token" != *['$`\\']* ]] || return 1
+  _PUSH_LITERAL_TOKEN="$token"
+}
 
-  # Walk refspecs. Each can be:
-  #   src:dst   → echo dst
-  #   :dst      → echo :dst (delete)
-  #   ref       → echo ref (src=dst)
-  for r in "${refspecs[@]}"; do
-    if [[ "$r" == *:* ]]; then
-      local dst="${r#*:}"
-      local src="${r%%:*}"
-      if [[ -z "$src" ]]; then
-        # Delete form: prefix with `:` so caller can detect.
-        echo ":${dst}"
-      else
-        echo "$dst"
-      fi
-    else
-      echo "$r"
+_push_find_git_command_start() {
+  local token i=0
+
+  for token in "$@"; do
+    if [[ "$token" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
+      ((i++))
+      continue
     fi
+    [[ "$token" == "git" ]] || return 1
+    _PUSH_GIT_INDEX="$i"
+    return 0
   done
+  return 1
+}
+
+_push_decode_unquoted_literal_token() {
+  [[ "$1" != *\"* && "$1" != *\'* ]] || return 1
+  _push_decode_literal_token "$1"
+}
+
+_push_token_is_single_shell_word() {
+  local token="$1"
+  local first="${token:0:1}"
+  local last="${token: -1}"
+
+  if _push_decode_literal_token "$token"; then
+    return 0
+  fi
+  [[ ${#token} -ge 2 ]] &&
+    { [[ "$first" == "'" && "$last" == "'" ]] ||
+      [[ "$first" == '"' && "$last" == '"' ]]; }
+}
+
+parse_push_target_refspec() {
+  local command="$1"
+  local current_branch segment tok decoded r src dst
+  local i j n found_remote saw_all saw_mirror saw_tags_flag
+  local matched=0 unknown=0
+  local -a tokens refspecs
+  current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+
+  while IFS= read -r segment; do
+    read -ra tokens <<<"$segment"
+    n=${#tokens[@]}
+    if _push_find_git_command_start "${tokens[@]}"; then
+      i="$_PUSH_GIT_INDEX"
+      j=$((i + 1))
+      while (( j < n )); do
+        case "${tokens[j]}" in
+          -c|-C|--git-dir|--work-tree|--namespace|--super-prefix)
+            (( j + 1 < n )) || { unknown=1; break; }
+            j=$((j + 2))
+            ;;
+          --*=*|--*|-*) ((j++)) ;;
+          *) break ;;
+        esac
+      done
+      (( j < n )) && [[ "${tokens[j]}" == "push" ]] || continue
+      matched=1
+      ((j++))
+      found_remote=0
+      saw_all=0
+      saw_mirror=0
+      saw_tags_flag=0
+      refspecs=()
+
+      while (( j < n )); do
+        tok="${tokens[j]}"
+        case "$tok" in
+          --all|--all=*) saw_all=1 ;;
+          --mirror|--mirror=*) saw_mirror=1 ;;
+          --tags|--tags=*) saw_tags_flag=1 ;;
+          --delete|-d) ;;
+          --repo|-o|--push-option|--receive-pack|--exec)
+            (( j + 1 < n )) || { unknown=1; break; }
+            j=$((j + 2))
+            continue
+            ;;
+          -*)
+            ;;
+          *)
+            if (( found_remote == 0 )); then
+              found_remote=1
+              if ! _push_token_is_single_shell_word "$tok"; then
+                unknown=1
+              fi
+              ((j++))
+              continue
+            fi
+            if ! _push_decode_literal_token "$tok"; then
+              unknown=1
+              ((j++))
+              continue
+            fi
+            decoded="$_PUSH_LITERAL_TOKEN"
+            if [[ "$decoded" == "tag" ]] && (( j + 1 < n )); then
+              if _push_decode_literal_token "${tokens[j+1]}"; then
+                refspecs+=("refs/tags/${_PUSH_LITERAL_TOKEN}")
+              else
+                unknown=1
+              fi
+              ((j++))
+            else
+              refspecs+=("$decoded")
+            fi
+            ;;
+        esac
+        ((j++))
+      done
+
+      if (( saw_all == 1 )); then
+        printf '%s\n' "__ALL__"
+      elif (( saw_mirror == 1 )); then
+        printf '%s\n' "__MIRROR__"
+      elif (( saw_tags_flag == 1 && ${#refspecs[@]} == 0 )); then
+        printf '%s\n' "__TAGS__"
+      elif (( ${#refspecs[@]} == 0 )); then
+        if [[ -n "$current_branch" && "$current_branch" != "HEAD" ]]; then
+          printf '%s\n' "$current_branch"
+        else
+          unknown=1
+        fi
+      else
+        for r in "${refspecs[@]}"; do
+          if [[ "$r" == *:* ]]; then
+            dst="${r#*:}"
+            src="${r%%:*}"
+            [[ -z "$src" ]] && printf ':%s\n' "$dst" || printf '%s\n' "$dst"
+          else
+            printf '%s\n' "$r"
+          fi
+        done
+      fi
+    fi
+  done < <(_push_command_segments "$command")
+
+  (( matched == 1 )) || return 1
+  (( unknown == 0 )) || return 2
+  return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -216,62 +343,69 @@ is_trunk_ref() {
 # positional.
 parse_push_remote_operand() {
   local command="$1"
+  local segment operand="" decoded
+  local n i j pushes=0 found=0
   local -a tokens
-  read -ra tokens <<<"$command"
 
-  local n=${#tokens[@]}
-  local i=0 pushes=0 operand="" found=0
-
-  # Scan the WHOLE line: a second `git push` must be detected, not ignored.
-  while (( i < n )); do
-    [[ "${tokens[i]}" == "git" ]] || { i=$((i+1)); continue; }
-    local j=$((i+1))
-    while (( j < n )); do
-      case "${tokens[j]}" in
-        -c|-C|--git-dir|--work-tree|--namespace|--super-prefix)
-          j=$(( j + 2 > n ? n : j + 2 )) ;;
-        --*=*|--*) j=$((j+1)) ;;
-        *) break ;;
-      esac
-    done
-    if (( j < n )) && [[ "${tokens[j]}" == "push" ]]; then
-      pushes=$((pushes+1))
-      (( pushes > 1 )) && return 1
-      j=$((j+1))
+  while IFS= read -r segment; do
+    read -ra tokens <<<"$segment"
+    n=${#tokens[@]}
+    if _push_find_git_command_start "${tokens[@]}"; then
+      i="$_PUSH_GIT_INDEX"
+      j=$((i + 1))
       while (( j < n )); do
         case "${tokens[j]}" in
-          # --repo supplies a repository, but a later positional repository
-          # overrides it. Preserve both forms of Git's precedence.
+          -c|-C|--git-dir|--work-tree|--namespace|--super-prefix)
+            (( j + 1 < n )) || return 1
+            j=$((j + 2))
+            ;;
+          --*=*|--*|-*) ((j++)) ;;
+          *) break ;;
+        esac
+      done
+      (( j < n )) && [[ "${tokens[j]}" == "push" ]] || continue
+      ((pushes++))
+      (( pushes <= 1 )) || return 1
+      ((j++))
+      while (( j < n )); do
+        case "${tokens[j]}" in
           --repo)
             (( j + 1 < n )) || return 1
-            operand="${tokens[j+1]}"
+            _push_decode_unquoted_literal_token "${tokens[j+1]}" || return 1
+            operand="$_PUSH_LITERAL_TOKEN"
             found=1
-            j=$((j+2))
+            j=$((j + 2))
             continue
             ;;
           --repo=*)
-            operand="${tokens[j]#*=}"
+            _push_decode_unquoted_literal_token "${tokens[j]#*=}" || return 1
+            operand="$_PUSH_LITERAL_TOKEN"
             found=1
-            j=$((j+1))
+            ((j++))
             continue
             ;;
           -o|--push-option|--receive-pack|--exec)
-            j=$(( j + 2 > n ? n : j + 2 )); continue ;;
+            (( j + 1 < n )) || return 1
+            j=$((j + 2))
+            continue
+            ;;
           -*) ;;
-          *) operand="${tokens[j]}"; found=1; break ;;
+          *)
+            _push_decode_unquoted_literal_token "${tokens[j]}" || return 1
+            decoded="$_PUSH_LITERAL_TOKEN"
+            operand="$decoded"
+            found=1
+            break
+            ;;
         esac
-        j=$((j+1))
+        ((j++))
       done
     fi
-    i=$((i+1))
-  done
+  done < <(_push_command_segments "$command")
 
   (( pushes == 1 )) || return 1
 
   if (( found == 1 )); then
-    # A quote or expansion character means the token is not the literal value
-    # git will receive. Unknown, not "as written".
-    [[ "$operand" != *[\"\'\$\`\\]* ]] || return 1
     printf '%s\n' "$operand"
   fi
   return 0

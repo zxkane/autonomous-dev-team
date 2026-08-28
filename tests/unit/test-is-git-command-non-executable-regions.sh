@@ -130,7 +130,9 @@ assert_large_heredoc_bounded() {
 
 assert_large_ambiguous_hook_bounded() {
   local id="$1"
-  local function_count="${2:-250}"
+  local expected="$2"
+  local tail="$3"
+  local function_count="${4:-250}"
   local command=$'python3 - <<PY\n'
   local payload output rc i
 
@@ -138,7 +140,7 @@ assert_large_ambiguous_hook_bounded() {
     command+="def f$i(x):"$'\n'
     command+="    return g(x)+$i"$'\n'
   done
-  command+=$'PY\ngit commit -m real'
+  command+=$'PY\n'"$tail"
   payload=$(jq -cn --arg command "$command" '{tool_input:{command:$command}}')
 
   output=$(
@@ -146,10 +148,10 @@ assert_large_ambiguous_hook_bounded() {
       printf '%s' "$payload" | timeout 5 bash "$HOOK" 2>&1
   )
   rc=$?
-  if [[ "$rc" -eq 2 ]]; then
+  if [[ "$rc" -eq "$expected" ]]; then
     record_pass "$id (hook rc=$rc within 5s)"
   else
-    record_fail "$id (expected hook rc=2 within 5s, got rc=$rc: $output)"
+    record_fail "$id (expected hook rc=$expected within 5s, got rc=$rc: $output)"
   fi
 }
 
@@ -310,7 +312,7 @@ BENIGN_COMMAND_DYNAMIC_SCRIPT='echo "$(command bash "$f")"'
 BENIGN_DYNAMIC_EVAL='echo "$(eval "$generated")"'
 
 echo ""
-echo "=== TC-IGC-547-001..141: non-executable git mentions ==="
+echo "=== TC-IGC-547-001..145: non-executable git mentions ==="
 echo ""
 
 assert_detector_no_match \
@@ -734,12 +736,26 @@ assert_hook_rc \
   "TC-IGC-547-138 hook allows dynamic eval without git text" 0 \
   "$BENIGN_DYNAMIC_EVAL"
 assert_large_ambiguous_hook_bounded \
-  "TC-IGC-547-139 large ambiguous command is blocked within hook budget"
+  "TC-IGC-547-139 large ambiguous command is blocked within hook budget" \
+  2 "git commit -m real"
 assert_resolver_uncertain_match \
   "TC-IGC-547-140 resolver keeps commit after masked heredoc visible" \
   "$HEREDOC_THEN_COMMIT"
 assert_large_ambiguous_hook_bounded \
-  "TC-IGC-547-141 twenty-kilobyte command is blocked within hook budget" 625
+  "TC-IGC-547-141 twenty-kilobyte command is blocked within hook budget" \
+  2 "git commit -m real" 625
+assert_large_ambiguous_hook_bounded \
+  "TC-IGC-547-142 generic short git flag is blocked within hook budget" \
+  2 "git -p commit -m real" 625
+assert_large_ambiguous_hook_bounded \
+  "TC-IGC-547-143 quoted commit word is blocked within hook budget" \
+  2 "git 'commit' -m real" 625
+assert_large_ambiguous_hook_bounded \
+  "TC-IGC-547-144 dynamic global argument is blocked within hook budget" \
+  2 'git ${G} commit -m real' 625
+assert_large_ambiguous_hook_bounded \
+  "TC-IGC-547-145 git-free ambiguous input stays allowed within hook budget" \
+  0 "printf '%s\n' done" 625
 
 echo ""
 echo "========================================"
