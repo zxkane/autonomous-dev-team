@@ -902,37 +902,44 @@ _shell_code_executor_contains_git_operation() {
   return 1
 }
 
+_shell_code_is_trusted_data_builtin() {
+  local code="$1"
+  local i
+
+  [[ "${_SHELL_DATA_BUILTINS_TRUSTED:-0}" == "1" ]] || return 1
+  _resolve_git_command_tokenize "$code"
+  (( _RGCC_UNSAFE == 0 && _RGCC_MALFORMED == 0 )) ||
+    return 1
+  (( ${#_RGCC_TOKEN_VALUES[@]} > 0 )) || return 1
+  for ((i = 0; i < ${#_RGCC_TOKEN_TYPES[@]}; i++)); do
+    [[ "${_RGCC_TOKEN_TYPES[i]}" == "word" ]] || return 1
+  done
+  case "${_RGCC_TOKEN_VALUES[0]}" in
+    echo)
+      [[ "$(type -t echo 2>/dev/null)" == "builtin" ]]
+      ;;
+    printf)
+      if (( ${#_RGCC_TOKEN_VALUES[@]} > 1 )) &&
+        [[ "${_RGCC_TOKEN_VALUES[1]}" == -v* ]]; then
+        return 1
+      fi
+      [[ "$(type -t printf 2>/dev/null)" == "builtin" ]]
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 _shell_code_contains_git_operation() {
   local operation="$1"
   local code="$2"
 
+  _shell_code_is_trusted_data_builtin "$code" && return 1
   if _shell_static_code_contains_git_operation "$operation" "$code" ||
     _shell_code_executor_contains_git_operation "$operation" "$code"; then
     return 0
   fi
   if _conservative_shell_text_contains_git_operation "$operation" "$code"; then
-    _resolve_git_command_tokenize "$code"
-    if (( _RGCC_UNSAFE == 0 && _RGCC_MALFORMED == 0 )) &&
-      (( ${#_RGCC_TOKEN_VALUES[@]} > 0 )); then
-      local i
-      for ((i = 0; i < ${#_RGCC_TOKEN_TYPES[@]}; i++)); do
-        [[ "${_RGCC_TOKEN_TYPES[i]}" == "word" ]] || return 0
-      done
-      case "${_RGCC_TOKEN_VALUES[0]}" in
-        echo|printf)
-          if [[ "${_RGCC_TOKEN_VALUES[0]}" == "printf" ]] &&
-            (( ${#_RGCC_TOKEN_VALUES[@]} > 1 )) &&
-            [[ "${_RGCC_TOKEN_VALUES[1]}" == -v* ]]; then
-            return 0
-          fi
-          if [[ "${_SHELL_DATA_BUILTINS_TRUSTED:-0}" == "1" ]] &&
-            [[ "$(type -t "${_RGCC_TOKEN_VALUES[0]}" 2>/dev/null)" == \
-              "builtin" ]]; then
-            return 1
-          fi
-          ;;
-      esac
-    fi
+    _shell_code_is_trusted_data_builtin "$code" && return 1
     return 0
   fi
   return 1

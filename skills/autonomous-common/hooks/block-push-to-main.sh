@@ -62,10 +62,20 @@ else
   push_dir=""
 fi
 
+substitution_push=0
+case "$command" in
+  *'$('*|*'`'*|*'<('*|*'>('*)
+    if _unsafe_shell_text_contains_git_operation "push" "$command"; then
+      substitution_push=1
+    fi
+    ;;
+esac
+
 # Most resolver no-matches are ordinary git-free commands. Only pay for the
 # structured second opinion when a cheap conservative scan still sees literal
 # push-shaped text that quoting or a data command may have hidden.
 if (( resolve_rc == 1 )) &&
+  (( substitution_push == 0 )) &&
   ! _conservative_shell_text_contains_git_operation "push" "$command" &&
   ! _push_shell_text_may_contain_executable_push_data "$command"; then
   exit 0
@@ -91,6 +101,9 @@ if parsed_refs=$(parse_push_target_refspec "$push_command"); then
   parse_rc=0
 else
   parse_rc=$?
+fi
+if (( substitution_push == 1 )); then
+  parse_rc=2
 fi
 if (( parse_rc == 1 )); then
   exit 0

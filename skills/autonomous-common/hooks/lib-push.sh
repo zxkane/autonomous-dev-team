@@ -1,9 +1,8 @@
 #!/bin/bash
 # lib-push.sh — pure parsing helpers for git-push hook scripts.
 #
-# Used by:
-#   - block-push-to-main.sh (Claude PreToolUse hook, Layer 1 trunk protection)
-#   - install-git-pre-push.sh's emitted hook (Layer 2 git-side hook)
+# Used by block-push-to-main.sh (Claude PreToolUse hook, Layer 1 trunk
+# protection). The emitted Layer 2 git pre-push hook is self-contained.
 #
 # Parser functions reuse the sibling lib.sh tokenizer when the caller has not
 # already sourced it. URL normalization helpers remain self-contained.
@@ -374,8 +373,23 @@ _push_command_executes_standard_input() {
           esac
         done
         (( j < end )) || return 1
+        local _PUSH_XARGS_APPENDS_ARGS=1
         _push_command_executes_standard_input "$j" "$end"
         return
+        ;;
+      awk|gawk|mawk|nawk)
+        for ((j = j + 1; j < end; j++)); do
+          if _push_token_static_value "$j"; then
+            value="$_PUSH_STATIC_VALUE"
+          elif [[ "${_PUSH_TOKEN_QUOTES[j]:-}" == "single" &&
+            "${_PUSH_TOKEN_ANSI[j]:-0}" == "0" ]]; then
+            value="${_PUSH_TOKEN_VALUES[j]:-}"
+          else
+            return 0
+          fi
+          [[ "$value" =~ system[[:space:]]*\( ]] && return 0
+        done
+        return 1
         ;;
       *)
         _push_shell_command_name_executes_input "$command_name"
@@ -383,7 +397,92 @@ _push_command_executes_standard_input() {
         ;;
     esac
   done
+  [[ "${_PUSH_XARGS_APPENDS_ARGS:-0}" == "1" ]] && return 0
   return 1
+}
+
+_push_process_substitution_executes_input() {
+  local opener_index="$1"
+  local paren_index=$((opener_index + 1))
+  local body_start=$((opener_index + 2))
+  local i depth=1 n=${#_PUSH_TOKEN_VALUES[@]}
+
+  [[ "${_PUSH_TOKEN_TYPES[opener_index]:-}" == "word" &&
+    "${_PUSH_TOKEN_VALUES[opener_index]:-}" == ">" ]] || return 1
+  [[ "${_PUSH_TOKEN_TYPES[paren_index]:-}" == "operator" &&
+    "${_PUSH_TOKEN_VALUES[paren_index]:-}" == "(" ]] || return 1
+
+  for ((i = body_start; i < n; i++)); do
+    [[ "${_PUSH_TOKEN_TYPES[i]:-}" == "operator" ]] || continue
+    case "${_PUSH_TOKEN_VALUES[i]:-}" in
+      '(') ((depth++)) ;;
+      ')')
+        ((depth--))
+        if (( depth == 0 )); then
+          (( body_start < i )) || return 0
+          _push_command_executes_standard_input "$body_start" "$i"
+          return
+        fi
+        ;;
+    esac
+  done
+  return 0
+}
+
+_push_pipeline_has_executing_process_substitution() {
+  local pipe_index="$1"
+  local i n=${#_PUSH_TOKEN_VALUES[@]}
+
+  for ((i = pipe_index + 1; i + 1 < n; i++)); do
+    if _push_process_substitution_executes_input "$i"; then
+      return 0
+    fi
+    if [[ "${_PUSH_TOKEN_TYPES[i]:-}" == "operator" ]]; then
+      case "${_PUSH_TOKEN_VALUES[i]:-}" in
+        '|'|'|&'|'&&'|'||'|';'|'&') return 1 ;;
+      esac
+    fi
+  done
+  return 1
+}
+
+_push_pipeline_loop_executes_input() {
+  local pipe_index="$1"
+  local i start end n=${#_PUSH_TOKEN_VALUES[@]}
+
+  start=$((pipe_index + 1))
+  _push_token_static_value "$start" || return 1
+  [[ "$_PUSH_STATIC_VALUE" == "while" ||
+    "$_PUSH_STATIC_VALUE" == "until" ]] || return 1
+
+  for ((i = start + 1; i < n; i++)); do
+    if _push_token_static_value "$i" &&
+      [[ "$_PUSH_STATIC_VALUE" == "do" ]]; then
+      start=$((i + 1))
+      break
+    fi
+  done
+  (( start < n )) || return 0
+
+  while (( start < n )); do
+    while (( start < n )) &&
+      [[ "${_PUSH_TOKEN_TYPES[start]:-}" == "operator" ]]; do
+      ((start++))
+    done
+    (( start < n )) || return 0
+    if _push_token_static_value "$start" &&
+      [[ "$_PUSH_STATIC_VALUE" == "done" ]]; then
+      return 1
+    fi
+    end="$start"
+    while (( end < n )) &&
+      [[ "${_PUSH_TOKEN_TYPES[end]:-}" != "operator" ]]; do
+      ((end++))
+    done
+    _push_command_executes_standard_input "$start" "$end" && return 0
+    start=$((end + 1))
+  done
+  return 0
 }
 
 _push_pipeline_consumer_executes_input() {
@@ -391,6 +490,8 @@ _push_pipeline_consumer_executes_input() {
   local end=$((pipe_index + 1))
   local n=${#_PUSH_TOKEN_VALUES[@]}
 
+  _push_pipeline_has_executing_process_substitution "$pipe_index" && return 0
+  _push_pipeline_loop_executes_input "$pipe_index" && return 0
   while (( end < n )) &&
     [[ "${_PUSH_TOKEN_TYPES[end]:-}" != "operator" ]]; do
     ((end++))
@@ -438,9 +539,20 @@ _push_data_segment_is_safe() {
   local start="$1" end="$2" terminator="${3:-}"
   local i rc value
 
+  _PUSH_DATA_SEGMENT_DYNAMIC_INPUT=0
   case "$terminator" in
     '|'|'|&')
-      _push_pipeline_consumer_executes_input "$end" && return 1
+      if _push_pipeline_consumer_executes_input "$end"; then
+        _PUSH_DATA_SEGMENT_DYNAMIC_INPUT=1
+        return 1
+      fi
+      ;;
+    '(')
+      if (( end > start + 1 )) &&
+        _push_process_substitution_executes_input "$((end - 1))"; then
+        _PUSH_DATA_SEGMENT_DYNAMIC_INPUT=1
+        return 1
+      fi
       ;;
   esac
 
@@ -456,10 +568,6 @@ _push_data_segment_is_safe() {
     if _push_token_has_executable_expansion "$i"; then
       return 1
     fi
-    if [[ "$terminator" == "(" &&
-      "${_PUSH_TOKEN_UNSAFE[i]:-0}" == "1" ]]; then
-      return 1
-    fi
     [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] || return 1
   done
   return 0
@@ -473,7 +581,10 @@ _push_data_segment_contains_possible_push() {
     text+="${text:+ }${_PUSH_TOKEN_VALUES[i]:-}"
   done
   [[ -n "$text" ]] || return 1
-  [[ "$text" == *'$'* || "$text" == *'`'* ]] && return 0
+  [[ "${_PUSH_DATA_SEGMENT_DYNAMIC_INPUT:-0}" == "1" ]] || return 1
+  if [[ "$text" == *'$'* || "$text" == *'`'* ]]; then
+    return 0
+  fi
   if declare -F _conservative_shell_text_contains_git_operation \
     >/dev/null 2>&1; then
     _conservative_shell_text_contains_git_operation "push" "$text"

@@ -9422,12 +9422,13 @@ pipeline, and shadowing controls. Ambiguous inputs at least 4 KiB take one
 bounded tokenization pass plus conservative literal scanning instead of the
 older repeated fallback passes; approximately 20 KiB operation-bearing and
 git-free cases pin the five-second hook budget.
-`tests/unit/test-block-push-regex.sh` (`TC-BP-35..51`) covers the same budget,
+`tests/unit/test-block-push-regex.sh` (`TC-BP-35..53`) covers the same budget,
 chained, multiline, and prefixed feature pushes, git-free expansions,
 non-executable and shell-consumed push text, shell redirections, brace groups,
 line continuations, mixed quote fragments, dynamic refspecs, arithmetic
-expansions, ordinary data pipelines, and fail-closed handling for an unreadable
-operation or refspec.
+expansions, ordinary data pipelines, benign versus executable substitutions,
+stdin evaluators, and fail-closed handling for an unreadable operation or
+refspec.
 
 **Cross-reference**:
 [`docs/designs/block-commit-command-context.md`](../designs/block-commit-command-context.md)
@@ -9737,7 +9738,7 @@ they read only what the wrapper exported and never parse conf.
 
 **Status**: **ENFORCED**.
 
-**Test**: `tests/unit/test-block-push-regex.sh` (`TC-BP-01..51`, 181 assertions) —
+**Test**: `tests/unit/test-block-push-regex.sh` (`TC-BP-01..53`, 206 assertions) —
 the 11 pre-existing #64 cases unchanged, plus TC-BP-13b (bare push from inside
 the wiki), TC-BP-13c (no anchor → fail closed), TC-BP-16 (second clone of this
 project's remote, all three command shapes), TC-BP-17 (five URL spellings),
@@ -9767,7 +9768,7 @@ TC-BP-35 pins the five-second hook budget and fail-closed fallback when an
 approximately 8 KiB ambiguous command contains a real trunk push but the
 bounded refspec parser cannot produce a destination token.
 
-TC-BP-36..51 pin the review regressions. A single structured token snapshot is
+TC-BP-36..53 pin the review regressions. A single structured token snapshot is
 shared by destination and refspec parsing, with newlines and shell control
 operators preserving command boundaries. Each executable push in chained,
 multiline, subshell, assignment-prefixed, or supported wrapper-prefixed command
@@ -9781,11 +9782,15 @@ pushes, while a dynamic command name followed by the literal `push` operation
 remains fail-closed. Builtin `echo`/`printf` arguments and bounded heredoc data
 are non-executable when consumed only as data. Variable data piped to ordinary
 consumers such as `jq`, `tee`, `sort`, `gh`, `cut`, remote `cat`, or wrapped
-`jq` remains data; only a shell/interpreter consumer (including supported
-`env`, `command`, `timeout`, remote-shell, and `xargs` wrappers) makes its stdin
-possible executable text. Literal, ANSI-quoted, quote-concatenated, and dynamic
-shell input therefore fails closed, as do command and process substitutions,
-without classifying arithmetic expansion as executable. Redirections,
+`jq` remains data. Consumers that execute stdin are recognized structurally:
+shell/interpreter commands and supported wrappers, `awk` programs containing
+`system(...)`, dynamic loop-body commands, executing output process
+substitutions, and `xargs` commands whose appended arguments complete a wrapper.
+Literal, ANSI-quoted, quote-concatenated, and dynamic shell input therefore
+fails closed without classifying arithmetic expansion as executable. Command
+and process substitution bodies are analyzed independently by the shared shell
+code scanner: benign `$(date)`-style data remains allowed, while a body that
+executes a possible push keeps the trunk check armed. Redirections,
 brace-group delimiters, and backslash-newline continuations are shell syntax
 rather than refspecs. A dynamic global argument followed by more global flags
 and then a definite non-push operation remains allowed, while a dynamic refspec
@@ -9795,10 +9800,13 @@ Approximately 20–21 KiB git-free, PR-body, and single-word push-option inputs
 stay inside the five-second budget.
 
 Destination parsing consumes the same non-executable-region projection as
-operation detection. Its tri-state contract is `0` when every executable push
-is readable, `1` only when no executable push exists, and `2` when any possible
-executable push is unreadable. After the resolver reports a match, rc `1` is a
-positive data-only result and may exit early; rc `2` keeps the trunk check armed.
+operation detection. The direct-command parser returns `0` when every matched
+push is readable, `1` when its token stream contains no executable push, and `2`
+when a possible push is unreadable. Independent substitution-body analysis runs
+before the rc `1` early exit and upgrades the hook's combined decision to `2`
+whenever executable substitution code may push. Thus only a parser rc `1` with
+no substitution-push evidence is a positive data-only result; combined rc `2`
+keeps the trunk check armed.
 
 Measured red/green: **20 of 56 red on PR #539's parent** (`216a906` — the wiki
 and allowlist allows, the second-clone forms, the URL spellings, the

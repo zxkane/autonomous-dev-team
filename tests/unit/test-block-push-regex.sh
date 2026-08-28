@@ -1019,6 +1019,65 @@ do
 done
 
 # ===========================================================================
+# TC-BP-52: substitution bodies are classified by what they execute
+# ===========================================================================
+echo ""
+echo "=== TC-BP-52: benign substitutions allow; executable push bodies block ==="
+setup_repo feat/x
+for command in \
+  'echo "$(date)"' \
+  'echo "started at $(date -u +%FT%TZ)"' \
+  'printf "%s\n" "$(cat /etc/hostname)"' \
+  'echo "HEAD is $(git rev-parse --short HEAD)"' \
+  'echo "$(cat notes.md)" > /tmp/notes.copy' \
+  'echo "$(cat x.json)" | jq .' \
+  'echo "$(echo git push origin main)"' \
+  'log() { echo "[tick] $(date -u +%H:%M:%S) $*"; }' \
+  'echo "`date`"'
+do
+  out=$(run_hook "$command")
+  assert_exit "benign substitution remains allowed: $command" "0" "$out"
+done
+for command in \
+  '$(echo git push origin main)' \
+  "bash <(echo 'git push origin main')" \
+  "source <(echo 'git push origin main')" \
+  ". <(echo 'git push origin main')" \
+  'out="$(git push origin main)"' \
+  'eval $(echo git push origin main)' \
+  'echo "n=$(( $(git push origin main) + 1 ))"' \
+  'if $(echo git push origin main); then echo hi; fi'
+do
+  out=$(run_hook "$command")
+  assert_exit "executable substitution push blocked: $command" "2" "$out"
+done
+
+# ===========================================================================
+# TC-BP-53: non-shell stdin evaluators distinguish code from data
+# ===========================================================================
+echo ""
+echo "=== TC-BP-53: stdin evaluators block code without blocking data controls ==="
+setup_repo feat/x
+for command in \
+  "echo git push origin main | awk '{system(\$0)}'" \
+  'echo git push origin main | while read l; do $l; done' \
+  'echo git push origin main | tee >(bash)' \
+  'echo git push origin main | xargs env'
+do
+  out=$(run_hook "$command")
+  assert_exit "stdin-evaluated trunk push blocked: $command" "2" "$out"
+done
+for command in \
+  "echo git push origin main | awk '{print \$0}'" \
+  'echo git push origin main | while read l; do echo "$l"; done' \
+  'echo git push origin main | tee >(cat >/tmp/push-copy)' \
+  'echo git push origin main | xargs echo'
+do
+  out=$(run_hook "$command")
+  assert_exit "stdin data-only control allowed: $command" "0" "$out"
+done
+
+# ===========================================================================
 # Summary
 # ===========================================================================
 echo ""

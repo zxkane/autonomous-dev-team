@@ -182,6 +182,8 @@ Those shapes retain the original command text and fail closed.
 | `TC-BP-49` | Builtin data commands contain `$((...))` arithmetic expansion and write to a regular file | Hook exits `0`; arithmetic expansion is not command substitution |
 | `TC-BP-50` | Dynamic `git -C` is followed by one or more static global options and then `commit` or `log` | Hook exits `0`; the definite non-push operation remains readable after intervening flags |
 | `TC-BP-51` | The `push` operation word itself is assembled from mixed quote fragments and targets trunk | Hook exits `2`; resolver uncertainty cannot be discarded as a parser no-match |
+| `TC-BP-52` | Benign command substitutions (`$(date)`, `$(cat ...)`, backticks, or a nested `echo` that only generates push text) appear in builtin data commands; controls execute a trunk push from top-level command/process substitution, assignment, `eval`, an arithmetic expression, or an `if` command | Benign substitutions exit `0`; substitution bodies that execute a possible push exit `2` |
+| `TC-BP-53` | Trunk-push text is piped to `awk system($0)`, a dynamic `while` body, `tee >(bash)`, or `xargs env`; controls use print/echo/cat-only equivalents | Stdin evaluators exit `2`; data-only consumers exit `0` |
 
 ## Evidence contract
 
@@ -193,7 +195,7 @@ changing production code. The controls also prevent a future comment/heredoc
 stripper from hiding a real commit after quoted text or a heredoc terminator.
 
 The review-regression cases `142` through `145` and `TC-BP-36` through
-`TC-BP-51` must fail across the reviewed intermediate fixes: operation-bearing
+`TC-BP-53` must fail across the reviewed intermediate fixes: operation-bearing
 large commands time out, git-free expansion commands are misclassified,
 chained or prefixed feature pushes are blocked, prefixed trunk pushes disappear,
 non-executable push text is treated as executable, executable data is treated
@@ -201,8 +203,10 @@ as inert, redirection/continuation syntax is treated as a refspec, or mixed
 quotes hide the operation or trunk refspec. In particular, `TC-BP-48..51`
 reproduce the fourth Opus review's ordinary-pipeline, arithmetic-expansion,
 intervening-global-option, and mixed-operation findings before the fix.
+`TC-BP-52..53` reproduce the fifth review's benign-substitution false positive,
+executable-substitution fail-open, and stdin-evaluator regressions.
 
 The eventual fix is complete only when all one hundred forty-five detector
-cases and all one hundred eighty-one trunk-protection assertions pass together with the
+cases and all two hundred six trunk-protection assertions pass together with the
 existing `test-is-git-command.sh` and
 `test-block-commit-outside-worktree.sh` suites.
