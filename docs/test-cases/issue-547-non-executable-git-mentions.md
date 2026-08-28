@@ -170,6 +170,11 @@ Those shapes retain the original command text and fail closed.
 | `TC-BP-37` | Expansion-bearing commands contain no literal `git push`; control uses `$GIT push origin main` | Git-free commands exit `0`; the explicit dynamic Git operation remains fail-closed |
 | `TC-BP-38` | An approximately 20 KiB ambiguous command contains no literal `git` word | Trunk-protection hook exits `0` within five seconds |
 | `TC-BP-39` | `echo` arguments or heredoc data mention a trunk push before a real feature push | Non-executable push text is ignored; a real trunk push remains blocked |
+| `TC-BP-40` | A trunk push appears in a subshell, after a supported or unknown wrapper, after a quoted assignment, or beside a readable feature push | Every trunk destination exits `2`; an unreadable second push cannot inherit the first push's remote scope |
+| `TC-BP-41` | A feature-only push is wrapped by `timeout`, shell control flow, `sudo`, `nohup`, `command`, `time`, `stdbuf`, or a quoted environment assignment | Supported prefixed feature pushes exit `0` |
+| `TC-BP-42` | A builtin `echo` is the only command and its arguments mention a feature or trunk push | Hook exits `0`; parser rc `1` proves no executable push exists |
+| `TC-BP-43` | A trunk refspec is assembled with empty or interior quote fragments | Hook exits `2`; mixed quoting is unknown rather than decoded as a safe feature ref |
+| `TC-BP-44` | A feature push is chained to an approximately 21 KiB PR body or carries an approximately 21 KiB single-word push option | Hook exits `0` within five seconds |
 
 ## Evidence contract
 
@@ -181,12 +186,13 @@ changing production code. The controls also prevent a future comment/heredoc
 stripper from hiding a real commit after quoted text or a heredoc terminator.
 
 The review-regression cases `142` through `145` and `TC-BP-36` through
-`TC-BP-39` must fail on the first reviewed fix: operation-bearing large
-commands time out, git-free expansion commands are misclassified, chained
-feature pushes are blocked, or non-executable push text overrides the real
-refspec.
+`TC-BP-44` must fail across the reviewed intermediate fixes: operation-bearing
+large commands time out, git-free expansion commands are misclassified,
+chained or prefixed feature pushes are blocked, prefixed trunk pushes disappear,
+non-executable push text is treated as executable, or mixed quotes hide the
+trunk refspec.
 
 The eventual fix is complete only when all one hundred forty-five detector
-cases and all ninety-three trunk-protection assertions pass together with the
+cases and all one hundred eighteen trunk-protection assertions pass together with the
 existing `test-is-git-command.sh` and
 `test-block-commit-outside-worktree.sh` suites.

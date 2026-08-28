@@ -1505,6 +1505,7 @@ _resolve_git_command_tokenize() {
               unquoted_unsafe=0
               started=0
             fi
+            _resolve_git_append_operator ";"
             ;;
           "'")
             if (( started == 1 )); then

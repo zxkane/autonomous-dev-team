@@ -9419,11 +9419,13 @@ invariant. `tests/unit/test-is-git-command-non-executable-regions.sh`
 git-free shell consumers, generic/quoted/dynamic operation forms, the
 five-second hook budget, and the fail-closed substitution, interpreter,
 pipeline, and shadowing controls. Ambiguous inputs at least 4 KiB take one
-bounded tokenization pass plus conservative literal scanning; they do not enter
-the quadratic fallback paths. `tests/unit/test-block-push-regex.sh`
-(`TC-BP-35..39`) covers the same budget, chained and multiline feature pushes,
-git-free expansions, and non-executable push text while preserving fail-closed
-handling for an unreadable refspec.
+bounded tokenization pass plus conservative literal scanning instead of the
+older repeated fallback passes; approximately 20 KiB operation-bearing and
+git-free cases pin the five-second hook budget.
+`tests/unit/test-block-push-regex.sh` (`TC-BP-35..44`) covers the same budget,
+chained, multiline, and prefixed feature pushes, git-free expansions,
+non-executable push text, mixed quote fragments, and fail-closed handling for
+an unreadable refspec.
 
 **Cross-reference**:
 [`docs/designs/block-commit-command-context.md`](../designs/block-commit-command-context.md)
@@ -9733,7 +9735,7 @@ they read only what the wrapper exported and never parse conf.
 
 **Status**: **ENFORCED**.
 
-**Test**: `tests/unit/test-block-push-regex.sh` (`TC-BP-01..39`, 93 assertions) —
+**Test**: `tests/unit/test-block-push-regex.sh` (`TC-BP-01..44`, 118 assertions) —
 the 11 pre-existing #64 cases unchanged, plus TC-BP-13b (bare push from inside
 the wiki), TC-BP-13c (no anchor → fail closed), TC-BP-16 (second clone of this
 project's remote, all three command shapes), TC-BP-17 (five URL spellings),
@@ -9763,20 +9765,27 @@ TC-BP-35 pins the five-second hook budget and fail-closed fallback when an
 approximately 8 KiB ambiguous command contains a real trunk push but the
 bounded refspec parser cannot produce a destination token.
 
-TC-BP-36..39 pin the review regressions: every literal push in chained or
-multiline command text is classified independently; feature-only workflows are
-allowed while any trunk destination blocks. A quoted dynamic remote remains one
-shell word, so a following literal feature refspec stays readable; an unquoted
-dynamic remote remains fail-closed because word splitting could change the
-positional grammar. Expansion-bearing commands without a literal Git operation
-are not treated as pushes, while a dynamic command name followed by the literal
-`push` operation remains fail-closed. Large git-free inputs stay inside the
-five-second budget, and `echo` arguments or heredoc data cannot override the
-destination of a real push. Destination parsing consumes the same
-non-executable-region projection as operation detection. Its tri-state contract
-is `0` when all literal pushes are readable, `1` when no literal push is found,
-and `2` when any matched push is unreadable; both non-zero results fail closed
-after the resolver has established that a push exists.
+TC-BP-36..44 pin the review regressions. A single structured token snapshot is
+shared by destination and refspec parsing, with newlines and shell control
+operators preserving command boundaries. Each executable push in chained,
+multiline, subshell, assignment-prefixed, or supported wrapper-prefixed command
+text is classified independently; feature-only workflows are allowed while any
+trunk destination blocks. An unknown wrapper containing a possible push remains
+fail-closed. A quoted dynamic remote remains one shell word, so a following
+literal feature refspec stays readable; an unquoted dynamic remote remains
+fail-closed because word splitting could change the positional grammar.
+Expansion-bearing commands without a literal Git operation are not treated as
+pushes, while a dynamic command name followed by the literal `push` operation
+remains fail-closed. Builtin `echo` arguments and bounded heredoc data are
+non-executable even when no real push follows. Mixed quote fragments cannot
+hide a trunk refspec. Approximately 20–21 KiB git-free, PR-body, and
+single-word push-option inputs stay inside the five-second budget.
+
+Destination parsing consumes the same non-executable-region projection as
+operation detection. Its tri-state contract is `0` when every executable push
+is readable, `1` only when no executable push exists, and `2` when any possible
+executable push is unreadable. After the resolver reports a match, rc `1` is a
+positive data-only result and may exit early; rc `2` keeps the trunk check armed.
 
 Measured red/green: **20 of 56 red on PR #539's parent** (`216a906` — the wiki
 and allowlist allows, the second-clone forms, the URL spellings, the

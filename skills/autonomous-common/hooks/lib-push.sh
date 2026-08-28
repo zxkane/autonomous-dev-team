@@ -5,8 +5,8 @@
 #   - block-push-to-main.sh (Claude PreToolUse hook, Layer 1 trunk protection)
 #   - install-git-pre-push.sh's emitted hook (Layer 2 git-side hook)
 #
-# Does not source other lib files. Self-contained pure functions; safe to
-# invoke from any context including a freshly-spawned hook process.
+# Parser functions reuse the sibling lib.sh tokenizer when the caller has not
+# already sourced it. URL normalization helpers remain self-contained.
 #
 # This file is sourced, not executed. No `set -e` (caller controls exit
 # semantics).
@@ -35,179 +35,359 @@
 # Bulk markers (__ALL__, __MIRROR__) are returned uppercase-bracketed so
 # callers can branch without ambiguity vs. a real ref named "all".
 #
-# Emit shell command segments without evaluating them. Unquoted newlines and
-# control operators terminate a segment; comments are discarded. Quotes stay
-# in the text so the bounded token parser can reject non-literal operands.
-_push_command_segments() {
+# Prepare one structured token stream for both push parsers. The hook sources
+# lib.sh first, so its bounded tokenizer is available and large commands are
+# scanned only once. The small fallback preserves standalone helper use.
+_push_prepare_command_tokens() {
   local command="$1"
-  local state="unquoted" segment="" character next
-  local word_start=1 i length=${#command}
+  local token library_dir
 
-  for ((i = 0; i < length; i++)); do
-    character="${command:i:1}"
-    next=""
-    (( i + 1 < length )) && next="${command:i+1:1}"
+  if [[ "${_PUSH_PREPARED_COMMAND+x}" == "x" &&
+    "$_PUSH_PREPARED_COMMAND" == "$command" ]]; then
+    return 0
+  fi
 
-    case "$state" in
-      single)
-        segment+="$character"
-        [[ "$character" == "'" ]] && state="unquoted"
+  _PUSH_TOKEN_TYPES=()
+  _PUSH_TOKEN_VALUES=()
+  _PUSH_TOKEN_QUOTES=()
+  _PUSH_TOKEN_ANSI=()
+  _PUSH_TOKEN_UNSAFE=()
+  _PUSH_TOKEN_MALFORMED=0
+
+  if ! declare -F _resolve_git_command_tokenize >/dev/null 2>&1; then
+    library_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+    if [[ -r "$library_dir/lib.sh" ]]; then
+      # shellcheck source=lib.sh
+      source "$library_dir/lib.sh"
+    fi
+  fi
+
+  if declare -F _resolve_git_command_tokenize >/dev/null 2>&1; then
+    _resolve_git_command_tokenize "$command" 1
+    _PUSH_TOKEN_TYPES=("${_RGCC_TOKEN_TYPES[@]}")
+    _PUSH_TOKEN_VALUES=("${_RGCC_TOKEN_VALUES[@]}")
+    _PUSH_TOKEN_QUOTES=("${_RGCC_TOKEN_QUOTES[@]}")
+    _PUSH_TOKEN_ANSI=("${_RGCC_TOKEN_ANSI[@]}")
+    _PUSH_TOKEN_UNSAFE=("${_RGCC_TOKEN_UNQUOTED_UNSAFE[@]}")
+    _PUSH_TOKEN_MALFORMED="${_RGCC_MALFORMED:-0}"
+  else
+    read -ra _PUSH_TOKEN_VALUES <<<"$command"
+    for token in "${_PUSH_TOKEN_VALUES[@]}"; do
+      _PUSH_TOKEN_TYPES+=("word")
+      _PUSH_TOKEN_QUOTES+=("unquoted")
+      _PUSH_TOKEN_ANSI+=("0")
+      case "$token" in
+        *['$`\\']*) _PUSH_TOKEN_UNSAFE+=("1") ;;
+        *) _PUSH_TOKEN_UNSAFE+=("0") ;;
+      esac
+    done
+  fi
+
+  _PUSH_PREPARED_COMMAND="$command"
+}
+
+_push_token_static_value() {
+  local index="$1"
+  local value="${_PUSH_TOKEN_VALUES[index]:-}"
+  local quote_kind="${_PUSH_TOKEN_QUOTES[index]:-}"
+
+  [[ "${_PUSH_TOKEN_TYPES[index]:-}" == "word" ]] || return 1
+  [[ "${_PUSH_TOKEN_ANSI[index]:-0}" == "0" ]] || return 1
+  [[ "${_PUSH_TOKEN_UNSAFE[index]:-0}" == "0" ]] || return 1
+  [[ "$quote_kind" != "mixed" ]] || return 1
+  [[ "$value" != *'$'* && "$value" != *'`'* &&
+    "$value" != *$'\n'* && "$value" != *$'\r'* &&
+    "$value" != *$'\t'* ]] || return 1
+  _PUSH_STATIC_VALUE="$value"
+}
+
+_push_token_unquoted_static_value() {
+  [[ "${_PUSH_TOKEN_QUOTES[$1]:-}" == "unquoted" ]] || return 1
+  _push_token_static_value "$1"
+}
+
+_push_token_is_assignment() {
+  local index="$1"
+  local value="${_PUSH_TOKEN_VALUES[index]:-}"
+
+  [[ "${_PUSH_TOKEN_TYPES[index]:-}" == "word" ]] || return 1
+  [[ "${_PUSH_TOKEN_ANSI[index]:-0}" == "0" ]] || return 1
+  [[ "${_PUSH_TOKEN_UNSAFE[index]:-0}" == "0" ]] || return 1
+  [[ "$value" != *'$'* && "$value" != *'`'* ]] || return 1
+  [[ "$value" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]
+}
+
+_push_git_operation_index() {
+  local git_index="$1" end="$2"
+  local j=$((git_index + 1)) option
+
+  _push_token_static_value "$git_index" || return 1
+  [[ "$_PUSH_STATIC_VALUE" == "git" ]] || return 1
+
+  while (( j < end )); do
+    _push_token_static_value "$j" || return 2
+    option="$_PUSH_STATIC_VALUE"
+    case "$option" in
+      -c|-C|--git-dir|--work-tree|--namespace|--super-prefix)
+        (( j + 1 < end )) || return 2
+        _push_token_static_value "$((j + 1))" || return 2
+        j=$((j + 2))
         ;;
-      double)
-        segment+="$character"
-        if [[ "$character" == "\\" && -n "$next" ]]; then
-          segment+="$next"
-          ((i++))
-        elif [[ "$character" == '"' ]]; then
-          state="unquoted"
-        fi
-        ;;
-      unquoted)
-        case "$character" in
-          "'")
-            segment+="$character"
-            state="single"
-            word_start=0
-            ;;
-          '"')
-            segment+="$character"
-            state="double"
-            word_start=0
-            ;;
-          \\)
-            segment+="$character"
-            if [[ -n "$next" ]]; then
-              segment+="$next"
-              ((i++))
-            fi
-            word_start=0
-            ;;
-          '#')
-            if (( word_start == 1 )); then
-              while (( i + 1 < length )) &&
-                [[ "${command:i+1:1}" != $'\n' ]]; do
-                ((i++))
-              done
-            else
-              segment+="$character"
-              word_start=0
-            fi
-            ;;
-          $'\n'|$'\r'|';'|'|'|'&')
-            printf '%s\n' "$segment"
-            segment=""
-            word_start=1
-            if { [[ "$character" == '|' || "$character" == '&' ]]; } &&
-              [[ "$next" == "$character" ]]; then
-              ((i++))
-            fi
-            ;;
-          ' '|$'\t')
-            segment+="$character"
-            word_start=1
-            ;;
-          *)
-            segment+="$character"
-            word_start=0
-            ;;
-        esac
-        ;;
+      --*=*|--*|-*) ((j++)) ;;
+      *) break ;;
     esac
   done
-  printf '%s\n' "$segment"
+
+  (( j < end )) || return 1
+  _push_token_static_value "$j" || return 2
+  [[ "$_PUSH_STATIC_VALUE" == "push" ]] || return 1
+  _PUSH_OPERATION_INDEX="$j"
 }
 
-_push_decode_literal_token() {
-  local token="$1"
-  local first="${token:0:1}"
-  local last="${token: -1}"
+_push_segment_contains_possible_push() {
+  local start="$1" end="$2"
+  local i rc value next
 
-  if [[ ${#token} -ge 2 ]] &&
-    { [[ "$first" == "'" && "$last" == "'" ]] ||
-      [[ "$first" == '"' && "$last" == '"' ]]; }; then
-    token="${token:1:${#token}-2}"
-  elif [[ "$token" == *["'"]* ]]; then
-    return 1
-  fi
-  [[ "$token" != *['$`\\']* ]] || return 1
-  _PUSH_LITERAL_TOKEN="$token"
-}
-
-_push_find_git_command_start() {
-  local token i=0
-
-  for token in "$@"; do
-    if [[ "$token" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
-      ((i++))
-      continue
+  for ((i = start; i < end; i++)); do
+    [[ "${_PUSH_TOKEN_TYPES[i]:-}" == "word" ]] || continue
+    if _push_git_operation_index "$i" "$end"; then
+      return 0
+    else
+      rc=$?
+      (( rc == 2 )) && return 0
     fi
-    [[ "$token" == "git" ]] || return 1
-    _PUSH_GIT_INDEX="$i"
-    return 0
+    value="${_PUSH_TOKEN_VALUES[i]}"
+    if [[ "${_PUSH_TOKEN_UNSAFE[i]:-0}" == "1" ||
+      "$value" == *'$'* || "$value" == *'`'* ]]; then
+      next=$((i + 1))
+      if (( next < end )) && _push_token_static_value "$next" &&
+        [[ "$_PUSH_STATIC_VALUE" == "push" ]]; then
+        return 0
+      fi
+    fi
   done
   return 1
 }
 
-_push_decode_unquoted_literal_token() {
-  [[ "$1" != *\"* && "$1" != *\'* ]] || return 1
-  _push_decode_literal_token "$1"
+# Locate an executable git command in one control-operator-delimited segment.
+# Known shell keywords, assignments, and command wrappers are traversed.
+# Unknown prefixes that still contain a possible git push are rc=2 (unknown);
+# trusted data-only echo/printf segments are rc=1 (no executable push).
+_push_segment_git_start() {
+  local start="$1" end="$2"
+  local j="$start" value option
+
+  while (( j < end )); do
+    if _push_token_is_assignment "$j"; then
+      ((j++))
+      continue
+    fi
+    if ! _push_token_static_value "$j"; then
+      _push_segment_contains_possible_push "$start" "$end" && return 2
+      return 1
+    fi
+    value="$_PUSH_STATIC_VALUE"
+    case "$value" in
+      '!'|if|then|elif|else|do|while|until|'{')
+        ((j++))
+        ;;
+      git)
+        if _push_git_operation_index "$j" "$end"; then
+          _PUSH_GIT_INDEX="$j"
+          return 0
+        else
+          return $?
+        fi
+        ;;
+      echo|printf)
+        if [[ "$(type -t "$value" 2>/dev/null)" == "builtin" ]]; then
+          return 1
+        fi
+        _push_segment_contains_possible_push "$start" "$end" && return 2
+        return 1
+        ;;
+      command)
+        ((j++))
+        while (( j < end )); do
+          _push_token_static_value "$j" || return 2
+          case "$_PUSH_STATIC_VALUE" in
+            -p|--) ((j++)) ;;
+            -v|-V) return 1 ;;
+            *) break ;;
+          esac
+        done
+        ;;
+      exec)
+        ((j++))
+        while (( j < end )); do
+          _push_token_static_value "$j" || return 2
+          case "$_PUSH_STATIC_VALUE" in
+            -a)
+              (( j + 1 < end )) || return 2
+              j=$((j + 2))
+              ;;
+            -c|-l|--) ((j++)) ;;
+            *) break ;;
+          esac
+        done
+        ;;
+      nohup|time)
+        ((j++))
+        while (( j < end )); do
+          _push_token_static_value "$j" || return 2
+          [[ "$_PUSH_STATIC_VALUE" == -* ]] || break
+          case "$_PUSH_STATIC_VALUE" in
+            -o|--output|-f|--format)
+              (( j + 1 < end )) || return 2
+              j=$((j + 2))
+              ;;
+            *) ((j++)) ;;
+          esac
+        done
+        ;;
+      timeout)
+        ((j++))
+        while (( j < end )); do
+          _push_token_static_value "$j" || return 2
+          option="$_PUSH_STATIC_VALUE"
+          [[ "$option" == -* ]] || break
+          case "$option" in
+            -k|-s|--kill-after|--signal)
+              (( j + 1 < end )) || return 2
+              j=$((j + 2))
+              ;;
+            *) ((j++)) ;;
+          esac
+        done
+        (( j < end )) || return 2
+        ((j++))
+        ;;
+      stdbuf)
+        ((j++))
+        while (( j < end )); do
+          _push_token_static_value "$j" || return 2
+          option="$_PUSH_STATIC_VALUE"
+          case "$option" in
+            -i|-o|-e|--input|--output|--error)
+              (( j + 1 < end )) || return 2
+              j=$((j + 2))
+              ;;
+            -i*|-o*|-e*|--input=*|--output=*|--error=*|--) ((j++)) ;;
+            *) break ;;
+          esac
+        done
+        ;;
+      env)
+        ((j++))
+        while (( j < end )); do
+          if _push_token_is_assignment "$j"; then
+            ((j++))
+            continue
+          fi
+          _push_token_static_value "$j" || return 2
+          option="$_PUSH_STATIC_VALUE"
+          case "$option" in
+            -u|-C|-S|--unset|--chdir|--split-string)
+              (( j + 1 < end )) || return 2
+              j=$((j + 2))
+              ;;
+            --unset=*|--chdir=*|--split-string=*|-i|--ignore-environment|\
+              -0|--null|-v|--debug|--)
+              ((j++))
+              ;;
+            *) break ;;
+          esac
+        done
+        ;;
+      sudo)
+        ((j++))
+        while (( j < end )); do
+          _push_token_static_value "$j" || return 2
+          option="$_PUSH_STATIC_VALUE"
+          case "$option" in
+            -u|-g|-h|-p|-C|-T|-r|-t|--user|--group|--host|--prompt|\
+              --chdir|--command-timeout|--role|--type)
+              (( j + 1 < end )) || return 2
+              j=$((j + 2))
+              ;;
+            --*=*|-u*|-g*|-h*|-p*|-C*|-T*|-r*|-t*|--) ((j++)) ;;
+            -*) ((j++)) ;;
+            *) break ;;
+          esac
+        done
+        ;;
+      *)
+        _push_segment_contains_possible_push "$start" "$end" && return 2
+        return 1
+        ;;
+    esac
+  done
+  return 1
 }
 
 _push_token_is_single_shell_word() {
-  local token="$1"
-  local first="${token:0:1}"
-  local last="${token: -1}"
-
-  if _push_decode_literal_token "$token"; then
+  local index="$1"
+  if _push_token_static_value "$index"; then
     return 0
   fi
-  [[ ${#token} -ge 2 ]] &&
-    { [[ "$first" == "'" && "$last" == "'" ]] ||
-      [[ "$first" == '"' && "$last" == '"' ]]; }
+  [[ "${_PUSH_TOKEN_TYPES[index]:-}" == "word" ]] &&
+    { [[ "${_PUSH_TOKEN_QUOTES[index]:-}" == "single" ]] ||
+      [[ "${_PUSH_TOKEN_QUOTES[index]:-}" == "double" ]]; }
 }
 
 parse_push_target_refspec() {
   local command="$1"
-  local current_branch segment tok decoded r src dst
-  local i j n found_remote saw_all saw_mirror saw_tags_flag
+  local current_branch tok decoded r src dst
+  local segment_start=0 segment_end i j n rc
+  local found_remote saw_all saw_mirror saw_tags_flag
   local matched=0 unknown=0
-  local -a tokens refspecs
+  local -a refspecs
   current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+  _push_prepare_command_tokens "$command"
+  n=${#_PUSH_TOKEN_VALUES[@]}
 
-  while IFS= read -r segment; do
-    read -ra tokens <<<"$segment"
-    n=${#tokens[@]}
-    if _push_find_git_command_start "${tokens[@]}"; then
+  for ((segment_end = 0; segment_end <= n; segment_end++)); do
+    if (( segment_end < n )) &&
+      [[ "${_PUSH_TOKEN_TYPES[segment_end]}" != "operator" ]]; then
+      continue
+    fi
+    if (( segment_start < segment_end )); then
+      if _push_segment_git_start "$segment_start" "$segment_end"; then
+        rc=0
+      else
+        rc=$?
+      fi
+      if (( rc == 2 )); then
+        unknown=1
+      elif (( rc == 0 )); then
       i="$_PUSH_GIT_INDEX"
-      j=$((i + 1))
-      while (( j < n )); do
-        case "${tokens[j]}" in
-          -c|-C|--git-dir|--work-tree|--namespace|--super-prefix)
-            (( j + 1 < n )) || { unknown=1; break; }
-            j=$((j + 2))
-            ;;
-          --*=*|--*|-*) ((j++)) ;;
-          *) break ;;
-        esac
-      done
-      (( j < n )) && [[ "${tokens[j]}" == "push" ]] || continue
+      j=$((_PUSH_OPERATION_INDEX + 1))
       matched=1
-      ((j++))
       found_remote=0
       saw_all=0
       saw_mirror=0
       saw_tags_flag=0
       refspecs=()
 
-      while (( j < n )); do
-        tok="${tokens[j]}"
+      while (( j < segment_end )); do
+        if ! _push_token_static_value "$j"; then
+          if (( found_remote == 0 )); then
+            found_remote=1
+            _push_token_is_single_shell_word "$j" || unknown=1
+          else
+            unknown=1
+          fi
+          ((j++))
+          continue
+        fi
+        tok="$_PUSH_STATIC_VALUE"
         case "$tok" in
           --all|--all=*) saw_all=1 ;;
           --mirror|--mirror=*) saw_mirror=1 ;;
           --tags|--tags=*) saw_tags_flag=1 ;;
           --delete|-d) ;;
           --repo|-o|--push-option|--receive-pack|--exec)
-            (( j + 1 < n )) || { unknown=1; break; }
+            (( j + 1 < segment_end )) || { unknown=1; break; }
             j=$((j + 2))
             continue
             ;;
@@ -216,21 +396,21 @@ parse_push_target_refspec() {
           *)
             if (( found_remote == 0 )); then
               found_remote=1
-              if ! _push_token_is_single_shell_word "$tok"; then
+              if ! _push_token_is_single_shell_word "$j"; then
                 unknown=1
               fi
               ((j++))
               continue
             fi
-            if ! _push_decode_literal_token "$tok"; then
+            if ! _push_token_static_value "$j"; then
               unknown=1
               ((j++))
               continue
             fi
-            decoded="$_PUSH_LITERAL_TOKEN"
-            if [[ "$decoded" == "tag" ]] && (( j + 1 < n )); then
-              if _push_decode_literal_token "${tokens[j+1]}"; then
-                refspecs+=("refs/tags/${_PUSH_LITERAL_TOKEN}")
+            decoded="$_PUSH_STATIC_VALUE"
+            if [[ "$decoded" == "tag" ]] && (( j + 1 < segment_end )); then
+              if _push_token_static_value "$((j + 1))"; then
+                refspecs+=("refs/tags/${_PUSH_STATIC_VALUE}")
               else
                 unknown=1
               fi
@@ -266,11 +446,14 @@ parse_push_target_refspec() {
           fi
         done
       fi
+      fi
     fi
-  done < <(_push_command_segments "$command")
+    segment_start=$((segment_end + 1))
+  done
 
-  (( matched == 1 )) || return 1
+  (( _PUSH_TOKEN_MALFORMED == 0 )) || unknown=1
   (( unknown == 0 )) || return 2
+  (( matched == 1 )) || return 1
   return 0
 }
 
@@ -333,9 +516,8 @@ is_trunk_ref() {
 #     a single answer cannot describe two destinations, and the trunk-ref
 #     parser reads refspecs from the whole line, so answering for only the
 #     first push would let the second one through unexamined
-#   - a quoted or expansion-bearing operand — `read -ra` does not process
-#     quotes, so the token still carries them and would canonicalize to a
-#     destination that is confidently wrong rather than merely unresolved
+#   - a quoted or expansion-bearing operand — repository scoping requires an
+#     unquoted static token; uncertainty leaves the trunk check armed
 #
 # Trunk protection compares push DESTINATIONS ([INV-148]), so it must ask which
 # remote the push writes to, not assume `origin`. Flag/value skipping mirrors
@@ -343,56 +525,56 @@ is_trunk_ref() {
 # positional.
 parse_push_remote_operand() {
   local command="$1"
-  local segment operand="" decoded
-  local n i j pushes=0 found=0
-  local -a tokens
+  local operand="" decoded option
+  local n segment_start=0 segment_end i j rc pushes=0 found=0
+  _push_prepare_command_tokens "$command"
+  n=${#_PUSH_TOKEN_VALUES[@]}
 
-  while IFS= read -r segment; do
-    read -ra tokens <<<"$segment"
-    n=${#tokens[@]}
-    if _push_find_git_command_start "${tokens[@]}"; then
+  for ((segment_end = 0; segment_end <= n; segment_end++)); do
+    if (( segment_end < n )) &&
+      [[ "${_PUSH_TOKEN_TYPES[segment_end]}" != "operator" ]]; then
+      continue
+    fi
+    if (( segment_start < segment_end )); then
+      if _push_segment_git_start "$segment_start" "$segment_end"; then
+        rc=0
+      else
+        rc=$?
+      fi
+      (( rc != 2 )) || return 1
+      if (( rc == 0 )); then
       i="$_PUSH_GIT_INDEX"
-      j=$((i + 1))
-      while (( j < n )); do
-        case "${tokens[j]}" in
-          -c|-C|--git-dir|--work-tree|--namespace|--super-prefix)
-            (( j + 1 < n )) || return 1
-            j=$((j + 2))
-            ;;
-          --*=*|--*|-*) ((j++)) ;;
-          *) break ;;
-        esac
-      done
-      (( j < n )) && [[ "${tokens[j]}" == "push" ]] || continue
+      j=$((_PUSH_OPERATION_INDEX + 1))
       ((pushes++))
       (( pushes <= 1 )) || return 1
-      ((j++))
-      while (( j < n )); do
-        case "${tokens[j]}" in
+      while (( j < segment_end )); do
+        _push_token_static_value "$j" || return 1
+        option="$_PUSH_STATIC_VALUE"
+        case "$option" in
           --repo)
-            (( j + 1 < n )) || return 1
-            _push_decode_unquoted_literal_token "${tokens[j+1]}" || return 1
-            operand="$_PUSH_LITERAL_TOKEN"
+            (( j + 1 < segment_end )) || return 1
+            _push_token_unquoted_static_value "$((j + 1))" || return 1
+            operand="$_PUSH_STATIC_VALUE"
             found=1
             j=$((j + 2))
             continue
             ;;
           --repo=*)
-            _push_decode_unquoted_literal_token "${tokens[j]#*=}" || return 1
-            operand="$_PUSH_LITERAL_TOKEN"
+            _push_token_unquoted_static_value "$j" || return 1
+            operand="${_PUSH_STATIC_VALUE#*=}"
             found=1
             ((j++))
             continue
             ;;
           -o|--push-option|--receive-pack|--exec)
-            (( j + 1 < n )) || return 1
+            (( j + 1 < segment_end )) || return 1
             j=$((j + 2))
             continue
             ;;
           -*) ;;
           *)
-            _push_decode_unquoted_literal_token "${tokens[j]}" || return 1
-            decoded="$_PUSH_LITERAL_TOKEN"
+            _push_token_unquoted_static_value "$j" || return 1
+            decoded="$_PUSH_STATIC_VALUE"
             operand="$decoded"
             found=1
             break
@@ -400,10 +582,12 @@ parse_push_remote_operand() {
         esac
         ((j++))
       done
+      fi
     fi
-  done < <(_push_command_segments "$command")
+    segment_start=$((segment_end + 1))
+  done
 
-  (( pushes == 1 )) || return 1
+  (( pushes == 1 && _PUSH_TOKEN_MALFORMED == 0 )) || return 1
 
   if (( found == 1 )); then
     printf '%s\n' "$operand"

@@ -756,6 +756,96 @@ out=$(run_hook "echo git push origin feat/x && git push origin main")
 assert_exit "a real trunk push still blocks after benign push text" "2" "$out"
 
 # ===========================================================================
+# TC-BP-40: prefixed pushes cannot disappear from a multi-command parse
+# ===========================================================================
+echo ""
+echo "=== TC-BP-40: prefixed pushes remain visible and fail closed ==="
+setup_repo feat/x
+for command in \
+  "git push origin feat/x && ( git push origin main )" \
+  "git push origin feat/x && sudo git push origin main" \
+  "timeout 5 git push origin main && git push origin feat/x" \
+  'GIT_SSH_COMMAND="ssh -i k" git push origin main && git push origin feat/x' \
+  "nohup git push origin main & git push origin feat/x" \
+  "unknown-wrapper git push origin main && git push origin feat/x"
+do
+  out=$(run_hook "$command")
+  assert_exit "prefixed trunk push blocked: $command" "2" "$out"
+done
+git -C "$TMPDIR/repo" remote add other https://github.com/other-owner/other-repo.git
+out=$(run_hook "git push other feat/x && sudo git push origin main")
+assert_exit "unreadable second push cannot reuse the first push's remote scope" "2" "$out"
+
+# ===========================================================================
+# TC-BP-41: a supported prefix does not block a feature-only push
+# ===========================================================================
+echo ""
+echo "=== TC-BP-41: prefixed feature pushes remain allowed ==="
+setup_repo feat/x
+for command in \
+  "timeout 60 git push -u origin feat/x" \
+  "if git push origin feat/x; then echo ok; fi" \
+  "! git push origin feat/x" \
+  "sudo git push origin feat/x" \
+  "nohup git push origin feat/x" \
+  "command git push origin feat/x" \
+  "time git push origin feat/x" \
+  "stdbuf -oL git push origin feat/x" \
+  'GIT_SSH_COMMAND="ssh -i k" git push origin feat/x'
+do
+  out=$(run_hook "$command")
+  assert_exit "prefixed feature push allowed: $command" "0" "$out"
+done
+
+# ===========================================================================
+# TC-BP-42: a lone data-only push mention remains non-executable
+# ===========================================================================
+echo ""
+echo "=== TC-BP-42: lone non-executable push text remains allowed ==="
+setup_repo feat/x
+out=$(run_hook "echo git push origin feat/x")
+assert_exit "lone echo arguments mentioning a feature push are allowed" "0" "$out"
+out=$(run_hook "echo Running git push origin feat/x now")
+assert_exit "prose echo arguments mentioning a feature push are allowed" "0" "$out"
+out=$(run_hook "echo git push origin main")
+assert_exit "lone echo arguments mentioning a trunk push are allowed" "0" "$out"
+
+# ===========================================================================
+# TC-BP-43: mixed quote fragments cannot disguise the trunk destination
+# ===========================================================================
+echo ""
+echo "=== TC-BP-43: mixed quote fragments stay fail closed ==="
+setup_repo feat/x
+for command in \
+  'git push origin main""' \
+  'git push origin ""main' \
+  'git push origin ma"in"' \
+  'git push origin HEAD:main""'
+do
+  out=$(run_hook "$command")
+  assert_exit "mixed-quoted trunk refspec blocked: $command" "2" "$out"
+done
+
+# ===========================================================================
+# TC-BP-44: realistic large push commands stay within the hook budget
+# ===========================================================================
+echo ""
+echo "=== TC-BP-44: realistic large push commands remain bounded ==="
+setup_repo feat/x
+large_body=""
+for ((i = 0; i < 2500; i++)); do
+  large_body+="word$i "
+done
+large_command="git push -u origin feat/x && gh pr create --title t --body \"$large_body\""
+out=$(run_hook_bounded "$large_command")
+assert_exit "feature push chained to a large PR body is allowed within five seconds" "0" "$out"
+printf -v large_option '%*s' 21000 ''
+large_option="${large_option// /x}"
+large_command="git push origin feat/x --push-option=$large_option"
+out=$(run_hook_bounded "$large_command")
+assert_exit "feature push with a large option stays within five seconds" "0" "$out"
+
+# ===========================================================================
 # Summary
 # ===========================================================================
 echo ""

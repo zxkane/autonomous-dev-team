@@ -71,6 +71,23 @@ if stripped_push_command=$(_strip_shell_non_executable_regions "$command"); then
   push_command="$stripped_push_command"
 fi
 
+# Tokenize once in the parent shell. Both parser command substitutions inherit
+# this immutable snapshot, avoiding repeated character scans on large commands.
+_push_prepare_command_tokens "$push_command"
+
+# Parse destination refs before repository scoping. rc=1 positively means the
+# resolver matched only non-executable data (for example `echo git push ...`);
+# rc=2 remains unknown and therefore fail-closed after scope evaluation.
+parsed_refs=""
+if parsed_refs=$(parse_push_target_refspec "$push_command"); then
+  parse_rc=0
+else
+  parse_rc=$?
+fi
+if (( parse_rc == 1 )); then
+  exit 0
+fi
+
 # Both destinations must be PROVEN before the push may be waved through. Each
 # of these can report "unknown", and any unknown leaves the trunk check armed.
 target_url=""
@@ -121,12 +138,6 @@ trunk="${BASE_BRANCH:-${TRUNK_BRANCH:-main}}"
 # Parse the destination ref(s) the push would write to. Block if any of
 # them target the trunk (covers --all/--mirror via __ALL__/__MIRROR__).
 should_block=0
-parsed_refs=""
-if parsed_refs=$(parse_push_target_refspec "$push_command"); then
-  parse_rc=0
-else
-  parse_rc=$?
-fi
 while IFS= read -r ref; do
   [[ -z "$ref" ]] && continue
   if is_trunk_ref "$ref" "$trunk"; then
@@ -135,10 +146,9 @@ while IFS= read -r ref; do
   fi
 done <<<"$parsed_refs"
 
-# Parser rc=1 means no literal push was found, while rc=2 means one was found
-# but its destination was unreadable. The resolver already proved this command
-# contains a push, so either non-zero parser result remains fail-closed.
-if (( parse_rc != 0 )); then
+# Parser rc=2 means an executable push was found but its destination was
+# unreadable. rc=1 was handled above as a proven data-only resolver match.
+if (( parse_rc == 2 )); then
   should_block=1
 fi
 
