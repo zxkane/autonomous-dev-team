@@ -186,6 +186,8 @@ Those shapes retain the original command text and fail closed.
 | `TC-BP-53` | Trunk-push text is piped to `awk system($0)`, a dynamic `while` body, `tee >(bash)`, or `xargs env`; controls use print/echo/cat-only equivalents | Stdin evaluators exit `2`; data-only consumers exit `0` |
 | `TC-BP-54` | Trunk-push text passes through one or more data-only filters before reaching a shell, interpreter, source command, compound command, nested process substitution, or `|&` consumer; controls remain data-only through every stage or place an unrelated shell pipeline after a command-list boundary | Any downstream executable consumer exits `2`; multi-stage data-only and boundary-separated pipelines exit `0` |
 | `TC-BP-55` | An approximately 20 KiB git-free ambiguous command contains a benign `$(date)` substitution | Trunk-protection hook exits `0` within five seconds; substitution evidence uses the bounded large-input scanner |
+| `TC-BP-56` | Trunk-push text reaches a shell inside `if`, `for`, `select`, single- or multi-arm nested `case`, or an output process substitution, or through an unlisted launcher or `env -S`/`--split-string`; every form has a `cat`-only twin | Executable bodies exit `2`; data-only twins, including `{ cat; }` and `(cat)`, exit `0` |
+| `TC-BP-57` | A benign pipeline has 200 `cat` stages; a dynamic-input control has the same stages followed by `bash` | Both finish within five seconds; benign data exits `0` and the executable control exits `2` |
 
 ## Evidence contract
 
@@ -197,7 +199,7 @@ changing production code. The controls also prevent a future comment/heredoc
 stripper from hiding a real commit after quoted text or a heredoc terminator.
 
 The review-regression cases `142` through `145` and `TC-BP-36` through
-`TC-BP-55` must fail across the reviewed intermediate fixes: operation-bearing
+`TC-BP-57` must fail across the reviewed intermediate fixes: operation-bearing
 large commands time out, git-free expansion commands are misclassified,
 chained or prefixed feature pushes are blocked, prefixed trunk pushes disappear,
 non-executable push text is treated as executable, executable data is treated
@@ -209,8 +211,10 @@ intervening-global-option, and mixed-operation findings before the fix.
 executable-substitution fail-open, and stdin-evaluator regressions.
 `TC-BP-54..55` reproduce the sixth review's downstream-consumer fail-open and
 substitution-bearing large-input timeout.
+`TC-BP-56..57` reproduce the seventh review's compound/wrapper fail-open and
+quadratic downstream pipeline scan.
 
 The eventual fix is complete only when all one hundred forty-five detector
-cases and all two hundred twenty-seven trunk-protection assertions pass together with the
+cases and all two hundred fifty-seven trunk-protection assertions pass together with the
 existing `test-is-git-command.sh` and
 `test-block-commit-outside-worktree.sh` suites.

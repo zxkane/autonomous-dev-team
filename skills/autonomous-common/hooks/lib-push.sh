@@ -178,6 +178,16 @@ _push_shell_command_name_executes_input() {
   return 1
 }
 
+_push_shell_command_name_is_data_only() {
+  case "$1" in
+    ':'|'['|'[['|cat|comm|cut|diff|echo|false|fmt|fold|gh|grep|egrep|fgrep|\
+      head|jq|nl|paste|printf|read|sed|sort|tail|tee|test|tr|true|uniq|wc)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
 _push_static_command_text_executes_input() {
   local command="$1"
   local n
@@ -195,9 +205,29 @@ _push_static_command_text_executes_input() {
   _push_command_executes_standard_input 0 "$n"
 }
 
-_push_command_executes_standard_input() {
+_push_env_split_command_text() {
+  local split_text="$1" start="$2" end="$3"
+  local i quoted
+
+  _PUSH_ENV_SPLIT_COMMAND="$split_text"
+  for ((i = start; i < end; i++)); do
+    _push_token_static_value "$i" || return 1
+    printf -v quoted '%q' "$_PUSH_STATIC_VALUE"
+    _PUSH_ENV_SPLIT_COMMAND+=" $quoted"
+  done
+}
+
+_push_static_command_text_contains_push() {
+  if declare -F _shell_static_code_contains_git_operation >/dev/null 2>&1; then
+    _shell_static_code_contains_git_operation "push" "$1"
+    return
+  fi
+  _conservative_shell_text_contains_git_operation "push" "$1"
+}
+
+_push_simple_command_executes_standard_input() {
   local j="$1" end="$2"
-  local value command_name option rc
+  local value command_name option rc candidate
 
   while (( j < end )); do
     if _push_skip_redirection "$j" "$end"; then
@@ -297,14 +327,32 @@ _push_command_executes_standard_input() {
             ((j++))
             continue
           fi
+          value="${_PUSH_TOKEN_VALUES[j]:-}"
+          if [[ "$value" == --split-string=* &&
+            "${_PUSH_TOKEN_ANSI[j]:-0}" == "0" &&
+            "${_PUSH_TOKEN_UNSAFE[j]:-0}" == "0" &&
+            "$value" != *'$'* && "$value" != *'`'* ]]; then
+            _push_env_split_command_text "${value#*=}" "$((j + 1))" "$end" ||
+              return 0
+            _push_static_command_text_executes_input "$_PUSH_ENV_SPLIT_COMMAND"
+            return
+          fi
           _push_token_static_value "$j" || return 0
           option="$_PUSH_STATIC_VALUE"
           case "$option" in
-            -u|-C|-S|--unset|--chdir|--split-string)
+            -S|--split-string)
+              (( j + 1 < end )) || return 0
+              _push_token_static_value "$((j + 1))" || return 0
+              _push_env_split_command_text \
+                "$_PUSH_STATIC_VALUE" "$((j + 2))" "$end" || return 0
+              _push_static_command_text_executes_input "$_PUSH_ENV_SPLIT_COMMAND"
+              return
+              ;;
+            -u|-C|--unset|--chdir)
               (( j + 1 < end )) || return 0
               j=$((j + 2))
               ;;
-            --unset=*|--chdir=*|--split-string=*|-i|--ignore-environment|\
+            --unset=*|--chdir=*|-i|--ignore-environment|\
               -0|--null|-v|--debug|--)
               ((j++))
               ;;
@@ -392,12 +440,136 @@ _push_command_executes_standard_input() {
         return 1
         ;;
       *)
-        _push_shell_command_name_executes_input "$command_name"
-        return
+        _push_shell_command_name_executes_input "$command_name" && return 0
+        _push_shell_command_name_is_data_only "$command_name" && return 1
+        for ((j = j + 1; j < end; j++)); do
+          _push_token_static_value "$j" || return 0
+          candidate="${_PUSH_STATIC_VALUE##*/}"
+          _push_shell_command_name_executes_input "$candidate" && return 0
+        done
+        return 1
         ;;
     esac
   done
   [[ "${_PUSH_XARGS_APPENDS_ARGS:-0}" == "1" ]] && return 0
+  return 1
+}
+
+_push_command_executes_standard_input() {
+  local start="$1" end="$2"
+  local i="$start" simple_end value
+  local command_position=1
+  local loop_header=0
+  local case_depth=0
+  local case_pattern=0
+
+  while (( i < end )); do
+    if [[ "${_PUSH_TOKEN_TYPES[i]:-}" == "operator" ]]; then
+      value="${_PUSH_TOKEN_VALUES[i]:-}"
+      if (( case_pattern == 1 )); then
+        if [[ "$value" == ")" ]]; then
+          case_pattern=0
+          command_position=1
+        fi
+        ((i++))
+        continue
+      fi
+      case "$value" in
+        '('|'&&'|'||'|'|'|'|&'|'&')
+          command_position=1
+          ;;
+        ')')
+          command_position=0
+          ;;
+        ';')
+          if (( case_depth > 0 && i + 1 < end )) &&
+            [[ "${_PUSH_TOKEN_TYPES[i+1]:-}" == "operator" &&
+              "${_PUSH_TOKEN_VALUES[i+1]:-}" == ";" ]]; then
+            case_pattern=1
+            command_position=0
+            i=$((i + 2))
+            continue
+          fi
+          command_position=1
+          ;;
+      esac
+      ((i++))
+      continue
+    fi
+
+    if (( case_pattern == 1 )); then
+      if _push_token_static_value "$i" &&
+        [[ "$_PUSH_STATIC_VALUE" == "esac" ]]; then
+        (( case_depth > 0 )) && ((case_depth--))
+        case_pattern=0
+      fi
+      command_position=0
+      ((i++))
+      continue
+    fi
+
+    if (( loop_header == 1 )); then
+      if _push_token_static_value "$i" &&
+        [[ "$_PUSH_STATIC_VALUE" == "do" ]]; then
+        loop_header=0
+        command_position=1
+      fi
+      ((i++))
+      continue
+    fi
+
+    (( command_position == 1 )) || {
+      ((i++))
+      continue
+    }
+    if _push_token_raw_unquoted_is "$i" "{"; then
+      command_position=1
+      ((i++))
+      continue
+    fi
+    if _push_token_raw_unquoted_is "$i" "}"; then
+      command_position=0
+      ((i++))
+      continue
+    fi
+    _push_token_static_value "$i" || return 0
+    value="$_PUSH_STATIC_VALUE"
+    case "$value" in
+      for|select)
+        loop_header=1
+        command_position=0
+        ((i++))
+        ;;
+      case)
+        ((case_depth++))
+        case_pattern=1
+        command_position=0
+        ((i++))
+        ;;
+      '!'|if|then|elif|else|do|while|until)
+        command_position=1
+        ((i++))
+        ;;
+      fi|done|'esac')
+        if (( case_depth > 0 )) && [[ "$value" == "esac" ]]; then
+          ((case_depth--))
+        fi
+        command_position=0
+        ((i++))
+        ;;
+      *)
+        simple_end=$((i + 1))
+        while (( simple_end < end )) &&
+          [[ "${_PUSH_TOKEN_TYPES[simple_end]:-}" != "operator" ]]; do
+          ((simple_end++))
+        done
+        _push_simple_command_executes_standard_input \
+          "$i" "$simple_end" && return 0
+        i="$simple_end"
+        command_position=0
+        ;;
+    esac
+  done
   return 1
 }
 
@@ -457,46 +629,6 @@ _push_pipeline_has_executing_process_substitution() {
   return 1
 }
 
-_push_pipeline_loop_executes_input() {
-  local pipe_index="$1"
-  local n="${2:-${#_PUSH_TOKEN_VALUES[@]}}"
-  local i start end
-
-  start=$((pipe_index + 1))
-  _push_token_static_value "$start" || return 1
-  [[ "$_PUSH_STATIC_VALUE" == "while" ||
-    "$_PUSH_STATIC_VALUE" == "until" ]] || return 1
-
-  for ((i = start + 1; i < n; i++)); do
-    if _push_token_static_value "$i" &&
-      [[ "$_PUSH_STATIC_VALUE" == "do" ]]; then
-      start=$((i + 1))
-      break
-    fi
-  done
-  (( start < n )) || return 0
-
-  while (( start < n )); do
-    while (( start < n )) &&
-      [[ "${_PUSH_TOKEN_TYPES[start]:-}" == "operator" ]]; do
-      ((start++))
-    done
-    (( start < n )) || return 0
-    if _push_token_static_value "$start" &&
-      [[ "$_PUSH_STATIC_VALUE" == "done" ]]; then
-      return 1
-    fi
-    end="$start"
-    while (( end < n )) &&
-      [[ "${_PUSH_TOKEN_TYPES[end]:-}" != "operator" ]]; do
-      ((end++))
-    done
-    _push_command_executes_standard_input "$start" "$end" && return 0
-    start=$((end + 1))
-  done
-  return 0
-}
-
 _push_pipeline_stage_bounds() {
   local pipe_index="$1"
   local n="${2:-${#_PUSH_TOKEN_VALUES[@]}}"
@@ -524,6 +656,10 @@ _push_pipeline_stage_bounds() {
           if (( paren_depth > 0 )); then
             ((paren_depth--))
             continue
+          fi
+          if (( ${#compound_ends[@]} == 0 )); then
+            _PUSH_PIPELINE_STAGE_END="$i"
+            return 0
           fi
           ;;
       esac
@@ -576,6 +712,7 @@ _push_pipeline_consumer_executes_input() {
   local limit="${2:-${#_PUSH_TOKEN_VALUES[@]}}"
   local start end next_pipe
 
+  _PUSH_PIPELINE_SCAN_END="$limit"
   while (( pipe_index >= 0 )); do
     _push_pipeline_stage_bounds "$pipe_index" "$limit"
     start="$_PUSH_PIPELINE_STAGE_START"
@@ -584,9 +721,11 @@ _push_pipeline_consumer_executes_input() {
 
     _push_pipeline_has_executing_process_substitution \
       "$pipe_index" "$limit" && return 0
-    _push_pipeline_loop_executes_input "$pipe_index" "$limit" && return 0
     (( start < end )) || return 0
     _push_command_executes_standard_input "$start" "$end" && return 0
+    if (( next_pipe < 0 )); then
+      _PUSH_PIPELINE_SCAN_END="$end"
+    fi
     pipe_index="$next_pipe"
   done
   return 1
@@ -695,7 +834,7 @@ _push_data_segment_contains_possible_push() {
 
 _push_shell_text_may_contain_executable_push_data() {
   local command="$1"
-  local i n
+  local i n pipeline_scanned_until=-1
 
   _PUSH_EXECUTABLE_DATA_HAS_EXPANSION=0
   _PUSH_EXECUTABLE_DATA_HAS_PIPELINE=0
@@ -705,10 +844,12 @@ _push_shell_text_may_contain_executable_push_data() {
     if [[ "${_PUSH_TOKEN_TYPES[i]:-}" == "operator" ]]; then
       case "${_PUSH_TOKEN_VALUES[i]:-}" in
         '|'|'|&')
+          (( i < pipeline_scanned_until )) && continue
           if _push_pipeline_consumer_executes_input "$i"; then
             _PUSH_EXECUTABLE_DATA_HAS_PIPELINE=1
             return 0
           fi
+          pipeline_scanned_until="$_PUSH_PIPELINE_SCAN_END"
           ;;
       esac
       continue
@@ -926,14 +1067,34 @@ _push_segment_git_start() {
             ((j++))
             continue
           fi
+          value="${_PUSH_TOKEN_VALUES[j]:-}"
+          if [[ "$value" == --split-string=* &&
+            "${_PUSH_TOKEN_ANSI[j]:-0}" == "0" &&
+            "${_PUSH_TOKEN_UNSAFE[j]:-0}" == "0" &&
+            "$value" != *'$'* && "$value" != *'`'* ]]; then
+            _push_env_split_command_text "${value#*=}" "$((j + 1))" "$end" ||
+              return 2
+            _push_static_command_text_contains_push \
+              "$_PUSH_ENV_SPLIT_COMMAND" && return 2
+            return 1
+          fi
           _push_token_static_value "$j" || return 2
           option="$_PUSH_STATIC_VALUE"
           case "$option" in
-            -u|-C|-S|--unset|--chdir|--split-string)
+            -S|--split-string)
+              (( j + 1 < end )) || return 2
+              _push_token_static_value "$((j + 1))" || return 2
+              _push_env_split_command_text \
+                "$_PUSH_STATIC_VALUE" "$((j + 2))" "$end" || return 2
+              _push_static_command_text_contains_push \
+                "$_PUSH_ENV_SPLIT_COMMAND" && return 2
+              return 1
+              ;;
+            -u|-C|--unset|--chdir)
               (( j + 1 < end )) || return 2
               j=$((j + 2))
               ;;
-            --unset=*|--chdir=*|--split-string=*|-i|--ignore-environment|\
+            --unset=*|--chdir=*|-i|--ignore-environment|\
               -0|--null|-v|--debug|--)
               ((j++))
               ;;

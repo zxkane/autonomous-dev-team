@@ -1130,6 +1130,71 @@ out=$(run_hook_bounded "$large_command")
 assert_exit "large benign substitution command is allowed within five seconds" "0" "$out"
 
 # ===========================================================================
+# TC-BP-56: compound commands and execution wrappers inspect their bodies
+# ===========================================================================
+echo ""
+echo "=== TC-BP-56: compound and wrapped consumers distinguish code from data ==="
+setup_repo feat/x
+for command in \
+  'echo git push origin main | if true; then bash; fi' \
+  'echo git push origin main | if read -r l; then bash; fi' \
+  'echo git push origin main | for f in x; do bash; done' \
+  'echo git push origin main | select f in x; do bash; done' \
+  'echo git push origin main | case x in x) bash;; esac' \
+  'echo git push origin main | case y in x) if true; then cat; fi;; y) bash;; esac' \
+  'echo git push origin main | nice bash' \
+  'echo git push origin main | setsid bash' \
+  'echo git push origin main | ionice bash' \
+  "echo git push origin main | env -S 'bash -s'" \
+  "echo git push origin main | env --split-string='bash -s'" \
+  'echo git push origin main | cat | nice bash' \
+  'echo git push origin main | tee >(if true; then bash; fi)'
+do
+  out=$(run_hook "$command")
+  assert_exit "compound or wrapped executable consumer blocks: $command" "2" "$out"
+done
+for command in \
+  'echo git push origin main | if true; then cat; fi' \
+  'echo git push origin main | if read -r l; then cat; fi' \
+  'echo git push origin main | for f in x; do cat; done' \
+  'echo git push origin main | select f in x; do cat; done' \
+  'echo git push origin main | case x in x) cat;; esac' \
+  'echo git push origin main | case y in x) if true; then cat; fi;; y) cat;; esac' \
+  'echo git push origin main | nice cat' \
+  'echo git push origin main | setsid cat' \
+  'echo git push origin main | ionice cat' \
+  "echo git push origin main | env -S 'cat'" \
+  "echo git push origin main | env --split-string='cat'" \
+  'echo git push origin main | cat | nice cat' \
+  'echo git push origin main | tee >(if true; then cat; fi)' \
+  'echo git push origin main | cat | { cat; }' \
+  'echo git push origin main | cat | (cat)'
+do
+  out=$(run_hook "$command")
+  assert_exit "compound or wrapped data-only consumer allows: $command" "0" "$out"
+done
+
+# ===========================================================================
+# TC-BP-57: downstream pipeline scanning remains linear
+# ===========================================================================
+echo ""
+echo "=== TC-BP-57: long pipelines remain within the hook budget ==="
+setup_repo feat/x
+long_pipeline="echo hello"
+for ((i = 0; i < 200; i++)); do
+  long_pipeline+=" | cat"
+done
+out=$(run_hook_bounded "$long_pipeline")
+assert_exit "two-hundred-stage data pipeline is allowed within five seconds" "0" "$out"
+dynamic_pipeline='echo "$CMD"'
+for ((i = 0; i < 200; i++)); do
+  dynamic_pipeline+=" | cat"
+done
+dynamic_pipeline+=" | bash"
+out=$(run_hook_bounded "$dynamic_pipeline")
+assert_exit "two-hundred-stage dynamic pipeline reaches bash within five seconds" "2" "$out"
+
+# ===========================================================================
 # Summary
 # ===========================================================================
 echo ""
