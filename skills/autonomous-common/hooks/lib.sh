@@ -1525,6 +1525,30 @@ _resolve_git_command_tokenize() {
             started=1
             state="double"
             ;;
+          \\)
+            next=""
+            if (( i + 1 < length )); then
+              next="${command:i+1:1}"
+            fi
+            if [[ "$next" == $'\n' ]]; then
+              i=$((i + 1))
+            elif [[ "$next" == $'\r' ]] &&
+              (( i + 2 < length )) &&
+              [[ "${command:i+2:1}" == $'\n' ]]; then
+              i=$((i + 2))
+            else
+              if (( started == 1 )) &&
+                [[ "$quote_kind" != "unquoted" && "$quote_kind" != "" ]]; then
+                quote_kind="mixed"
+              elif (( started == 0 )); then
+                quote_kind="unquoted"
+              fi
+              _RGCC_UNSAFE=1
+              unquoted_unsafe=1
+              started=1
+              value+="$character"
+            fi
+            ;;
           '$')
             next=""
             if (( i + 1 < length )); then
@@ -1555,6 +1579,25 @@ _resolve_git_command_tokenize() {
             fi
             ;;
           '&'|'|'|';'|'('|')')
+            next=""
+            if (( i + 1 < length )); then
+              next="${command:i+1:1}"
+            fi
+            if [[ "$character" == '&' && "$started" == "1" &&
+              ( "$value" == *'>' || "$value" == *'<' ) ]]; then
+              value+="$character"
+              continue
+            fi
+            if [[ "$character" == '&' && "$started" == "0" &&
+              "$next" == '>' ]]; then
+              quote_kind="unquoted"
+              _RGCC_UNSAFE=1
+              unquoted_unsafe=1
+              started=1
+              value="&>"
+              i=$((i + 1))
+              continue
+            fi
             if (( started == 1 )); then
               _resolve_git_append_word "$value" "${quote_kind:-unquoted}" \
                 "$ansi_syntax" "$unquoted_unsafe"
@@ -1567,11 +1610,8 @@ _resolve_git_command_tokenize() {
 
             operator="$character"
             if [[ "$character" == '&' || "$character" == '|' ]]; then
-              next=""
-              if (( i + 1 < length )); then
-                next="${command:i+1:1}"
-              fi
-              if [[ "$next" == "$character" ]]; then
+              if [[ "$next" == "$character" ||
+                ( "$character" == '|' && "$next" == '&' ) ]]; then
                 operator+="$next"
                 i=$((i + 1))
               fi
@@ -1587,10 +1627,6 @@ _resolve_git_command_tokenize() {
             fi
             case "$character" in
               '`'|'<'|'>'|'{'|'}')
-                _RGCC_UNSAFE=1
-                unquoted_unsafe=1
-                ;;
-              \\)
                 _RGCC_UNSAFE=1
                 unquoted_unsafe=1
                 ;;

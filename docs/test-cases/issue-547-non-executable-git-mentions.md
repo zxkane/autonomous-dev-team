@@ -175,6 +175,9 @@ Those shapes retain the original command text and fail closed.
 | `TC-BP-42` | A builtin `echo` is the only command and its arguments mention a feature or trunk push | Hook exits `0`; parser rc `1` proves no executable push exists |
 | `TC-BP-43` | A trunk refspec is assembled with empty or interior quote fragments | Hook exits `2`; mixed quoting is unknown rather than decoded as a safe feature ref |
 | `TC-BP-44` | A feature push is chained to an approximately 21 KiB PR body or carries an approximately 21 KiB single-word push option | Hook exits `0` within five seconds |
+| `TC-BP-45` | Builtin `echo`/`printf` push text, including ANSI-quoted or quote-concatenated forms, is piped to a local/remote shell, sent through `|&`, used in command substitution, or redirected to process substitution | Literal or dynamic executable shell input exits `2`; git-free literal input, dynamic data without a consumer, and regular-file output exit `0` |
+| `TC-BP-46` | Feature/trunk pushes use regular redirections, brace groups, or backslash-newline continuations; controls contain a continued non-push command or dynamic global args before definite `status` | Shell syntax is not parsed as a refspec; feature/control commands exit `0` and trunk commands exit `2` |
+| `TC-BP-47` | A feature push uses a quoted variable or command substitution as its refspec | Hook exits `2`; the runtime value could target trunk, so dynamic refspecs are intentionally fail-closed |
 
 ## Evidence contract
 
@@ -186,13 +189,14 @@ changing production code. The controls also prevent a future comment/heredoc
 stripper from hiding a real commit after quoted text or a heredoc terminator.
 
 The review-regression cases `142` through `145` and `TC-BP-36` through
-`TC-BP-44` must fail across the reviewed intermediate fixes: operation-bearing
+`TC-BP-47` must fail across the reviewed intermediate fixes: operation-bearing
 large commands time out, git-free expansion commands are misclassified,
 chained or prefixed feature pushes are blocked, prefixed trunk pushes disappear,
-non-executable push text is treated as executable, or mixed quotes hide the
-trunk refspec.
+non-executable push text is treated as executable, executable data is treated
+as inert, redirection/continuation syntax is treated as a refspec, or mixed
+quotes hide the trunk refspec.
 
 The eventual fix is complete only when all one hundred forty-five detector
-cases and all one hundred eighteen trunk-protection assertions pass together with the
+cases and all one hundred fifty-five trunk-protection assertions pass together with the
 existing `test-is-git-command.sh` and
 `test-block-commit-outside-worktree.sh` suites.

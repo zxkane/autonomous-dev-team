@@ -846,6 +846,95 @@ out=$(run_hook_bounded "$large_command")
 assert_exit "feature push with a large option stays within five seconds" "0" "$out"
 
 # ===========================================================================
+# TC-BP-45: data text becomes executable when routed into a shell
+# ===========================================================================
+echo ""
+echo "=== TC-BP-45: executable consumers keep push text fail closed ==="
+setup_repo feat/x
+out=$(run_hook "echo git push origin main | bash")
+assert_exit "echo output piped to bash remains blocked" "2" "$out"
+out=$(run_hook "echo git push origin main | sh")
+assert_exit "echo output piped to sh remains blocked" "2" "$out"
+out=$(run_hook "echo git push origin main | bash -s")
+assert_exit "echo output piped to bash stdin remains blocked" "2" "$out"
+out=$(run_hook "echo git push origin main | ssh host bash")
+assert_exit "echo output piped to a remote shell remains blocked" "2" "$out"
+out=$(run_hook "echo git push origin main |& bash")
+assert_exit "echo stdout/stderr pipe to bash remains blocked" "2" "$out"
+out=$(run_hook "printf 'git push origin main\\n' | bash")
+assert_exit "printf output piped to bash remains blocked" "2" "$out"
+out=$(run_hook "printf \$'git\\x20push origin main\\n' | bash")
+assert_exit "ANSI-quoted push text piped to bash remains blocked" "2" "$out"
+out=$(run_hook "echo g'it push origin main' | bash")
+assert_exit "quote-concatenated push text piped to bash remains blocked" "2" "$out"
+out=$(run_hook 'printf "%s\n" "$SCRIPT" | bash')
+assert_exit "dynamic shell input remains fail-closed" "2" "$out"
+out=$(run_hook "echo git push origin main > >(bash)")
+assert_exit "echo output redirected to a bash process substitution remains blocked" "2" "$out"
+out=$(run_hook 'echo "$(git push origin main)"')
+assert_exit "push inside an echo command substitution remains blocked" "2" "$out"
+out=$(run_hook 'echo "$PREFIX" git push origin main')
+assert_exit "a dynamic data argument without an executable consumer remains allowed" "0" "$out"
+out=$(run_hook "echo git push origin main > /tmp/push-doc")
+assert_exit "echo text redirected to a regular file remains data-only" "0" "$out"
+out=$(run_hook "printf hello | bash")
+assert_exit "git-free literal shell input remains allowed" "0" "$out"
+
+# ===========================================================================
+# TC-BP-46: shell syntax around a readable push is not a refspec
+# ===========================================================================
+echo ""
+echo "=== TC-BP-46: redirections, groups, and continuations remain readable ==="
+setup_repo feat/x
+for command in \
+  "git push origin feat/x > /tmp/log" \
+  "git push -u origin feat/x >/dev/null" \
+  "git push origin feat/x 2>&1 | tee /tmp/log" \
+  "git push -u origin feat/x 2>/dev/null" \
+  "git push origin feat/x < /dev/null" \
+  "git push origin feat/x &>/tmp/log" \
+  "git push origin feat/x 2>>/tmp/log" \
+  ">/tmp/log git push origin feat/x" \
+  "git 2>/dev/null push origin feat/x" \
+  "git push 2>/dev/null origin feat/x" \
+  "{ git push origin feat/x; }" \
+  $'git push \\\n  -u origin feat/x' \
+  $'git push -u \\\n  origin feat/x' \
+  $'git push origin \\\n  feat/x'
+do
+  out=$(run_hook "$command")
+  assert_exit "feature push with shell syntax allowed: ${command:0:42}" "0" "$out"
+done
+for command in \
+  "git push origin main > /tmp/log" \
+  "git push origin main &>/tmp/log" \
+  "{ git push origin main; }" \
+  $'git push origin \\\n  main'
+do
+  out=$(run_hook "$command")
+  assert_exit "trunk push with shell syntax blocked: ${command:0:42}" "2" "$out"
+done
+out=$(run_hook $'git \\\n  commit -m x')
+assert_exit "continued non-push git command is allowed" "0" "$out"
+out=$(run_hook 'git ${OPTS} status')
+assert_exit "dynamic global args before a definite non-push operation are allowed" "0" "$out"
+
+# ===========================================================================
+# TC-BP-47: dynamic refspecs are intentionally fail closed
+# ===========================================================================
+echo ""
+echo "=== TC-BP-47: dynamic refspecs remain fail closed ==="
+setup_repo feat/x
+for command in \
+  'git push -u origin "$BRANCH"' \
+  'git push --force-with-lease origin "$PR_BRANCH"' \
+  'git push -u origin "$(git branch --show-current)"'
+do
+  out=$(run_hook "$command")
+  assert_exit "dynamic refspec remains unreadable: $command" "2" "$out"
+done
+
+# ===========================================================================
 # Summary
 # ===========================================================================
 echo ""

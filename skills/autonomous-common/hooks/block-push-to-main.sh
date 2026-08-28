@@ -50,17 +50,24 @@ if [[ -z "$anchor_dir" || ! -d "$anchor_dir" ]]; then
   anchor_dir="$(pwd -P)"
 fi
 
-# Which repository issues the push. The resolver is also the operation detector:
-# rc=1 proves there is no push, rc=2 means a push matched but its context is
-# unresolvable ([INV-146]), and only rc=0 yields a usable target. Keeping this as
-# one parse avoids exhausting the hook's five-second budget.
+# Which repository issues the push. Only resolver rc=0 yields a usable target;
+# either non-zero result still receives the push parser's narrow executable-data
+# check below. Quoted text piped into a shell can be executable even when the
+# cwd resolver sees no direct invocation.
 push_dir=""
 if push_dir=$(resolve_git_command_cwd "push" "$command" "$(pwd -P)"); then
   resolve_rc=0
 else
   resolve_rc=$?
+  push_dir=""
 fi
-if [[ "$resolve_rc" -eq 1 ]]; then
+
+# Most resolver no-matches are ordinary git-free commands. Only pay for the
+# structured second opinion when a cheap conservative scan still sees literal
+# push-shaped text that quoting or a data command may have hidden.
+if (( resolve_rc == 1 )) &&
+  ! _conservative_shell_text_contains_git_operation "push" "$command" &&
+  ! _push_shell_text_may_contain_executable_push_data "$command"; then
   exit 0
 fi
 
@@ -75,9 +82,10 @@ fi
 # this immutable snapshot, avoiding repeated character scans on large commands.
 _push_prepare_command_tokens "$push_command"
 
-# Parse destination refs before repository scoping. rc=1 positively means the
-# resolver matched only non-executable data (for example `echo git push ...`);
-# rc=2 remains unknown and therefore fail-closed after scope evaluation.
+# Parse destination refs before repository scoping. rc=1 positively means no
+# executable push exists; rc=2 remains unknown and therefore fail-closed after
+# scope evaluation. This second opinion is also what distinguishes quoted data
+# piped to a shell from inert documentation text when the resolver returns 1.
 parsed_refs=""
 if parsed_refs=$(parse_push_target_refspec "$push_command"); then
   parse_rc=0
