@@ -9394,6 +9394,15 @@ flow, substitutions/expansions, malformed quotes, multiple matching
 invocations, attached or repeated `-C`, and special/option-like `cd` operands
 are unsupported and take the rc `2` fail-closed path.
 
+Before detection and cwd resolution, shell comments and bounded file-generation
+heredocs are removed from consideration so documentation text is not mistaken
+for an invocation (#547). Heredoc masking applies only to simple external
+`cat` commands that are the first executable command, use identifier
+delimiters, and have no control operators or physical-line continuations.
+Unquoted heredoc substitutions, preceding setup commands, shell consumers,
+pipelines, ambiguous syntax, and unsupported quote contexts retain the original
+command text and fail closed. The preprocessor never evaluates command text.
+
 **Producer**: `lib.sh::resolve_git_command_cwd`.
 
 **Consumer**: `block-commit-outside-worktree.sh`.
@@ -9405,7 +9414,9 @@ are unsupported and take the rc `2` fail-closed path.
 worktrees, all supported path forms, helper return codes, the fail-closed
 syntax matrix, and non-execution sentinels. The exact unrelated-repository
 reproduction is red on the parent implementation and green with this
-invariant.
+invariant. `tests/unit/test-is-git-command-non-executable-regions.sh`
+(`TC-IGC-547-001..126`) covers comment/heredoc false positives and the
+fail-closed substitution, interpreter, pipeline, and shadowing controls.
 
 **Cross-reference**:
 [`docs/designs/block-commit-command-context.md`](../designs/block-commit-command-context.md)
