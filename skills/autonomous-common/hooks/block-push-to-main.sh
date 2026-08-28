@@ -65,20 +65,34 @@ fi
 substitution_push=0
 case "$command" in
   *'$('*|*'`'*|*'<('*|*'>('*)
-    if _unsafe_shell_text_contains_git_operation "push" "$command"; then
-      substitution_push=1
+    # Resolver rc=1 already means its substitution-aware scanner found no push;
+    # do not repeat that bounded pass on large commands. Resolved or ambiguous
+    # commands still need the precise substitution check: benign process
+    # substitutions such as `>(cat)` also make the resolver return rc=2.
+    if (( resolve_rc != 1 )); then
+      if (( ${#command} >= 4096 )); then
+        substitution_scanner=_large_ambiguous_shell_text_contains_git_operation
+      else
+        substitution_scanner=_unsafe_shell_text_contains_git_operation
+      fi
+      if "$substitution_scanner" "push" "$command"; then
+        substitution_push=1
+      fi
     fi
     ;;
 esac
 
 # Most resolver no-matches are ordinary git-free commands. Only pay for the
 # structured second opinion when a cheap conservative scan still sees literal
-# push-shaped text that quoting or a data command may have hidden.
+# push-shaped text or data can flow into an executable consumer. Expansion-only
+# input reuses the resolver's substitution-aware negative result.
 if (( resolve_rc == 1 )) &&
   (( substitution_push == 0 )) &&
-  ! _conservative_shell_text_contains_git_operation "push" "$command" &&
-  ! _push_shell_text_may_contain_executable_push_data "$command"; then
-  exit 0
+  ! _conservative_shell_text_contains_git_operation "push" "$command"; then
+  if ! _push_shell_text_may_contain_executable_push_data "$command" ||
+    (( _PUSH_EXECUTABLE_DATA_HAS_PIPELINE == 0 )); then
+    exit 0
+  fi
 fi
 
 # Apply the resolver's non-executable-region policy to destination parsing too.

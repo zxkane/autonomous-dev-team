@@ -1078,6 +1078,58 @@ do
 done
 
 # ===========================================================================
+# TC-BP-54: executable consumers remain visible through data-only stages
+# ===========================================================================
+echo ""
+echo "=== TC-BP-54: multi-stage pipelines preserve executable consumers ==="
+setup_repo feat/x
+for command in \
+  'echo git push origin main | cat | bash' \
+  'echo git push origin main | tee /tmp/push-copy | bash' \
+  'echo git push origin main | sort | sh' \
+  'echo git push origin main | grep push | bash' \
+  'echo git push origin main | tr a-z a-z | bash' \
+  'echo git push origin main | cat |& bash' \
+  'echo git push origin main | cat | python3 -' \
+  'echo git push origin main | cat | source /dev/stdin' \
+  'echo git push origin main | cat | while read -r l; do eval "$l"; done' \
+  'echo git push origin main | tee >(cat) | bash' \
+  'echo git push origin main | while read -r l; do echo "$l"; done | bash' \
+  'echo git push origin main | if read -r l; then echo "$l"; fi | bash' \
+  'echo git push origin main | tee >(cat | bash)' \
+  'echo git push origin main | cat | (bash)' \
+  'echo git push origin main | cat | { bash; }'
+do
+  out=$(run_hook "$command")
+  assert_exit "downstream executable consumer blocks trunk push: $command" "2" "$out"
+done
+for command in \
+  'echo git push origin main | cat | jq .' \
+  'echo git push origin main | sort | tee /tmp/push-copy' \
+  'echo git push origin main | tee >(cat) | grep push' \
+  'echo git push origin main | cat ; echo true | bash' \
+  'echo git push origin main | cat && echo true | bash'
+do
+  out=$(run_hook "$command")
+  assert_exit "multi-stage data-only pipeline remains allowed: $command" "0" "$out"
+done
+
+# ===========================================================================
+# TC-BP-55: large substitution-bearing input stays within the hook budget
+# ===========================================================================
+echo ""
+echo "=== TC-BP-55: large benign substitution input remains bounded ==="
+setup_repo feat/x
+large_command=$'python3 - <<PY\n'
+for ((i = 0; i < 625; i++)); do
+  large_command+="def f$i(x):"$'\n'
+  large_command+="    return g(x)+$i"$'\n'
+done
+large_command+=$'PY\nprintf "%s\\n" "$(date)"'
+out=$(run_hook_bounded "$large_command")
+assert_exit "large benign substitution command is allowed within five seconds" "0" "$out"
+
+# ===========================================================================
 # Summary
 # ===========================================================================
 echo ""

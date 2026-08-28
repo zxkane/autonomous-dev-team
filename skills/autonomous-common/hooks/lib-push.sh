@@ -406,6 +406,7 @@ _push_process_substitution_executes_input() {
   local paren_index=$((opener_index + 1))
   local body_start=$((opener_index + 2))
   local i depth=1 n=${#_PUSH_TOKEN_VALUES[@]}
+  local start end next_pipe
 
   [[ "${_PUSH_TOKEN_TYPES[opener_index]:-}" == "word" &&
     "${_PUSH_TOKEN_VALUES[opener_index]:-}" == ">" ]] || return 1
@@ -420,8 +421,17 @@ _push_process_substitution_executes_input() {
         ((depth--))
         if (( depth == 0 )); then
           (( body_start < i )) || return 0
-          _push_command_executes_standard_input "$body_start" "$i"
-          return
+          _push_pipeline_stage_bounds "$((body_start - 1))" "$i"
+          start="$_PUSH_PIPELINE_STAGE_START"
+          end="$_PUSH_PIPELINE_STAGE_END"
+          next_pipe="$_PUSH_PIPELINE_NEXT_PIPE"
+          (( start < end )) || return 0
+          _push_command_executes_standard_input "$start" "$end" && return 0
+          if (( next_pipe >= 0 )); then
+            _push_pipeline_consumer_executes_input "$next_pipe" "$i"
+            return
+          fi
+          return 1
         fi
         ;;
     esac
@@ -431,7 +441,8 @@ _push_process_substitution_executes_input() {
 
 _push_pipeline_has_executing_process_substitution() {
   local pipe_index="$1"
-  local i n=${#_PUSH_TOKEN_VALUES[@]}
+  local n="${2:-${#_PUSH_TOKEN_VALUES[@]}}"
+  local i
 
   for ((i = pipe_index + 1; i + 1 < n; i++)); do
     if _push_process_substitution_executes_input "$i"; then
@@ -448,7 +459,8 @@ _push_pipeline_has_executing_process_substitution() {
 
 _push_pipeline_loop_executes_input() {
   local pipe_index="$1"
-  local i start end n=${#_PUSH_TOKEN_VALUES[@]}
+  local n="${2:-${#_PUSH_TOKEN_VALUES[@]}}"
+  local i start end
 
   start=$((pipe_index + 1))
   _push_token_static_value "$start" || return 1
@@ -485,19 +497,99 @@ _push_pipeline_loop_executes_input() {
   return 0
 }
 
+_push_pipeline_stage_bounds() {
+  local pipe_index="$1"
+  local n="${2:-${#_PUSH_TOKEN_VALUES[@]}}"
+  local start=$((pipe_index + 1))
+  local i
+  local value top_end top_index
+  local paren_depth=0
+  local command_position=1
+  local -a compound_ends=()
+
+  _PUSH_PIPELINE_STAGE_START="$start"
+  _PUSH_PIPELINE_STAGE_END="$n"
+  _PUSH_PIPELINE_NEXT_PIPE=-1
+
+  for ((i = start; i < n; i++)); do
+    if [[ "${_PUSH_TOKEN_TYPES[i]:-}" == "operator" ]]; then
+      value="${_PUSH_TOKEN_VALUES[i]:-}"
+      case "$value" in
+        '(')
+          ((paren_depth++))
+          command_position=1
+          continue
+          ;;
+        ')')
+          if (( paren_depth > 0 )); then
+            ((paren_depth--))
+            continue
+          fi
+          ;;
+      esac
+      (( paren_depth == 0 )) || continue
+      if (( ${#compound_ends[@]} == 0 )); then
+        case "$value" in
+          '|'|'|&')
+            _PUSH_PIPELINE_STAGE_END="$i"
+            _PUSH_PIPELINE_NEXT_PIPE="$i"
+            return 0
+            ;;
+          '&&'|'||'|';'|'&')
+            _PUSH_PIPELINE_STAGE_END="$i"
+            return 0
+            ;;
+        esac
+      fi
+      command_position=1
+      continue
+    fi
+
+    (( paren_depth == 0 && command_position == 1 )) || {
+      command_position=0
+      continue
+    }
+    if _push_token_static_value "$i"; then
+      value="$_PUSH_STATIC_VALUE"
+      if (( ${#compound_ends[@]} > 0 )); then
+        top_index=$((${#compound_ends[@]} - 1))
+        top_end="${compound_ends[top_index]}"
+        if [[ "$value" == "$top_end" ]]; then
+          unset 'compound_ends[top_index]'
+          command_position=0
+          continue
+        fi
+      fi
+      case "$value" in
+        while|until|for|select) compound_ends+=("done") ;;
+        if) compound_ends+=("fi") ;;
+        case) compound_ends+=("esac") ;;
+        '{') compound_ends+=("}") ;;
+      esac
+    fi
+    command_position=0
+  done
+}
+
 _push_pipeline_consumer_executes_input() {
   local pipe_index="$1"
-  local end=$((pipe_index + 1))
-  local n=${#_PUSH_TOKEN_VALUES[@]}
+  local limit="${2:-${#_PUSH_TOKEN_VALUES[@]}}"
+  local start end next_pipe
 
-  _push_pipeline_has_executing_process_substitution "$pipe_index" && return 0
-  _push_pipeline_loop_executes_input "$pipe_index" && return 0
-  while (( end < n )) &&
-    [[ "${_PUSH_TOKEN_TYPES[end]:-}" != "operator" ]]; do
-    ((end++))
+  while (( pipe_index >= 0 )); do
+    _push_pipeline_stage_bounds "$pipe_index" "$limit"
+    start="$_PUSH_PIPELINE_STAGE_START"
+    end="$_PUSH_PIPELINE_STAGE_END"
+    next_pipe="$_PUSH_PIPELINE_NEXT_PIPE"
+
+    _push_pipeline_has_executing_process_substitution \
+      "$pipe_index" "$limit" && return 0
+    _push_pipeline_loop_executes_input "$pipe_index" "$limit" && return 0
+    (( start < end )) || return 0
+    _push_command_executes_standard_input "$start" "$end" && return 0
+    pipe_index="$next_pipe"
   done
-  (( pipe_index + 1 < end )) || return 0
-  _push_command_executes_standard_input "$((pipe_index + 1))" "$end"
+  return 1
 }
 
 _push_next_token_is_definite_other_operation() {
@@ -605,19 +697,27 @@ _push_shell_text_may_contain_executable_push_data() {
   local command="$1"
   local i n
 
+  _PUSH_EXECUTABLE_DATA_HAS_EXPANSION=0
+  _PUSH_EXECUTABLE_DATA_HAS_PIPELINE=0
   _push_prepare_command_tokens "$command"
   n=${#_PUSH_TOKEN_VALUES[@]}
   for ((i = 0; i < n; i++)); do
     if [[ "${_PUSH_TOKEN_TYPES[i]:-}" == "operator" ]]; then
       case "${_PUSH_TOKEN_VALUES[i]:-}" in
         '|'|'|&')
-          _push_pipeline_consumer_executes_input "$i" && return 0
+          if _push_pipeline_consumer_executes_input "$i"; then
+            _PUSH_EXECUTABLE_DATA_HAS_PIPELINE=1
+            return 0
+          fi
           ;;
       esac
       continue
     fi
-    _push_token_has_executable_expansion "$i" && return 0
+    if _push_token_has_executable_expansion "$i"; then
+      _PUSH_EXECUTABLE_DATA_HAS_EXPANSION=1
+    fi
   done
+  (( _PUSH_EXECUTABLE_DATA_HAS_EXPANSION == 0 )) || return 0
   return 1
 }
 
