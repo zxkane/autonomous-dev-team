@@ -72,6 +72,16 @@ run_hook() {
   echo $?
 }
 
+run_hook_bounded() {
+  local cmd="$1"
+  (
+    cd "$TMPDIR/repo" &&
+      CLAUDE_PROJECT_DIR="$TMPDIR/repo" timeout 5 bash "$HOOK" \
+        <<<"$(hook_input "$cmd")"
+  )
+  echo $?
+}
+
 run_remote_parser() {
   local cmd="$1"
   (
@@ -661,6 +671,21 @@ echo "=== TC-BP-34: --recurse-submodules no with no 'no' remote -> block ==="
 setup_repo feat/x
 out=$(run_hook "git push --recurse-submodules no origin main")
 assert_exit "unresolved mode-named destination leaves the trunk check armed" "2" "$out"
+
+# ===========================================================================
+# TC-BP-35: large ambiguous push stays fail-closed within the hook budget
+# ===========================================================================
+echo ""
+echo "=== TC-BP-35: large ambiguous push remains bounded and blocked ==="
+setup_repo main
+large_command=$'python3 - <<PY\n'
+for ((i = 0; i < 250; i++)); do
+  large_command+="def f$i(x):"$'\n'
+  large_command+="    return g(x)+$i"$'\n'
+done
+large_command+=$'PY\ngit push origin main'
+out=$(run_hook_bounded "$large_command")
+assert_exit "large uncertain trunk push blocks within five seconds" "2" "$out"
 
 # ===========================================================================
 # Summary

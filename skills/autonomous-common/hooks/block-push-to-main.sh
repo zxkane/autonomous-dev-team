@@ -17,11 +17,6 @@ source "$SCRIPT_DIR/lib-push.sh"
 input=$(read_hook_stdin)
 command=$(parse_command "$input")
 
-# Only check git push commands
-if ! is_git_command "push" "$command"; then
-  exit 0
-fi
-
 # Trunk protection guards THIS project's REMOTE trunk, so the question it must
 # ask is "where does this push land?" — not "which local checkout issued it"
 # ([INV-148]). A push whose destination is a different repository is not this
@@ -55,13 +50,18 @@ if [[ -z "$anchor_dir" || ! -d "$anchor_dir" ]]; then
   anchor_dir="$(pwd -P)"
 fi
 
-# Which repository issues the push. rc=2 means a push matched but its context is
-# unresolvable ([INV-146]) — that is UNKNOWN, not "the cwd": the cwd is a
-# different repository than the command's real target, so substituting it would
-# compare the wrong repo in both directions. Only rc=0 yields a usable target.
+# Which repository issues the push. The resolver is also the operation detector:
+# rc=1 proves there is no push, rc=2 means a push matched but its context is
+# unresolvable ([INV-146]), and only rc=0 yields a usable target. Keeping this as
+# one parse avoids exhausting the hook's five-second budget.
 push_dir=""
-if resolved_dir=$(resolve_git_command_cwd "push" "$command" "$(pwd -P)"); then
-  push_dir="$resolved_dir"
+if push_dir=$(resolve_git_command_cwd "push" "$command" "$(pwd -P)"); then
+  resolve_rc=0
+else
+  resolve_rc=$?
+fi
+if [[ "$resolve_rc" -eq 1 ]]; then
+  exit 0
 fi
 
 # Both destinations must be PROVEN before the push may be waved through. Each
@@ -114,13 +114,22 @@ trunk="${BASE_BRANCH:-${TRUNK_BRANCH:-main}}"
 # Parse the destination ref(s) the push would write to. Block if any of
 # them target the trunk (covers --all/--mirror via __ALL__/__MIRROR__).
 should_block=0
+found_ref=0
 while IFS= read -r ref; do
   [[ -z "$ref" ]] && continue
+  found_ref=1
   if is_trunk_ref "$ref" "$trunk"; then
     should_block=1
     break
   fi
 done < <(parse_push_target_refspec "$command")
+
+# A matched but unsupported push with no parseable destination is UNKNOWN.
+# The hook's existing fail-closed contract must not turn parser uncertainty
+# into permission to push.
+if (( resolve_rc == 2 && found_ref == 0 )); then
+  should_block=1
+fi
 
 if (( should_block == 1 )); then
   cat >&2 <<EOF

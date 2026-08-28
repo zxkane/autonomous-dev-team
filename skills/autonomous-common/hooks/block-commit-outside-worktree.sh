@@ -17,13 +17,10 @@ if hook_common_dir=$(git rev-parse --path-format=absolute --git-common-dir 2>/de
   hook_common_dir=$(_canonical_existing_directory "$hook_common_dir") || hook_common_dir=""
 fi
 
-# Resolve command context independently from the boolean detector. The resolver
-# also recognizes supported quoted `git -C` paths that the detector strips.
-detected_commit=0
-if is_git_command "commit" "$command"; then
-  detected_commit=1
-fi
-
+# The resolver is the single source of truth: rc=0 is a supported commit,
+# rc=1 is a proven no-match, and rc=2 is a matching but uncertain command that
+# must fail closed. Avoid running the same shell scanner twice inside the
+# hook's five-second budget.
 resolved_dir=""
 if resolved_dir=$(resolve_git_command_cwd "commit" "$command" "$base_dir"); then
   resolve_rc=0
@@ -31,7 +28,7 @@ else
   resolve_rc=$?
 fi
 
-if [[ "$resolve_rc" -eq 1 && "$detected_commit" -eq 0 ]]; then
+if [[ "$resolve_rc" -eq 1 ]]; then
   exit 0
 fi
 

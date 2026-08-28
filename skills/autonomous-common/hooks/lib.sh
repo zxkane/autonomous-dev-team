@@ -313,6 +313,7 @@ _strip_shell_non_executable_regions() {
       active_index = 1
       logical_control_seen = 0
       command_seen = 0
+      ambiguous = 0
       single_quote = sprintf("%c", 39)
     }
 
@@ -399,10 +400,17 @@ _strip_shell_non_executable_regions() {
       return 0
     }
 
+    ambiguous {
+      print
+      next
+    }
+
     active_count > 0 {
       if (pending_expands[active_index] &&
           has_executable_heredoc_expansion($0)) {
-        exit 2
+        ambiguous = 1
+        print
+        next
       }
       candidate = $0
       if (pending_strip_tabs[active_index]) {
@@ -453,7 +461,10 @@ _strip_shell_non_executable_regions() {
             }
           } else if (character == "`" ||
                      (character == "$" && following == "(")) {
-            exit 2
+            ambiguous = 1
+            cleaned = cleaned substr(line, i + 1)
+            state = "unquoted"
+            break
           } else if (character == "\"") {
             state = "unquoted"
           }
@@ -488,7 +499,9 @@ _strip_shell_non_executable_regions() {
                    (character == "[" && following == "[") ||
                    (character == "(" &&
                     (following == "(" || !word_start))) {
-          exit 2
+          ambiguous = 1
+          cleaned = cleaned substr(line, i)
+          break
         } else {
           cleaned = cleaned character
           if (character == "<" && following == "<" &&
@@ -531,6 +544,11 @@ _strip_shell_non_executable_regions() {
         }
       }
 
+      if (ambiguous) {
+        print cleaned
+        next
+      }
+
       if (cleaned !~ /^[ \t]*$/) {
         command_seen = 1
       }
@@ -550,6 +568,12 @@ _strip_shell_non_executable_regions() {
         word_start = 0
       }
       print cleaned
+    }
+
+    END {
+      if (ambiguous) {
+        exit 2
+      }
     }
   '
 }
@@ -594,6 +618,26 @@ _git_command_tokens_contain_operation() {
   return 1
 }
 
+_shell_text_outside_simple_quotes_contains_git_operation() {
+  local operation="$1"
+  local stripped="$2"
+
+  # Quote BASH_REMATCH[0] in the substitution. It is literal matched text, but
+  # an unquoted replacement pattern containing `\`, `[`, `?`, or `*` could
+  # leave the string unchanged and make these loops spin forever. See #266.
+  while [[ "$stripped" =~ \"[^\"]*\" ]]; do
+    stripped="${stripped/"${BASH_REMATCH[0]}"/ }"
+  done
+  while [[ "$stripped" =~ \'[^\']*\' ]]; do
+    stripped="${stripped/"${BASH_REMATCH[0]}"/ }"
+  done
+  stripped=$(
+    printf '%s' "$stripped" |
+      sed -E 's/(^|[[:space:];|&(])#.*/\1/'
+  )
+  _git_command_tokens_contain_operation "$operation" "$stripped"
+}
+
 _shell_code_is_dynamic() {
   local code="$1"
   [[ "$code" == *'$'* || "$code" == *'`'* ||
@@ -608,8 +652,9 @@ _shell_static_code_contains_git_operation() {
   _resolve_git_tokens_contain_operation "$operation"
 }
 
-# Inspect literal code passed to eval or a shell -c invocation. Dynamic code is
-# fail-closed because its operation cannot be determined without evaluation.
+# Inspect literal code passed to eval or a shell -c invocation. Dynamic text is
+# never evaluated; retain it for a conservative literal operation scan instead
+# of treating every expansion as a git operation.
 _shell_code_executor_contains_git_operation() {
   local operation="$1"
   local command="$2"
@@ -644,7 +689,14 @@ _shell_code_executor_contains_git_operation() {
           ((j++))
           while (( j < n )) && [[ "${token_types[j]}" == "word" ]]; do
             option="${token_values[j]}"
-            _shell_code_is_dynamic "$option" && return 0
+            if _shell_code_is_dynamic "$option"; then
+              if _conservative_shell_text_contains_git_operation \
+                "$operation" "$command"; then
+                return 0
+              fi
+              skip_candidate=1
+              break
+            fi
             case "$option" in
               --)
                 ((j++))
@@ -671,7 +723,14 @@ _shell_code_executor_contains_git_operation() {
           ((j++))
           while (( j < n )) && [[ "${token_types[j]}" == "word" ]]; do
             option="${token_values[j]}"
-            _shell_code_is_dynamic "$option" && return 0
+            if _shell_code_is_dynamic "$option"; then
+              if _conservative_shell_text_contains_git_operation \
+                "$operation" "$command"; then
+                return 0
+              fi
+              skip_candidate=1
+              break
+            fi
             case "$option" in
               --)
                 ((j++))
@@ -705,7 +764,14 @@ _shell_code_executor_contains_git_operation() {
           ((j++))
           while (( j < n )) && [[ "${token_types[j]}" == "word" ]]; do
             option="${token_values[j]}"
-            _shell_code_is_dynamic "$option" && return 0
+            if _shell_code_is_dynamic "$option"; then
+              if _conservative_shell_text_contains_git_operation \
+                "$operation" "$command"; then
+                return 0
+              fi
+              skip_candidate=1
+              break
+            fi
             if [[ "$option" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
               ((j++))
               continue
@@ -759,8 +825,12 @@ _shell_code_executor_contains_git_operation() {
         code+="${code:+ }${token_values[j]}"
       done
       [[ -n "$code" ]] || continue
-      if _shell_code_contains_git_operation "$operation" "$code" ||
-        _shell_code_is_dynamic "$code"; then
+      if _shell_code_contains_git_operation "$operation" "$code"; then
+        return 0
+      fi
+      if _shell_code_is_dynamic "$code" &&
+        _conservative_shell_text_contains_git_operation \
+          "$operation" "$command"; then
         return 0
       fi
       continue
@@ -776,7 +846,12 @@ _shell_code_executor_contains_git_operation() {
       [[ "${token_types[j]}" == "word" ]] || break
       option="${token_values[j]}"
       if _shell_code_is_dynamic "$option"; then
-        return 0
+        if _conservative_shell_text_contains_git_operation \
+          "$operation" "$command"; then
+          return 0
+        fi
+        skip_candidate=1
+        break
       fi
       if { [[ "$option" != -* ]] && [[ "$option" != +* ]]; } ||
         [[ "$option" == "--" ]]; then
@@ -810,12 +885,17 @@ _shell_code_executor_contains_git_operation() {
         break
       fi
     done
+    (( skip_candidate == 0 )) || continue
     (( saw_c == 1 && j < n )) &&
       [[ "${token_types[j]}" == "word" ]] || continue
 
     code="${token_values[j]}"
-    if _shell_code_contains_git_operation "$operation" "$code" ||
-      _shell_code_is_dynamic "$code"; then
+    if _shell_code_contains_git_operation "$operation" "$code"; then
+      return 0
+    fi
+    if _shell_code_is_dynamic "$code" &&
+      _conservative_shell_text_contains_git_operation \
+        "$operation" "$command"; then
       return 0
     fi
   done
@@ -902,6 +982,7 @@ _shell_substitution_data_suffix_is_safe() {
 _unsafe_shell_text_contains_git_operation() {
   local operation="$1"
   local command="$2"
+  local LC_ALL=C
   local length=${#command}
   local level=0 i character following previous state body
   local comment_copy_start=0 top_level_comment=0
@@ -1152,6 +1233,10 @@ is_git_command() {
   fi
 
   if [[ "$strip_rc" -eq 2 ]]; then
+    if _shell_text_outside_simple_quotes_contains_git_operation \
+      "$operation" "$stripped_command"; then
+      return 0
+    fi
     if _unsafe_shell_text_contains_git_operation "$operation" "$command"; then
       return 0
     fi
@@ -1163,25 +1248,10 @@ is_git_command() {
     command="$_UNSAFE_SHELL_REMAINDER"
   fi
 
-  # Strip single- and double-quoted regions so mentions inside quoted
-  # strings (e.g. `--body "see git push docs"`) cannot match.
-  #
-  # The match MUST be quoted inside the substitution — `${var/"$x"/ }`, not
-  # `${var/$x/ }`. The first operand of `${var/pattern/repl}` is interpreted as
-  # a glob pattern, but BASH_REMATCH[0] is literal matched text. An unquoted
-  # match containing a glob-significant char (a backslash from an escaped quote
-  # `\"`, or `[`, `?`, `*`) would match nothing, leave `stripped` unchanged, and
-  # the `while [[ … =~ … ]]` test would re-match the same region forever — a
-  # 100%-CPU infinite loop. Quoting forces a literal substitution. See #266.
-  local stripped="$command"
-  while [[ "$stripped" =~ \"[^\"]*\" ]]; do
-    stripped="${stripped/"${BASH_REMATCH[0]}"/ }"
-  done
-  while [[ "$stripped" =~ \'[^\']*\' ]]; do
-    stripped="${stripped/"${BASH_REMATCH[0]}"/ }"
-  done
-
-  _git_command_tokens_contain_operation "$operation" "$stripped"
+  # Strip simple quoted regions so prose such as "see git push docs" cannot
+  # match an executable operation.
+  _shell_text_outside_simple_quotes_contains_git_operation \
+    "$operation" "$command"
 }
 
 # Canonicalize an existing directory without changing the caller's cwd.
@@ -1212,6 +1282,8 @@ _resolve_git_append_operator() {
 # resolve_git_command_cwd. Unsafe expansion syntax is recorded, never expanded.
 _resolve_git_command_tokenize() {
   local command="$1"
+  local already_preprocessed="${2:-0}"
+  local LC_ALL=C
   local stripped_command
   local state="unquoted"
   local value=""
@@ -1225,8 +1297,10 @@ _resolve_git_command_tokenize() {
   local backslash=$'\\'
   local i length
 
-  if stripped_command=$(_strip_shell_non_executable_regions "$command"); then
-    command="$stripped_command"
+  if [[ "$already_preprocessed" != "1" ]]; then
+    if stripped_command=$(_strip_shell_non_executable_regions "$command"); then
+      command="$stripped_command"
+    fi
   fi
   length=${#command}
 
@@ -1763,6 +1837,7 @@ resolve_git_command_cwd() {
   local base_dir="$3"
   local canonical_base resolved stripped_command
   local strip_rc=0
+  local command_preprocessed=0
   local _UNSAFE_SHELL_REMAINDER="$command"
   local _UNSAFE_SHELL_COMMENT_STRIPPED="$command"
   local separator=-1
@@ -1771,10 +1846,15 @@ resolve_git_command_cwd() {
   [[ "$operation" =~ ^[a-zA-Z0-9_-]+$ ]] || return 2
   if stripped_command=$(_strip_shell_non_executable_regions "$command"); then
     command="$stripped_command"
+    command_preprocessed=1
   else
     strip_rc=$?
   fi
   if [[ "$strip_rc" -eq 2 ]]; then
+    if _shell_text_outside_simple_quotes_contains_git_operation \
+      "$operation" "$stripped_command"; then
+      return 2
+    fi
     if _unsafe_shell_text_contains_git_operation "$operation" "$command"; then
       return 2
     fi
@@ -1785,7 +1865,7 @@ resolve_git_command_cwd() {
     fi
     command="$_UNSAFE_SHELL_REMAINDER"
   fi
-  _resolve_git_command_tokenize "$command"
+  _resolve_git_command_tokenize "$command" "$command_preprocessed"
 
   if ! _resolve_git_tokens_contain_operation "$operation"; then
     if (( _RGCC_UNSAFE == 1 )) &&

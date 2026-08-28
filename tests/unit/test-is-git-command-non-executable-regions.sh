@@ -68,6 +68,20 @@ assert_resolver_no_match() {
   fi
 }
 
+assert_resolver_uncertain_match() {
+  local id="$1"
+  local command="$2"
+  local output rc
+
+  output=$(resolve_git_command_cwd commit "$command" "$REPO_A" 2>/dev/null)
+  rc=$?
+  if [[ "$rc" -eq 2 && -z "$output" ]]; then
+    record_pass "$id"
+  else
+    record_fail "$id (expected resolver rc=2/output='', got rc=$rc/output='$output')"
+  fi
+}
+
 run_hook() {
   local command="$1"
   local payload
@@ -111,6 +125,31 @@ assert_large_heredoc_bounded() {
   else
     rc=$?
     record_fail "$id (expected completion within 2s, got rc=$rc)"
+  fi
+}
+
+assert_large_ambiguous_hook_bounded() {
+  local id="$1"
+  local function_count="${2:-250}"
+  local command=$'python3 - <<PY\n'
+  local payload output rc i
+
+  for ((i = 0; i < function_count; i++)); do
+    command+="def f$i(x):"$'\n'
+    command+="    return g(x)+$i"$'\n'
+  done
+  command+=$'PY\ngit commit -m real'
+  payload=$(jq -cn --arg command "$command" '{tool_input:{command:$command}}')
+
+  output=$(
+    cd "$REPO_A" &&
+      printf '%s' "$payload" | timeout 5 bash "$HOOK" 2>&1
+  )
+  rc=$?
+  if [[ "$rc" -eq 2 ]]; then
+    record_pass "$id (hook rc=$rc within 5s)"
+  else
+    record_fail "$id (expected hook rc=2 within 5s, got rc=$rc: $output)"
   fi
 }
 
@@ -257,9 +296,21 @@ PIPE_OUTPUT_SUBSTITUTION='echo "$(echo '\''git commit -m real'\'')" | bash'
 PREFIX_REDIRECT_OUTPUT_SUBSTITUTION='echo > >(bash) "$(echo '\''git commit -m real'\'')"'
 # shellcheck disable=SC2016
 ARRAY_SUBSCRIPT_OUTPUT_SUBSTITUTION='echo "${arr[$(echo '\''x[$(git commit -m real; echo 0)]'\'')]}"'
+# shellcheck disable=SC2016
+BENIGN_DYNAMIC_SCRIPT_SUBSTITUTION='echo "$(bash "$f")"'
+# shellcheck disable=SC2016
+BENIGN_DYNAMIC_SHELL_CODE='n="$(sh -c "ls $dir")"'
+# shellcheck disable=SC2016
+BENIGN_ENV_DYNAMIC_VALUE='v="$(env FOO="$BAR" bash -c ls)"'
+# shellcheck disable=SC2016
+BENIGN_EXEC_DYNAMIC_SCRIPT='echo "$(exec bash "$f")"'
+# shellcheck disable=SC2016
+BENIGN_COMMAND_DYNAMIC_SCRIPT='echo "$(command bash "$f")"'
+# shellcheck disable=SC2016
+BENIGN_DYNAMIC_EVAL='echo "$(eval "$generated")"'
 
 echo ""
-echo "=== TC-IGC-547-001..126: non-executable git mentions ==="
+echo "=== TC-IGC-547-001..141: non-executable git mentions ==="
 echo ""
 
 assert_detector_no_match \
@@ -646,6 +697,49 @@ assert_detector_match \
 assert_hook_rc \
   "TC-IGC-547-126 array subscript consumer remains fail-closed" 2 \
   "$ARRAY_SUBSCRIPT_OUTPUT_SUBSTITUTION"
+assert_detector_no_match \
+  "TC-IGC-547-127 dynamic script path without git text stays allowed" \
+  "$BENIGN_DYNAMIC_SCRIPT_SUBSTITUTION"
+assert_hook_rc \
+  "TC-IGC-547-128 hook allows dynamic script path without git text" 0 \
+  "$BENIGN_DYNAMIC_SCRIPT_SUBSTITUTION"
+assert_detector_no_match \
+  "TC-IGC-547-129 dynamic shell code without git text stays allowed" \
+  "$BENIGN_DYNAMIC_SHELL_CODE"
+assert_hook_rc \
+  "TC-IGC-547-130 hook allows dynamic shell code without git text" 0 \
+  "$BENIGN_DYNAMIC_SHELL_CODE"
+assert_detector_no_match \
+  "TC-IGC-547-131 dynamic env value without git text stays allowed" \
+  "$BENIGN_ENV_DYNAMIC_VALUE"
+assert_hook_rc \
+  "TC-IGC-547-132 hook allows dynamic env value without git text" 0 \
+  "$BENIGN_ENV_DYNAMIC_VALUE"
+assert_detector_no_match \
+  "TC-IGC-547-133 exec dynamic script without git text stays allowed" \
+  "$BENIGN_EXEC_DYNAMIC_SCRIPT"
+assert_hook_rc \
+  "TC-IGC-547-134 hook allows exec dynamic script without git text" 0 \
+  "$BENIGN_EXEC_DYNAMIC_SCRIPT"
+assert_detector_no_match \
+  "TC-IGC-547-135 command dynamic script without git text stays allowed" \
+  "$BENIGN_COMMAND_DYNAMIC_SCRIPT"
+assert_hook_rc \
+  "TC-IGC-547-136 hook allows command dynamic script without git text" 0 \
+  "$BENIGN_COMMAND_DYNAMIC_SCRIPT"
+assert_detector_no_match \
+  "TC-IGC-547-137 dynamic eval without git text stays allowed" \
+  "$BENIGN_DYNAMIC_EVAL"
+assert_hook_rc \
+  "TC-IGC-547-138 hook allows dynamic eval without git text" 0 \
+  "$BENIGN_DYNAMIC_EVAL"
+assert_large_ambiguous_hook_bounded \
+  "TC-IGC-547-139 large ambiguous command is blocked within hook budget"
+assert_resolver_uncertain_match \
+  "TC-IGC-547-140 resolver keeps commit after masked heredoc visible" \
+  "$HEREDOC_THEN_COMMIT"
+assert_large_ambiguous_hook_bounded \
+  "TC-IGC-547-141 twenty-kilobyte command is blocked within hook budget" 625
 
 echo ""
 echo "========================================"

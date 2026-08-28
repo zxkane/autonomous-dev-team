@@ -146,6 +146,22 @@ Those shapes retain the original command text and fail closed.
 | `TC-IGC-547-124` | Main-workspace hook receives the prefix redirect consumer | Hook exits `2` |
 | `TC-IGC-547-125` | An array subscript consumes generated text containing `$(git commit ...)` | Detector rejects the parameter-expansion context |
 | `TC-IGC-547-126` | Main-workspace hook receives the array subscript consumer | Hook exits `2` |
+| `TC-IGC-547-127` | `bash "$f"` runs a dynamic script path without literal git text | Detector returns no match |
+| `TC-IGC-547-128` | Main-workspace hook receives that dynamic script path | Hook exits `0` |
+| `TC-IGC-547-129` | `sh -c "ls $dir"` contains dynamic shell code without literal git text | Detector returns no match |
+| `TC-IGC-547-130` | Main-workspace hook receives that dynamic shell code | Hook exits `0` |
+| `TC-IGC-547-131` | `env FOO="$BAR" bash -c ls` contains a dynamic environment value without git text | Detector returns no match |
+| `TC-IGC-547-132` | Main-workspace hook receives that dynamic environment value | Hook exits `0` |
+| `TC-IGC-547-133` | `exec bash "$f"` uses a dynamic script path without git text | Detector returns no match |
+| `TC-IGC-547-134` | Main-workspace hook receives the exec-wrapped dynamic script | Hook exits `0` |
+| `TC-IGC-547-135` | `command bash "$f"` uses a dynamic script path without git text | Detector returns no match |
+| `TC-IGC-547-136` | Main-workspace hook receives the command-wrapped dynamic script | Hook exits `0` |
+| `TC-IGC-547-137` | `eval "$generated"` contains no literal git text | Detector returns no match |
+| `TC-IGC-547-138` | Main-workspace hook receives that dynamic eval | Hook exits `0` |
+| `TC-IGC-547-139` | An approximately 8 KiB ambiguous command ends with a genuine `git commit` | Main-workspace hook exits `2` within its configured five-second timeout |
+| `TC-IGC-547-140` | A masked heredoc terminator is followed by a genuine commit | Resolver returns `2` for a visible but unsupported matching invocation instead of reprocessing and hiding it |
+| `TC-IGC-547-141` | An approximately 20 KiB ambiguous command ends with a genuine `git commit` | Main-workspace hook still exits `2` within five seconds, proving the operation-bearing path does not retain quadratic scaling |
+| `TC-BP-35` | An approximately 8 KiB ambiguous command ends with `git push origin main` | Trunk-protection hook exits `2` within five seconds; unresolved refspec parsing cannot grant the push |
 
 ## Evidence contract
 
@@ -156,6 +172,6 @@ false-positive detector behavior and its user-visible hook impact without
 changing production code. The controls also prevent a future comment/heredoc
 stripper from hiding a real commit after quoted text or a heredoc terminator.
 
-The eventual fix is complete only when all one hundred twenty-six cases pass together with the
+The eventual fix is complete only when all one hundred forty-one cases pass together with the
 existing `test-is-git-command.sh` and
 `test-block-commit-outside-worktree.sh` suites.

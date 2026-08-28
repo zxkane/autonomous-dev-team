@@ -9415,8 +9415,11 @@ worktrees, all supported path forms, helper return codes, the fail-closed
 syntax matrix, and non-execution sentinels. The exact unrelated-repository
 reproduction is red on the parent implementation and green with this
 invariant. `tests/unit/test-is-git-command-non-executable-regions.sh`
-(`TC-IGC-547-001..126`) covers comment/heredoc false positives and the
-fail-closed substitution, interpreter, pipeline, and shadowing controls.
+(`TC-IGC-547-001..141`) covers comment/heredoc false positives, dynamic
+git-free shell consumers, the five-second hook budget, and the fail-closed
+substitution, interpreter, pipeline, and shadowing controls.
+`tests/unit/test-block-push-regex.sh` (`TC-BP-35`) covers the same budget and
+fail-closed requirement for an ambiguous push whose refspec is unparseable.
 
 **Cross-reference**:
 [`docs/designs/block-commit-command-context.md`](../designs/block-commit-command-context.md)
@@ -9726,7 +9729,7 @@ they read only what the wrapper exported and never parse conf.
 
 **Status**: **ENFORCED**.
 
-**Test**: `tests/unit/test-block-push-regex.sh` (`TC-BP-01..34`, 74 assertions) —
+**Test**: `tests/unit/test-block-push-regex.sh` (`TC-BP-01..35`, 75 assertions) —
 the 11 pre-existing #64 cases unchanged, plus TC-BP-13b (bare push from inside
 the wiki), TC-BP-13c (no anchor → fail closed), TC-BP-16 (second clone of this
 project's remote, all three command shapes), TC-BP-17 (five URL spellings),
@@ -9751,6 +9754,10 @@ chained pushes (20), quoted/expansion operands (21), rc=2 grammars evaluated
 against the wrong repository (22), local push-config redirect (23), path-embedded
 `@` collapsing distinct hosts (24/24b), DNS/path-equivalent spellings of own
 trunk (26), and an unreadable anchor read as "not mine" (27).
+
+TC-BP-35 pins the five-second hook budget and fail-closed fallback when an
+approximately 8 KiB ambiguous command contains a real trunk push but the
+bounded refspec parser cannot produce a destination token.
 
 Measured red/green: **20 of 56 red on PR #539's parent** (`216a906` — the wiki
 and allowlist allows, the second-clone forms, the URL spellings, the
