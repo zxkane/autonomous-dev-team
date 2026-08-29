@@ -1,5 +1,5 @@
 #!/bin/bash
-# Regression coverage for issues #534 and #537 command-context resolution.
+# Regression coverage for issues #534, #537, and #548 command-context resolution.
 
 set -uo pipefail
 
@@ -22,6 +22,8 @@ LOGICAL_LINK="$REPO_A/link-to-b-subdir"
 DASH_REPO="$REPO_A/-"
 NON_GIT="$TMPROOT/not-a-repo"
 MISSING="$TMPROOT/missing-repo"
+GIT_DIR_FAIL_BIN="$TMPROOT/git-dir-fail-bin"
+REAL_GIT="$(command -v git)"
 
 trap 'rm -rf "$TMPROOT"' EXIT
 
@@ -44,6 +46,21 @@ init_repo() {
 }
 
 mkdir -p "$TEST_HOME" "$NON_GIT"
+mkdir -p "$GIT_DIR_FAIL_BIN"
+cat > "$GIT_DIR_FAIL_BIN/git" <<'EOF'
+#!/bin/bash
+is_rev_parse=false
+is_git_dir=false
+for arg in "$@"; do
+  [[ "$arg" == "rev-parse" ]] && is_rev_parse=true
+  [[ "$arg" == "--git-dir" ]] && is_git_dir=true
+done
+if [[ "$is_rev_parse" == true && "$is_git_dir" == true ]]; then
+  exit 1
+fi
+exec "$REAL_GIT" "$@"
+EOF
+chmod +x "$GIT_DIR_FAIL_BIN/git"
 init_repo "$REPO_A"
 init_repo "$REPO_B"
 init_repo "$REPO_BACKSLASH"
@@ -81,6 +98,21 @@ run_hook() {
   HOOK_OUTPUT=$(
     cd "$cwd" &&
       printf '%s' "$payload" | HOME="$TEST_HOME" bash "$HOOK" 2>&1
+  )
+  HOOK_RC=$?
+}
+
+run_hook_with_git_dir_probe_failure() {
+  local cwd="$1"
+  local command="$2"
+  local payload
+
+  payload=$(jq -cn --arg command "$command" '{tool_input:{command:$command}}')
+  HOOK_OUTPUT=$(
+    cd "$cwd" &&
+      printf '%s' "$payload" |
+        HOME="$TEST_HOME" REAL_GIT="$REAL_GIT" PATH="$GIT_DIR_FAIL_BIN:$PATH" \
+          bash "$HOOK" 2>&1
   )
   HOOK_RC=$?
 }
@@ -589,6 +621,37 @@ assert_hook_diagnostic() {
   fi
 }
 
+assert_hook_diagnostic_content() {
+  local id="$1"
+  local cwd="$2"
+  local command="$3"
+  local expected_heading="$4"
+  local forbidden_heading="$5"
+  local expected_text
+  shift 5
+
+  run_hook "$cwd" "$command"
+  if [[ "$HOOK_RC" -ne 2 ]]; then
+    record_fail "$id (expected hook rc=2, got $HOOK_RC: $HOOK_OUTPUT)"
+    return
+  fi
+  if [[ "$HOOK_OUTPUT" != *"$expected_heading"* ]]; then
+    record_fail "$id (missing diagnostic '$expected_heading': $HOOK_OUTPUT)"
+    return
+  fi
+  if [[ "$HOOK_OUTPUT" == *"$forbidden_heading"* ]]; then
+    record_fail "$id (unexpected diagnostic '$forbidden_heading': $HOOK_OUTPUT)"
+    return
+  fi
+  for expected_text in "$@"; do
+    if [[ "$HOOK_OUTPUT" != *"$expected_text"* ]]; then
+      record_fail "$id (missing remediation text '$expected_text': $HOOK_OUTPUT)"
+      return
+    fi
+  done
+  record_pass "$id (hook rc=$HOOK_RC, diagnostic and remediation selected)"
+}
+
 assert_hook_silent() {
   local id="$1"
   local cwd="$2"
@@ -618,35 +681,71 @@ assert_hook_diagnostic \
   "$REPO_A_LINKED" "git -C $REPO_A commit -m main" \
   "$WORKTREE_HEADING" "$UNVERIFIED_HEADING"
 # shellcheck disable=SC2016 # The hook must receive the variable reference literally.
-assert_hook_diagnostic \
+assert_hook_diagnostic_content \
   "TC-BCOW-016d variable target uses unable-to-verify diagnostic" \
   "$REPO_A" 'git -C "$TARGET_REPO" commit -m variable' \
-  "$UNVERIFIED_HEADING" "$WORKTREE_HEADING"
+  "$UNVERIFIED_HEADING" "$WORKTREE_HEADING" \
+  "could not statically verify the repository and worktree context without executing the command" \
+  "git -C /absolute/path/to/repo commit -F /path/to/message" \
+  "cd /absolute/path/to/repo && git commit -F /path/to/message" \
+  "Variables, substitutions, wrappers, pipelines, and multiple commit invocations are unsupported as repository evidence" \
+  'bare `git add ... && git commit ...`' \
+  "Missing paths and non-Git directories cannot be verified" \
+  "create or switch to a linked worktree"
 # shellcheck disable=SC2016 # The hook must receive the variable reference literally.
+assert_hook_silent \
+  "TC-BCOW-016e linked caller with variable target preserves fallback allow" \
+  "$REPO_A_LINKED" 'git -C "$TARGET_REPO" commit -m variable'
+assert_hook_silent \
+  "TC-BCOW-016f linked caller with compound commit preserves fallback allow" \
+  "$REPO_A_LINKED" 'git add -A && git commit -m linked'
 assert_hook_diagnostic \
-  "TC-BCOW-016e linked caller with variable target uses unable-to-verify diagnostic" \
-  "$REPO_A_LINKED" 'git -C "$TARGET_REPO" commit -m variable' \
-  "$UNVERIFIED_HEADING" "$WORKTREE_HEADING"
-assert_hook_diagnostic \
-  "TC-BCOW-016f missing literal target uses unable-to-verify diagnostic" \
+  "TC-BCOW-016g missing literal target uses unable-to-verify diagnostic" \
   "$REPO_A" "git -C $MISSING commit -m missing" \
   "$UNVERIFIED_HEADING" "$WORKTREE_HEADING"
 assert_hook_diagnostic \
-  "TC-BCOW-016g existing non-git target uses unable-to-verify diagnostic" \
+  "TC-BCOW-016h existing non-git target uses unable-to-verify diagnostic" \
   "$REPO_A" "git -C $NON_GIT commit -m non-git" \
   "$UNVERIFIED_HEADING" "$WORKTREE_HEADING"
 assert_hook_silent \
-  "TC-BCOW-016h linked-worktree commit remains allowed without diagnostic" \
+  "TC-BCOW-016i linked-worktree commit remains allowed without diagnostic" \
   "$REPO_A_LINKED" 'git commit -m linked'
 assert_hook_silent \
-  "TC-BCOW-016i literal unrelated-repo commit remains allowed without diagnostic" \
+  "TC-BCOW-016j literal unrelated-repo commit remains allowed without diagnostic" \
   "$REPO_A" "git -C $REPO_B commit -m unrelated"
 assert_hook_silent \
-  "TC-BCOW-016j non-commit command remains allowed without diagnostic" \
+  "TC-BCOW-016k non-commit command remains allowed without diagnostic" \
   "$REPO_A" 'git status --short'
 assert_hook_silent \
-  "TC-BCOW-016k amend exemption remains allowed without diagnostic" \
+  "TC-BCOW-016l amend exemption remains allowed without diagnostic" \
   "$REPO_A" 'git commit --amend --no-edit'
+assert_hook_diagnostic \
+  "TC-BCOW-016m unreadable installing-repository identity uses unable-to-verify diagnostic" \
+  "$NON_GIT" "git -C $REPO_A commit -m outside" \
+  "$UNVERIFIED_HEADING" "$WORKTREE_HEADING"
+run_hook_with_git_dir_probe_failure "$REPO_A" 'git commit -m probe-failure'
+if [[ "$HOOK_RC" -ne 2 ]]; then
+  record_fail \
+    "TC-BCOW-016n git-dir probe failure (expected hook rc=2, got $HOOK_RC: $HOOK_OUTPUT)"
+elif [[ "$HOOK_OUTPUT" != *"$UNVERIFIED_HEADING"* ]]; then
+  record_fail \
+    "TC-BCOW-016n git-dir probe failure (missing diagnostic '$UNVERIFIED_HEADING': $HOOK_OUTPUT)"
+elif [[ "$HOOK_OUTPUT" == *"$WORKTREE_HEADING"* ]]; then
+  record_fail \
+    "TC-BCOW-016n git-dir probe failure (unexpected diagnostic '$WORKTREE_HEADING': $HOOK_OUTPUT)"
+else
+  record_pass "TC-BCOW-016n git-dir probe failure uses unable-to-verify diagnostic"
+fi
+assert_hook_diagnostic \
+  "TC-BCOW-016o main caller with compound commit uses unable-to-verify diagnostic" \
+  "$REPO_A" 'git add -A && git commit -m main' \
+  "$UNVERIFIED_HEADING" "$WORKTREE_HEADING"
+assert_hook_silent \
+  "TC-BCOW-016p linked caller with missing target preserves fallback allow" \
+  "$REPO_A_LINKED" "git -C $MISSING commit -m missing"
+assert_hook_silent \
+  "TC-BCOW-016q linked caller with non-git target preserves fallback allow" \
+  "$REPO_A_LINKED" "git -C $NON_GIT commit -m non-git"
 
 echo ""
 echo "========================================"

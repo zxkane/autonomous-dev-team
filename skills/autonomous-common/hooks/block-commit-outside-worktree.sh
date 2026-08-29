@@ -12,6 +12,10 @@ command=$(parse_command "$input")
 
 # Capture the installing repository identity before evaluating command context.
 base_dir=$(pwd -P)
+hook_common_dir=""
+if hook_common_dir=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null); then
+  hook_common_dir=$(_canonical_existing_directory "$hook_common_dir") || hook_common_dir=""
+fi
 
 # The resolver is the single source of truth: rc=0 is a supported commit,
 # rc=1 is a proven no-match, and rc=2 is a matching but uncertain command that
@@ -37,10 +41,10 @@ block_unverified_target() {
   cat >&2 <<'EOF'
 ## BLOCKED - Unable to Verify Target Repository
 
-The commit was blocked because this hook could not statically verify an existing Git repository target without executing the command.
+The commit was blocked because this hook could not statically verify the repository and worktree context without executing the command.
 
 ### Re-issue as One Supported Command:
-Use a literal path to an existing Git repository:
+Run from the repository or linked worktree whose policy applies, and use a literal path to an existing Git repository:
 
 ```bash
 git -C /absolute/path/to/repo commit -F /path/to/message
@@ -52,40 +56,46 @@ or:
 cd /absolute/path/to/repo && git commit -F /path/to/message
 ```
 
-Variables, substitutions, wrappers, pipelines, multiple commit invocations, missing paths, and non-Git directories remain blocked.
+Variables, substitutions, wrappers, pipelines, and multiple commit invocations are unsupported as repository evidence. Other compound command shapes, such as a bare `git add ... && git commit ...`, must be rewritten as one supported command. Missing paths and non-Git directories cannot be verified.
 
-If the intended target is this repository, create or switch to a linked worktree and commit there.
+If the intended target is this repository, create or switch to a linked worktree and issue the commit as one supported command there.
 EOF
   exit 2
 }
 
+verification_uncertain=false
 if [[ "$resolve_rc" -ne 0 ]]; then
-  block_unverified_target
-fi
-
-hook_common_dir=""
-if hook_common_dir=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null); then
-  hook_common_dir=$(_canonical_existing_directory "$hook_common_dir") || hook_common_dir=""
+  verification_uncertain=true
+  resolved_dir="$base_dir"
 fi
 
 target_common_dir=""
-if [[ -z "$hook_common_dir" ]] ||
-  ! target_common_dir=$(git -C "$resolved_dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) ||
-  ! target_common_dir=$(_canonical_existing_directory "$target_common_dir"); then
-  block_unverified_target
-fi
-if [[ "$target_common_dir" != "$hook_common_dir" ]]; then
-  exit 0
+if [[ -n "$hook_common_dir" ]] &&
+  target_common_dir=$(git -C "$resolved_dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) &&
+  target_common_dir=$(_canonical_existing_directory "$target_common_dir"); then
+  if [[ "$target_common_dir" != "$hook_common_dir" ]]; then
+    exit 0
+  fi
+else
+  verification_uncertain=true
+  resolved_dir="$base_dir"
+  target_common_dir="$hook_common_dir"
 fi
 
 # For repo A, git-dir differs from git-common-dir only in a linked worktree.
 target_git_dir=""
-if ! target_git_dir=$(git -C "$resolved_dir" rev-parse --path-format=absolute --git-dir 2>/dev/null) ||
-  ! target_git_dir=$(_canonical_existing_directory "$target_git_dir"); then
-  block_unverified_target
+if [[ -n "$target_common_dir" ]] &&
+  target_git_dir=$(git -C "$resolved_dir" rev-parse --path-format=absolute --git-dir 2>/dev/null) &&
+  target_git_dir=$(_canonical_existing_directory "$target_git_dir"); then
+  if [[ "$target_git_dir" != "$target_common_dir" ]]; then
+    exit 0
+  fi
+else
+  verification_uncertain=true
 fi
-if [[ "$target_git_dir" != "$target_common_dir" ]]; then
-  exit 0
+
+if [[ "$verification_uncertain" == true ]]; then
+  block_unverified_target
 fi
 
 # The target is positively proven to be this repository's main workspace.

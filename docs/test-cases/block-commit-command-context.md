@@ -1,6 +1,6 @@
 # Test cases: block-commit command context
 
-Issues #534 and #537 are covered by
+Issues #534, #537, and #548 are covered by
 `tests/unit/test-block-commit-outside-worktree.sh`. The test creates two
 independent repositories and linked worktrees under a fresh `mktemp` directory,
 so it is safe under the parallel unit runner.
@@ -17,7 +17,7 @@ so it is safe under the parallel unit runner.
 | `TC-BCOW-006` | Explicit `cd` to repo B linked worktree | Hook exits `0` |
 | `TC-BCOW-007` | Relative, single-quoted, double-quoted, literal/escaped-backslash, escaped-quote, symlinked, tilde, and symlink-plus-`..` paths | Helper returns the canonical target; double-quote escapes are decoded without expansion, and `cd` applies logical dot-segment handling before canonicalization |
 | `TC-BCOW-008` | One two-token `git -C <repo-B> commit`, with absolute/quoted, relative, and symlink-plus-`..` paths | Hook exits `0`; helper resolves from its base directory using physical filesystem traversal |
-| `TC-BCOW-009` | Missing path and existing non-git directory from repo A main | Target probing remains fail-closed without falling back to hook cwd; hook exits `2` |
+| `TC-BCOW-009` | Missing path and existing non-git directory from repo A main | Target probing falls back to the hook cwd for the existing verdict; repo A main remains blocked with exit `2` |
 | `TC-BCOW-011` | Bare commit with hook cwd in repo A linked worktree | Hook exits `0` |
 | `TC-BCOW-012` | A command containing `--amend` from repo A main | Existing blanket exemption remains; hook exits `0` |
 
@@ -33,7 +33,7 @@ These assertions cover all rows of the repository decision table: A main
 | `TC-BCOW-013` | Direct helper contract | Supported match returns canonical cwd/`0`; deterministic ANSI-C non-git input, a NUL segment followed by a non-git suffix, and ordinary no-match input return empty/`1`; unsupported or missing-path match returns empty/`2` |
 | `TC-BCOW-014` | Variable-bearing arguments to `-C`, `-c`, `--git-dir`, `--work-tree`, `--namespace`, and `--super-prefix`, including long `--flag=value` forms and compound statements | Non-commit operations return empty/`1` and the hook exits `0`; variable-bearing or command-substitution operation words return empty/`2` and the hook exits `2` |
 | `TC-BCOW-015` | Bare, looped, chained, and nested-substitution commits; escaped or dynamic global flag spellings; field-splitting, process-substitution, escaped-space, quoted-multiword, and indirect flag operands; dynamic operation words; plus unchanged literal-path, no-global-flag, and linked-worktree contexts | Real or hidden commits remain blocked from repo A main, including commits injected or executed by unsafe option syntax; read-only commands and linked-worktree commits retain their previous outcomes |
-| `TC-BCOW-016` | Proven main-workspace commits from main or linked callers, uncertain resolver context from main or linked callers, missing/non-Git literal targets, and allowed linked/unrelated repositories | The worktree heading appears only for a positively proven main workspace. Resolver rc `2` and repository-probe failures use the unable-to-verify heading. Allowed cases emit no diagnostic |
+| `TC-BCOW-016` | Proven main-workspace commits from main or linked callers, uncertain variable/compound context from main or linked callers, missing/non-Git literal targets from main or linked callers, installing-repository and `git-dir` probe failures, and allowed linked/unrelated repositories | The worktree heading appears only for a positively proven main workspace. An uncertain target preserves the inherited-cwd verdict: main remains blocked with the unable-to-verify heading, while linked remains allowed. Probe failures that cannot establish an allowed state use the unable-to-verify heading, whose remediation content is also pinned |
 
 `TC-BCOW-010` passes all command strings as inert JSON data to the hook. The
 sentinel assertions prove the hook does not execute path-producing input.
@@ -59,7 +59,9 @@ facts:
 | Verified state | Heading | Recovery |
 |---|---|---|
 | Target `git-common-dir` matches the installing repository and target `git-dir == git-common-dir` | `## BLOCKED - Must Use Git Worktree` | Commit from a linked worktree |
-| Resolver returns rc `2`, or a target/common/git-dir probe cannot verify an existing Git repository and worktree state | `## BLOCKED - Unable to Verify Target Repository` | Rewrite as one supported command using a literal path to an existing Git repository |
+| Resolver returns rc `2` or a target probe is uncertain, and the inherited-cwd fallback still blocks; or an installing-repository / `git-dir` probe cannot establish an allowed state | `## BLOCKED - Unable to Verify Target Repository` | Run from the repository or linked worktree whose policy applies, then rewrite as one supported command using a literal path to an existing Git repository |
 
-The unable-to-verify path remains fail-closed. It does not execute command
-text, expand variables, or broaden the resolver grammar.
+The unable-to-verify path does not execute command text, expand variables, or
+broaden the resolver grammar. Resolver and target-probe uncertainty preserves
+the pre-existing inherited-cwd decision: a linked-worktree fallback is still
+allowed, while a blocking fallback selects the unable-to-verify diagnostic.
