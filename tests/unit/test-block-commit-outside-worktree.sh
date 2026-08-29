@@ -127,7 +127,7 @@ assert_resolver() {
 }
 
 echo ""
-echo "=== TC-BCOW-001..015: block-commit command context ==="
+echo "=== TC-BCOW-001..016: block-commit command context ==="
 echo ""
 
 assert_hook_rc \
@@ -566,6 +566,87 @@ assert_resolver \
 assert_hook_rc \
   "TC-BCOW-015t nested command in quoted operand remains blocked" 2 "$REPO_A" \
   'unset p; git -C "${p:-$(git commit -m nested)}" log'
+
+WORKTREE_HEADING="## BLOCKED - Must Use Git Worktree"
+UNVERIFIED_HEADING="## BLOCKED - Unable to Verify Target Repository"
+
+assert_hook_diagnostic() {
+  local id="$1"
+  local cwd="$2"
+  local command="$3"
+  local expected_heading="$4"
+  local forbidden_heading="$5"
+
+  run_hook "$cwd" "$command"
+  if [[ "$HOOK_RC" -ne 2 ]]; then
+    record_fail "$id (expected hook rc=2, got $HOOK_RC: $HOOK_OUTPUT)"
+  elif [[ "$HOOK_OUTPUT" != *"$expected_heading"* ]]; then
+    record_fail "$id (missing diagnostic '$expected_heading': $HOOK_OUTPUT)"
+  elif [[ "$HOOK_OUTPUT" == *"$forbidden_heading"* ]]; then
+    record_fail "$id (unexpected diagnostic '$forbidden_heading': $HOOK_OUTPUT)"
+  else
+    record_pass "$id (hook rc=$HOOK_RC, diagnostic selected)"
+  fi
+}
+
+assert_hook_silent() {
+  local id="$1"
+  local cwd="$2"
+  local command="$3"
+
+  run_hook "$cwd" "$command"
+  if [[ "$HOOK_RC" -eq 0 && -z "$HOOK_OUTPUT" ]]; then
+    record_pass "$id (hook rc=0, no diagnostic)"
+  else
+    record_fail "$id (expected hook rc=0/no output, got rc=$HOOK_RC: $HOOK_OUTPUT)"
+  fi
+}
+
+echo ""
+echo "=== TC-BCOW-016: blocked diagnostic selection ==="
+echo ""
+
+assert_hook_diagnostic \
+  "TC-BCOW-016a bare main-workspace commit uses worktree diagnostic" \
+  "$REPO_A" 'git commit -m main' "$WORKTREE_HEADING" "$UNVERIFIED_HEADING"
+assert_hook_diagnostic \
+  "TC-BCOW-016b explicit main-workspace commit uses worktree diagnostic" \
+  "$REPO_A" "git -C $REPO_A commit -m main" \
+  "$WORKTREE_HEADING" "$UNVERIFIED_HEADING"
+assert_hook_diagnostic \
+  "TC-BCOW-016c linked caller targeting main uses worktree diagnostic" \
+  "$REPO_A_LINKED" "git -C $REPO_A commit -m main" \
+  "$WORKTREE_HEADING" "$UNVERIFIED_HEADING"
+# shellcheck disable=SC2016 # The hook must receive the variable reference literally.
+assert_hook_diagnostic \
+  "TC-BCOW-016d variable target uses unable-to-verify diagnostic" \
+  "$REPO_A" 'git -C "$TARGET_REPO" commit -m variable' \
+  "$UNVERIFIED_HEADING" "$WORKTREE_HEADING"
+# shellcheck disable=SC2016 # The hook must receive the variable reference literally.
+assert_hook_diagnostic \
+  "TC-BCOW-016e linked caller with variable target uses unable-to-verify diagnostic" \
+  "$REPO_A_LINKED" 'git -C "$TARGET_REPO" commit -m variable' \
+  "$UNVERIFIED_HEADING" "$WORKTREE_HEADING"
+assert_hook_diagnostic \
+  "TC-BCOW-016f missing literal target uses unable-to-verify diagnostic" \
+  "$REPO_A" "git -C $MISSING commit -m missing" \
+  "$UNVERIFIED_HEADING" "$WORKTREE_HEADING"
+assert_hook_diagnostic \
+  "TC-BCOW-016g existing non-git target uses unable-to-verify diagnostic" \
+  "$REPO_A" "git -C $NON_GIT commit -m non-git" \
+  "$UNVERIFIED_HEADING" "$WORKTREE_HEADING"
+assert_hook_silent \
+  "TC-BCOW-016h linked-worktree commit remains allowed without diagnostic" \
+  "$REPO_A_LINKED" 'git commit -m linked'
+assert_hook_silent \
+  "TC-BCOW-016i literal unrelated-repo commit remains allowed without diagnostic" \
+  "$REPO_A" "git -C $REPO_B commit -m unrelated"
+assert_hook_silent \
+  "TC-BCOW-016j non-commit command remains allowed without diagnostic" \
+  "$REPO_A" 'git status --short'
+assert_hook_silent \
+  "TC-BCOW-016k amend exemption remains allowed without diagnostic" \
+  "$REPO_A" 'git commit --amend --no-edit'
 
 echo ""
 echo "========================================"

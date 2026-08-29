@@ -17,7 +17,7 @@ so it is safe under the parallel unit runner.
 | `TC-BCOW-006` | Explicit `cd` to repo B linked worktree | Hook exits `0` |
 | `TC-BCOW-007` | Relative, single-quoted, double-quoted, literal/escaped-backslash, escaped-quote, symlinked, tilde, and symlink-plus-`..` paths | Helper returns the canonical target; double-quote escapes are decoded without expansion, and `cd` applies logical dot-segment handling before canonicalization |
 | `TC-BCOW-008` | One two-token `git -C <repo-B> commit`, with absolute/quoted, relative, and symlink-plus-`..` paths | Hook exits `0`; helper resolves from its base directory using physical filesystem traversal |
-| `TC-BCOW-009` | Missing path and existing non-git directory from repo A main | Target probing falls back to hook cwd; hook exits `2` |
+| `TC-BCOW-009` | Missing path and existing non-git directory from repo A main | Target probing remains fail-closed without falling back to hook cwd; hook exits `2` |
 | `TC-BCOW-011` | Bare commit with hook cwd in repo A linked worktree | Hook exits `0` |
 | `TC-BCOW-012` | A command containing `--amend` from repo A main | Existing blanket exemption remains; hook exits `0` |
 
@@ -33,6 +33,7 @@ These assertions cover all rows of the repository decision table: A main
 | `TC-BCOW-013` | Direct helper contract | Supported match returns canonical cwd/`0`; deterministic ANSI-C non-git input, a NUL segment followed by a non-git suffix, and ordinary no-match input return empty/`1`; unsupported or missing-path match returns empty/`2` |
 | `TC-BCOW-014` | Variable-bearing arguments to `-C`, `-c`, `--git-dir`, `--work-tree`, `--namespace`, and `--super-prefix`, including long `--flag=value` forms and compound statements | Non-commit operations return empty/`1` and the hook exits `0`; variable-bearing or command-substitution operation words return empty/`2` and the hook exits `2` |
 | `TC-BCOW-015` | Bare, looped, chained, and nested-substitution commits; escaped or dynamic global flag spellings; field-splitting, process-substitution, escaped-space, quoted-multiword, and indirect flag operands; dynamic operation words; plus unchanged literal-path, no-global-flag, and linked-worktree contexts | Real or hidden commits remain blocked from repo A main, including commits injected or executed by unsafe option syntax; read-only commands and linked-worktree commits retain their previous outcomes |
+| `TC-BCOW-016` | Proven main-workspace commits from main or linked callers, uncertain resolver context from main or linked callers, missing/non-Git literal targets, and allowed linked/unrelated repositories | The worktree heading appears only for a positively proven main workspace. Resolver rc `2` and repository-probe failures use the unable-to-verify heading. Allowed cases emit no diagnostic |
 
 `TC-BCOW-010` passes all command strings as inert JSON data to the hook. The
 sentinel assertions prove the hook does not execute path-producing input.
@@ -48,3 +49,17 @@ sentinel assertions prove the hook does not execute path-producing input.
 | Helper exit contract | `TC-BCOW-007` and `TC-BCOW-013` |
 | Variable global-flag arguments are not operation words | `TC-BCOW-014` |
 | Real and hidden commits remain fail-closed | `TC-BCOW-014` and `TC-BCOW-015` |
+| Blocked diagnostics distinguish proven policy violations from unverified context | `TC-BCOW-016` |
+
+## Blocked diagnostic contract
+
+Both blocked outcomes exit `2`, but their operator guidance reflects different
+facts:
+
+| Verified state | Heading | Recovery |
+|---|---|---|
+| Target `git-common-dir` matches the installing repository and target `git-dir == git-common-dir` | `## BLOCKED - Must Use Git Worktree` | Commit from a linked worktree |
+| Resolver returns rc `2`, or a target/common/git-dir probe cannot verify an existing Git repository and worktree state | `## BLOCKED - Unable to Verify Target Repository` | Rewrite as one supported command using a literal path to an existing Git repository |
+
+The unable-to-verify path remains fail-closed. It does not execute command
+text, expand variables, or broaden the resolver grammar.

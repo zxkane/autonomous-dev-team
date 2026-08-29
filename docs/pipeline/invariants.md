@@ -9384,9 +9384,17 @@ paths from resolving to a repository different from the command's real target.
 canonical `git-common-dir` is outside the installing repository's policy and is
 allowed. A target in the same repository is blocked when canonical `git-dir ==
 git-common-dir` and allowed when they differ, which identifies a linked
-worktree. Helper rc `2`, a missing/non-git target, or a failed canonical probe
-falls back to evaluating the hook cwd; uncertainty never grants a commit. The
-blanket `--amend` exemption remains unchanged.
+worktree. The hook prints `BLOCKED - Must Use Git Worktree` only after those
+repository and worktree identities are positively verified.
+
+Helper rc `2`, a missing/non-git target, an unreadable installing-repository
+identity, or any failed target `git-common-dir` / `git-dir` canonical probe
+remains fail-closed with exit `2`, but prints
+`BLOCKED - Unable to Verify Target Repository`. The diagnostic directs the
+caller to use one supported command with a literal path to an existing Git
+repository; uncertainty is never reported as proof of a main-workspace
+violation and never grants a commit. The blanket `--amend` exemption remains
+unchanged.
 
 The supported grammar is intentionally not a general shell parser. Repeated
 `cd`, mixed `cd` plus `git -C`, wrappers, other git global options, control
@@ -9413,11 +9421,13 @@ command text.
 **Status**: **ENFORCED**.
 
 **Test**: `tests/unit/test-block-commit-outside-worktree.sh`
-(`TC-BCOW-001..015`) covers both repository identities and main/linked
+(`TC-BCOW-001..016`) covers both repository identities and main/linked
 worktrees, all supported path forms, helper return codes, the fail-closed
-syntax matrix, and non-execution sentinels. The exact unrelated-repository
-reproduction is red on the parent implementation and green with this
-invariant. `tests/unit/test-is-git-command-non-executable-regions.sh`
+syntax matrix, non-execution sentinels, and diagnostic selection for proven
+main-workspace violations versus unverified resolver or repository-probe
+context. The exact unrelated-repository reproduction is red on the parent
+implementation and green with this invariant.
+`tests/unit/test-is-git-command-non-executable-regions.sh`
 (`TC-IGC-547-001..175`) covers comment/heredoc false positives, dynamic
 git-free shell consumers, generic/quoted/dynamic operation forms, the
 five-second hook budget, and the fail-closed substitution, interpreter,
