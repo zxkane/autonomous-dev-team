@@ -18,6 +18,7 @@
 #   - _fetch_sha_evidence       — re-fetch a SHA-matching evidence comment
 #   - _run_command_e2e_lane     — the command-mode shell lane (setsid+timeout)
 #   - build_browser_e2e_prompt  — the single browser-mode LLM lane prompt
+#   - _e2e_failure_actionability — strict optional lane-local classification
 #
 # The wrapper (autonomous-review.sh) owns the orchestration: its Phase-A block
 # dispatches command→_run_command_e2e_lane / browser→one run_agent lane, reads
@@ -92,6 +93,56 @@ _classify_e2e_gate() {
     # non-substantive re-queue (transient), not a dev bounce.
     printf 'block-nonsubstantive\n'
   fi
+}
+
+# _e2e_failure_actionability <lane-dir> <classification-file>
+#
+# The wrapper owns both arguments and exports the second to the E2E integration.
+# Absence preserves INV-46's historical fail-open behavior. Once any filesystem
+# object is present, only an exact, small, non-symlink regular file is trusted;
+# ambiguity fails closed to no DEV dispatch. Producers should write a sibling
+# temporary regular file and atomically rename it onto the exported path.
+_e2e_failure_actionability() {
+  local lane_dir="${1:-}" file="${2:-}" size size_after value extra path_id path_id_after fd_id fd
+  [[ -n "$lane_dir" && -n "$file" && "$file" == "$lane_dir/e2e-failure-classification" ]] \
+    || { printf 'false\n'; return 0; }
+  [[ -e "$file" || -L "$file" ]] || { printf 'true\n'; return 0; }
+  [[ -f "$file" && ! -L "$file" ]] || { printf 'false\n'; return 0; }
+  exec {fd}<"$file" 2>/dev/null || { printf 'false\n'; return 0; }
+  [[ -f "$file" && ! -L "$file" ]] \
+    || { exec {fd}<&-; printf 'false\n'; return 0; }
+  path_id=$(stat -Lc '%d:%i' -- "$file" 2>/dev/null) \
+    || { exec {fd}<&-; printf 'false\n'; return 0; }
+  fd_id=$(stat -Lc '%d:%i' -- "/proc/${BASHPID}/fd/$fd" 2>/dev/null) \
+    || { exec {fd}<&-; printf 'false\n'; return 0; }
+  [[ "$path_id" == "$fd_id" ]] \
+    || { exec {fd}<&-; printf 'false\n'; return 0; }
+  size=$(stat -Lc '%s' -- "/proc/${BASHPID}/fd/$fd" 2>/dev/null) \
+    || { exec {fd}<&-; printf 'false\n'; return 0; }
+  [[ "$size" =~ ^[0-9]+$ && "$size" -le 1024 ]] \
+    || { exec {fd}<&-; printf 'false\n'; return 0; }
+  # `read` may return non-zero only for the intentionally rejected missing-EOL
+  # shape; retain its captured bytes so the exact-size check below fails closed.
+  IFS= read -r value <&$fd || true
+  if IFS= read -r -n 1 extra <&$fd; then
+    exec {fd}<&-
+    printf 'false\n'
+    return 0
+  fi
+  size_after=$(stat -Lc '%s' -- "/proc/${BASHPID}/fd/$fd" 2>/dev/null) \
+    || { exec {fd}<&-; printf 'false\n'; return 0; }
+  path_id_after=$(stat -Lc '%d:%i' -- "$file" 2>/dev/null) \
+    || { exec {fd}<&-; printf 'false\n'; return 0; }
+  exec {fd}<&-
+  [[ "$size_after" == "$size" && "$path_id_after" == "$fd_id" ]] \
+    || { printf 'false\n'; return 0; }
+  [[ "$size" == "20" || "$size" == "21" ]] \
+    || { printf 'false\n'; return 0; }
+  case "$value" in
+    dev-actionable=true) [[ "$size" == "20" ]] && printf 'true\n' || printf 'false\n' ;;
+    dev-actionable=false) printf 'false\n' ;;
+    *) printf 'false\n' ;;
+  esac
 }
 
 # ---------------------------------------------------------------------------

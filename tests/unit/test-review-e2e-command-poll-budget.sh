@@ -241,10 +241,12 @@ assert_grep "TC-RPB-REG-03 _aggregate_review_verdicts call unchanged (no INV-40 
 # [Lane-GC PR-3 / INV-112] The crash-trap call site (inside cleanup()) is now
 # wrapped as `_teardown_call emit_verdict_trailer …` (bounded network call) —
 # the regex tolerates an optional `_teardown_call ` prefix so the call-SITE
-# count stays semantically 17 even though one site's literal text changed.
+# count stays semantically stable except for the substantive pre-fan-out E2E
+# route, which now writes its required verdict through the extracted canonical
+# helper in lib-review-mergeable.sh rather than a direct wrapper call site.
 EMIT_COUNT=$(grep -cE '^\s*(_teardown_call )?emit_verdict_trailer ' "$WRAPPER")
-assert_eq "TC-RPB-REG-04 emit_verdict_trailer call count is 19 (17 prior sites + INV-141 launch-refusal and unavailable-hold trailers)" \
-  "19" "$EMIT_COUNT"
+assert_eq "TC-RPB-REG-04 direct emit_verdict_trailer wrapper call count is 18 after E2E required-route extraction" \
+  "18" "$EMIT_COUNT"
 
 # ---------------------------------------------------------------------------
 echo ""

@@ -467,16 +467,32 @@ _review_required_verdict_exists() {
 
 _review_ensure_required_verdict() {
   local issue="$1" head="$2" result="$3" phase="$4"
-  local verdict="$5" cause="${6:-}" trailer exists_rc=0
+  local verdict="$5" cause="${6:-}" dev_actionable="${7:-true}" trailer exists_rc=0
   trailer="$(_render_review_verdict_trailer \
-    "$verdict" "$cause" "true" "$head")" \
+    "$verdict" "$cause" "$dev_actionable" "$head")" \
     || return 1
   _review_required_verdict_exists "$issue" "$head" "$result" "$phase" "$trailer" \
     || exists_rc=$?
   [[ "$exists_rc" -eq 0 ]] && return 0
   [[ "$exists_rc" -eq 1 ]] || return 1
   emit_verdict_trailer_required \
-    "$issue" "${REPO:-}" "$verdict" "$cause" "true" "$head"
+    "$issue" "${REPO:-}" "$verdict" "$cause" "$dev_actionable" "$head"
+}
+
+# Required same-HEAD evidence and transition for a non-conflict pre-fan-out E2E
+# failure. Return codes mirror the conflict route: 20 required write failed,
+# 21 transition failed. Native request-changes remains wrapper-owned and
+# best-effort; it does not own durable routing.
+_review_route_e2e_failure() {
+  local issue="$1" head="$2" dev_actionable="$3"
+  head="$(_review_normalize_full_head "$head")" || return 20
+  [[ "$dev_actionable" == "true" || "$dev_actionable" == "false" ]] || return 20
+  _review_ensure_disposition "$issue" "$head" "e2e-failed" || return 20
+  _review_ensure_required_verdict \
+    "$issue" "$head" "e2e-failed" "pre-fanout" \
+    "failed-substantive" "" "$dev_actionable" || return 20
+  itp_transition_state "$issue" "reviewing" "pending-dev" >/dev/null 2>&1 \
+    || return 21
 }
 
 # Return codes: 0 routed, 20 required write failed, 21 transition failed.

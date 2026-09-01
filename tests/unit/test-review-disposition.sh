@@ -148,6 +148,13 @@ assert_eq "routing helper returns normalized head" "$HEAD_A_LOWER" "$head_out"
 assert_eq "routing helper returns disposition kind" "disposition" "$kind_out"
 assert_eq "routing helper returns disposition result" "conflict-rebase" "$result_out"
 
+e2e_marker="$(_review_disposition_marker 540 "$HEAD_A" e2e-failed)"
+e2e_comments=$(jq -cn --arg marker "$e2e_marker" \
+  '[{id:10,authorKind:"self",body:$marker,createdAt:"2026-07-30T00:02:00Z"}]')
+assert_eq "TC-E2E-ACT-006 strict e2e-failed disposition parses" \
+  "{\"kind\":\"disposition\",\"head\":\"${HEAD_A_LOWER}\",\"result\":\"e2e-failed\"}" \
+  "$(evidence "$e2e_comments")"
+
 comments="$mixed"
 latest_review_routing_evidence \
   540 head_out kind_out result_out "$HEAD_A_LOWER"

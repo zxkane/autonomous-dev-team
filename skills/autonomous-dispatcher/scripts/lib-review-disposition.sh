@@ -25,7 +25,7 @@ _review_disposition_marker() {
   [[ "$issue" =~ ^[1-9][0-9]*$ ]] || return 1
   head="$(_review_normalize_full_head "${2:-}")" || return 1
   case "$result" in
-    conflict-rebase|mergeable-unknown) ;;
+    conflict-rebase|mergeable-unknown|e2e-failed) ;;
     *) return 1 ;;
   esac
   printf '<!-- review-disposition: issue=%s head=%s phase=pre-fanout result=%s -->' \
@@ -77,7 +77,7 @@ _review_routing_candidates_from_comments() {
     def disposition:
       ([
         .body
-        | capture("^<!-- review-disposition: issue=(?<issue>[1-9][0-9]*) head=(?<head>[0-9a-f]{40}) phase=pre-fanout result=(?<result>conflict-rebase|mergeable-unknown) -->\\z")
+        | capture("^<!-- review-disposition: issue=(?<issue>[1-9][0-9]*) head=(?<head>[0-9a-f]{40}) phase=pre-fanout result=(?<result>conflict-rebase|mergeable-unknown|e2e-failed) -->\\z")
       ] | first // null);
     def reviewed:
       ([

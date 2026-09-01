@@ -196,7 +196,8 @@ _e2e_fail_block=$(awk '
   capture && /elif \[\[ "\$E2E_GATE" == "block-nonsubstantive" \]\]; then/ { exit }
 ' "$WRAPPER")
 if grep -qE 'submit_request_changes' <<<"$_e2e_fail_block" \
-   && grep -qE 'emit_verdict_trailer .* "failed-substantive"' <<<"$_e2e_fail_block"; then
+   && grep -qE '_review_route_e2e_failure' <<<"$_e2e_fail_block" \
+   && grep -qE '_review_ensure_required_verdict' "$MG_LIB"; then
   echo -e "  ${GREEN}PASS${NC}: TC-EOG-REG-02 E2E fail branch still requests changes + failed-substantive trailer"
   PASS=$((PASS + 1))
 else
@@ -233,8 +234,8 @@ fi
 # leaving the wrapper-local count at 20. The open-guard itself must not change
 # either count.
 _trailer_count=$(grep -cE '^\s*(if ! )?(_teardown_call )?emit_verdict_trailer ' "$WRAPPER")
-assert_eq "TC-EOG-REG-04 wrapper-local emit_verdict_trailer call count remains 20 after conflict extraction + retry cleanup" \
-  "20" "$_trailer_count"
+assert_eq "TC-EOG-REG-04 wrapper-local emit_verdict_trailer count reflects required E2E route extraction" \
+  "19" "$_trailer_count"
 assert_src "TC-EOG-REG-04 shared conflict route owns the required substantive trailer" \
   grep -qE '_review_ensure_required_verdict' "$MG_LIB"
 

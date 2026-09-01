@@ -2039,6 +2039,10 @@ _AGENT_PGIDS_E2E=""
 if [[ "${E2E_ACTIVE:-false}" == "true" ]]; then
   _E2E_LANE_DIR=$(mktemp -d "/tmp/agent-review-e2e-${ISSUE_NUMBER}-XXXXXX")
   _E2E_RC_FILE="${_E2E_LANE_DIR}/e2e.rc"
+  # Optional integration-owned classification for a non-zero lane result.
+  # Both command and browser lanes inherit this wrapper-private path. Producers
+  # should atomically rename a complete regular file into place.
+  export E2E_FAILURE_CLASSIFICATION_FILE="${_E2E_LANE_DIR}/e2e-failure-classification"
   log "INV-46: running the E2E lane ONCE before the review fan-out (mode=${E2E_MODE})."
   case "${E2E_MODE:-none}" in
     command)
@@ -2135,6 +2139,11 @@ if [[ "${E2E_ACTIVE:-false}" == "true" ]]; then
     fi
   fi
   E2E_GATE=$(_classify_e2e_gate "$_e2e_lane_rc" "$_e2e_evidence_present")
+  _e2e_dev_actionable="true"
+  if [[ "$_e2e_lane_rc" -ne 0 ]]; then
+    _e2e_dev_actionable=$(_e2e_failure_actionability \
+      "$_E2E_LANE_DIR" "$E2E_FAILURE_CLASSIFICATION_FILE")
+  fi
   log "INV-46: E2E hard gate: lane_rc=${_e2e_lane_rc}, evidence_present=${_e2e_evidence_present} → gate=${E2E_GATE}"
 
   # Capture the lane PGID for the reaper / SIGTERM trap (alongside fan-out PGIDs).
@@ -2299,19 +2308,28 @@ Findings->Decision Gate: 1 blocking finding(s) -- FAIL.
 1. **[BLOCKING] E2E verification failed** — the wrapper ran the project E2E once before review (INV-46) and it did NOT pass (lane exit code ${_e2e_lane_rc}). See the E2E failure comment on PR #${PR_NUMBER}. The review agents were NOT run because a failing E2E is a hard gate. Fix the failure and push; the next review round re-runs E2E.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)
 
 ${_gf_marker}" 2>/dev/null || true
-    # INV-92 (#298): a failing E2E is a dev-actionable code defect (fail-open).
-    emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-substantive" "" "true" 2>/dev/null || true
-
-    # INV-52: a failed E2E hard gate is a dev-actionable blocking FAIL — assert
+    # Persist strict same-HEAD routing evidence and the authoritative INV-92
+    # actionability trailer before pending-dev becomes observable. Either write
+    # failing aborts this route closed; cleanup must not fabricate a dispatchable
+    # pending-dev state without the evidence its consumer requires.
+    # INV-52: a failed E2E hard gate is a substantive blocking FAIL — assert
     # it on the PR's GitHub-native state too (reviewDecision → CHANGES_REQUESTED),
     # symmetric with the agent-findings and CONFLICTING substantive routes.
     # Best-effort; the E2E `block-nonsubstantive` (evidence-missing) re-queue
     # below deliberately does NOT request changes (transient, not a code defect).
     submit_request_changes "$PR_NUMBER" \
-      "E2E verification failed (lane exit code ${_e2e_lane_rc}): the wrapper ran the project E2E once before review (INV-46) and it did NOT pass. See the E2E failure comment on PR #${PR_NUMBER}, fix the failure, and push — reviewDecision is set to CHANGES_REQUESTED until a new review with a passing E2E (INV-52)." \
-      || log "WARNING: submit_request_changes returned non-zero (unexpected — helper is best-effort); continuing the FAIL route."
+      "E2E verification failed (lane exit code ${_e2e_lane_rc}): the wrapper ran the project E2E once before review (INV-46) and it did NOT pass. See the E2E failure comment on PR #${PR_NUMBER}; reviewDecision is set to CHANGES_REQUESTED until a new review with a passing E2E (INV-52)." \
+      || log "WARNING: submit_request_changes returned non-zero (best-effort); continuing the E2E FAIL route."
 
-    itp_transition_state "$ISSUE_NUMBER" "reviewing" "pending-dev" 2>/dev/null || true
+    _e2e_route_rc=0
+    _review_route_e2e_failure \
+      "$ISSUE_NUMBER" "$PR_HEAD_SHA" "$_e2e_dev_actionable" \
+      || _e2e_route_rc=$?
+    if [[ "$_e2e_route_rc" -ne 0 ]]; then
+      log "ERROR: required E2E failure route failed (rc=${_e2e_route_rc}); refusing to report a pending-dev transition."
+      RESULT_PARSED=true
+      exit 1
+    fi
     log "Issue #${ISSUE_NUMBER} moved to pending-dev (E2E hard gate fail — no fan-out)."
     RESULT_PARSED=true
     exit 0
