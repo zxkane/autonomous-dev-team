@@ -158,24 +158,26 @@ write_hooks_only_settings() {
 # "wrapper scripts get +x, libs don't". Best-effort: a missing file or
 # read-only filesystem warns and continues; never aborts the installer.
 ensure_dispatcher_scripts_executable() {
-  local root candidate dispatcher_dir
-  root="$(project_root)"
-  dispatcher_dir=""
-  # Resolve the consumer-side dispatcher scripts dir. The skills CLI may
-  # install under .agents/skills/, .claude/skills/, or directly at
-  # skills/ depending on the consumer's project shape. Probe each.
-  for candidate in \
-    "$root/.agents/skills/autonomous-dispatcher/scripts" \
-    "$root/.claude/skills/autonomous-dispatcher/scripts" \
-    "$root/skills/autonomous-dispatcher/scripts"; do
-    if [[ -d "$candidate" ]]; then
-      dispatcher_dir="$candidate"
-      break
-    fi
-  done
-
+  local root candidate
+  local dispatcher_dir="${1:-}"
   if [[ -z "$dispatcher_dir" ]]; then
-    echo "WARN: ensure_dispatcher_scripts_executable: no autonomous-dispatcher/scripts dir found under $root — skipping" >&2
+    root="$(project_root)"
+    # Resolve the consumer-side dispatcher scripts dir. The skills CLI may
+    # install under .agents/skills/, .claude/skills/, or directly at
+    # skills/ depending on the consumer's project shape. Probe each.
+    for candidate in \
+      "$root/.agents/skills/autonomous-dispatcher/scripts" \
+      "$root/.claude/skills/autonomous-dispatcher/scripts" \
+      "$root/skills/autonomous-dispatcher/scripts"; do
+      if [[ -d "$candidate" ]]; then
+        dispatcher_dir="$candidate"
+        break
+      fi
+    done
+  fi
+
+  if [[ -z "$dispatcher_dir" || ! -d "$dispatcher_dir" ]]; then
+    echo "WARN: ensure_dispatcher_scripts_executable: no autonomous-dispatcher/scripts dir found — skipping" >&2
     return 0
   fi
 

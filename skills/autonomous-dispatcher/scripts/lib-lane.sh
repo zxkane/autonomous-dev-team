@@ -29,6 +29,13 @@
 # (flock, setsid — both already mandatory per lib-agent.sh:586/lib-agent.sh's
 # _run_with_timeout).
 
+# [INV-65] two-dir resolution, same pattern as every other sibling lib.
+_LIB_LANE_SELF="${BASH_SOURCE[0]:-$0}"
+_LIB_LANE_RESOLVED="$(readlink -f "$_LIB_LANE_SELF" 2>/dev/null)" \
+  || _LIB_LANE_RESOLVED="$_LIB_LANE_SELF"
+_LIB_LANE_DIR="$(cd "$(dirname "$_LIB_LANE_RESOLVED")" && pwd)"
+unset _LIB_LANE_RESOLVED
+
 # ---------------------------------------------------------------------------
 # ADT_STATE_ROOT canonicalization (F1 completeness, design §4-C1).
 #
@@ -40,20 +47,31 @@
 # lib-run-artifacts.sh use (those DO honor XDG_STATE_HOME) — the lane registry
 # is read by a box-wide, non-project-scoped future GC process, so it needs one
 # canonical anchor that never depends on which shell minted it.
+#
+# install-gc-timer.sh persists a custom root as one raw absolute path in the
+# fixed host-user pointer below. This lets later wrappers/opportunistic GC
+# calls with no ADT_STATE_ROOT environment resolve the same root as cron or
+# launchd. An explicit non-empty environment value still has highest
+# precedence for isolated tests and deliberate one-shot operation.
 # ---------------------------------------------------------------------------
-: "${ADT_STATE_ROOT:=$HOME/.local/state}"
+# shellcheck source=lib-state-root.sh
+source "${_LIB_LANE_DIR}/lib-state-root.sh"
+ADT_STATE_ROOT="$(adt_resolve_state_root)"
 export ADT_STATE_ROOT
-
-# [INV-65] two-dir resolution, same pattern as every other sibling lib.
-_LIB_LANE_SELF="${BASH_SOURCE[0]:-$0}"
-_LIB_LANE_DIR="$(cd "$(dirname "$_LIB_LANE_SELF")" && pwd)"
 
 # _lane_uname — overridable seam for tests (never for production; production
 # always calls the real `uname -s`). Kept as a one-line indirection so a unit
 # test can force the macOS branch (WRAPPER_FINGERPRINT, ps -o lstart=) on a
 # Linux CI runner without actually running on Darwin.
 _lane_uname() {
-  echo "${_LANE_UNAME_OVERRIDE:-$(uname -s 2>/dev/null || echo Linux)}"
+  if [[ -n "${_LANE_UNAME_OVERRIDE:-}" ]]; then
+    printf '%s\n' "$_LANE_UNAME_OVERRIDE"
+    return 0
+  fi
+  local os
+  os="$(uname -s 2>/dev/null)" || os="Unknown"
+  [[ -n "$os" ]] || os="Unknown"
+  printf '%s\n' "$os"
 }
 
 # ---------------------------------------------------------------------------
@@ -662,7 +680,7 @@ _lane_warn() {
 #     ENTIRE probe including the load-bearing linger gate — exactly the
 #     mass-SIGKILL-on-last-logout scenario the design forbids (§4-C7,
 #     platform:F3). A test that needs a deterministic scope-backend lane on
-#     a Linger=no CI/dev box must therefore mutate the LANE FILE directly
+#     an ineligible CI/dev box must therefore mutate the LANE FILE directly
 #     after installation (`lane_set "$LANE_DIR" BACKEND systemd-scope`),
 #     not rely on this override to manufacture a scope backend the real
 #     host doesn't actually support — the override's only reachable
@@ -680,8 +698,7 @@ _lane_warn() {
 #      scope, so this gate is checked before any bus/probe work, and its
 #      absence produces the WARN unconditionally (the other candidate
 #      failures are comparatively rare in production; this one is the
-#      documented default posture on a freshly onboarded host — see the
-#      design's own "this host currently has Linger=no").
+#      documented default posture on a freshly onboarded host).
 #   4. The user bus socket exists (`$XDG_RUNTIME_DIR/bus`, self-exporting
 #      XDG_RUNTIME_DIR exactly like the design's C7 spawn snippet does — the
 #      SSM dispatch chain does not set it).
@@ -712,6 +729,10 @@ _lane_backend() {
   fi
 
   local linger
+  # Known #522 rollout boundary: this P7 probe omits the explicit username.
+  # On the audited host that returns empty even though `show-user "$USER"`
+  # reports yes. P8 leaves the accidental pgid fallback intact because fixing
+  # this alone could enable scopes before `_run_with_timeout` is enrolled.
   linger="$(_lane_bounded 5 loginctl show-user -p Linger --value 2>/dev/null || echo no)"
   if [[ "$linger" != "yes" ]]; then
     _lane_warn "systemd-scope backend requires 'loginctl enable-linger \$USER' (Linger=yes at backend-selection time — without it, the last operator logout cascade-SIGKILLs every enrolled scope), or the linger probe timed out; falling back to pgid"
@@ -965,6 +986,169 @@ _wrapper_fingerprint() {
   printf '%s' "${comm}${ppid}${lstart}" | $hasher 2>/dev/null | awk '{print $1}'
 }
 
+# proc_boot_id — echo Linux's kernel boot UUID. Start ticks alone repeat after
+# reboot, so a persistent delayed-reap identity must bind both values.
+proc_boot_id() {
+  [[ "$(_lane_uname)" == "Linux" ]] || return 1
+  local boot_id
+  IFS= read -r boot_id < /proc/sys/kernel/random/boot_id 2>/dev/null || return 1
+  [[ "$boot_id" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] || return 1
+  printf '%s\n' "$boot_id"
+}
+
+# proc_identity <pid> — echo a compact, whitespace-free identity for a live
+# process. This is the kill-side equivalent of lane_probe's wrapper identity:
+# Linux records boot UUID + /proc starttime ticks; macOS/BSD combines lstart +
+# comm with the spawn-time PPID so a later reparent does not invalidate it.
+# Empty output + rc 1 means the process cannot be identified and MUST NOT be
+# used to authorize delayed GC signaling.
+proc_identity() {
+  local pid="$1" start
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  start="$(proc_start_time "$pid")"
+  [[ -n "$start" ]] || return 1
+
+  if [[ "$(_lane_uname)" == "Linux" ]]; then
+    local boot_id
+    boot_id="$(proc_boot_id)" || return 1
+    printf 'v2-linux:%s:%s\n' "$boot_id" "$start"
+    return 0
+  fi
+
+  local ppid fingerprint
+  ppid="$(proc_ppid "$pid")"
+  [[ "$ppid" =~ ^[0-9]+$ ]] || return 1
+  fingerprint="$(_wrapper_fingerprint "$pid" "$ppid" "$start")"
+  [[ -n "$fingerprint" ]] || return 1
+  printf 'v1-bsd:%s:%s\n' "$ppid" "$fingerprint"
+}
+
+# proc_identity_status <pid> <recorded_identity>
+#   rc 0: the live process matches
+#   rc 1: both identities are readable and differ (proven PID reuse)
+#   rc 2: the recorded/current identity is absent, malformed, or unreadable
+#
+# Callers that signal treat every non-zero status as a refusal. Rule 1.4 may
+# still remove stale metadata on rc=1 because that proves the live PID is NOT
+# the recorded guardian; rc=2 preserves metadata and fails toward leak.
+proc_identity_status() {
+  local pid="$1" recorded="$2" current_start
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 2
+  kill -0 "$pid" 2>/dev/null || return 2
+
+  case "$recorded" in
+    v2-linux:*)
+      local rest="${recorded#v2-linux:}" recorded_boot recorded_start current_boot
+      recorded_boot="${rest%%:*}"
+      recorded_start="${rest#*:}"
+      [[ "$recorded_boot" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] || return 2
+      [[ "$recorded_start" =~ ^[0-9]+$ ]] || return 2
+      current_boot="$(proc_boot_id)" || return 2
+      [[ "$current_boot" == "$recorded_boot" ]] || return 1
+      current_start="$(proc_start_time "$pid")"
+      [[ -n "$current_start" ]] || return 2
+      [[ "$current_start" == "$recorded_start" ]] && return 0
+      return 1
+      ;;
+    v1-linux:*)
+      local recorded_start="${recorded#v1-linux:}"
+      [[ "$recorded_start" =~ ^[0-9]+$ ]] || return 2
+      current_start="$(proc_start_time "$pid")"
+      [[ -n "$current_start" ]] || return 2
+      [[ "$current_start" == "$recorded_start" ]] && return 0
+      return 1
+      ;;
+    v1-bsd:*)
+      local rest="${recorded#v1-bsd:}" recorded_ppid recorded_fingerprint current_fingerprint
+      recorded_ppid="${rest%%:*}"
+      recorded_fingerprint="${rest#*:}"
+      [[ "$recorded_ppid" =~ ^[0-9]+$ ]] || return 2
+      [[ "$recorded_fingerprint" =~ ^[0-9a-fA-F]{64}$ ]] || return 2
+      current_start="$(proc_start_time "$pid")"
+      [[ -n "$current_start" ]] || return 2
+      current_fingerprint="$(_wrapper_fingerprint "$pid" "$recorded_ppid" "$current_start")"
+      [[ -n "$current_fingerprint" ]] || return 2
+      [[ "$current_fingerprint" == "$recorded_fingerprint" ]] && return 0
+      return 1
+      ;;
+    *)
+      return 2
+      ;;
+  esac
+}
+
+proc_identity_matches() {
+  proc_identity_status "$1" "$2"
+}
+
+# Only boot-bound Linux v2 identities are strong enough to authorize delayed
+# signaling. v1 Linux records predate the boot UUID, and the BSD v1 fallback
+# has one-second birth-time granularity; both remain parseable for diagnostics
+# but fail toward leak in enforcement paths.
+proc_identity_is_durable() {
+  [[ "$1" =~ ^v2-linux:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}:[0-9]+$ ]]
+}
+
+# proc_identity_authorizes_signal <pid> <identity> — the only delayed-signal
+# authorization predicate. proc_identity_matches remains diagnostic and may
+# match legacy v1 identities; this helper additionally requires a boot-bound
+# Linux v2 identity before checking the live process.
+proc_identity_authorizes_signal() {
+  local pid="$1" identity="$2"
+  proc_identity_is_durable "$identity" || return 1
+  proc_identity_status "$pid" "$identity"
+}
+
+# _kill_pid_escalate_if_identity <pid> <identity> [grace_secs] — delayed
+# single-PID TERM->grace->KILL with identity checks immediately before both
+# signals. Returns 3 when signaling is refused because the PID is unsafe or
+# its durable identity cannot be matched. A process that exits during the
+# grace window is a clean success.
+_kill_pid_escalate_if_identity() {
+  local pid="$1" identity="$2" grace="${3:-1}"
+  [[ "$pid" =~ ^[0-9]+$ && "$pid" -gt 0 && "$pid" != "$$" ]] || return 3
+  proc_identity_authorizes_signal "$pid" "$identity" || return 3
+  if ! kill -TERM "$pid" 2>/dev/null; then
+    kill -0 "$pid" 2>/dev/null && return 3
+    return 0
+  fi
+  sleep "$grace"
+  kill -0 "$pid" 2>/dev/null || return 0
+  proc_identity_authorizes_signal "$pid" "$identity" || return 3
+  kill -KILL "$pid" 2>/dev/null || true  # Target may exit after the final identity check.
+  return 0
+}
+
+# _kill_group_escalate_if_identities <pid> <pid_identity> <pgid>
+#   <pgid_identity> [grace_secs] — delayed Pass 2/3 group escalation. Both
+# the classified PID and the group leader must retain their durable identities
+# and the PID must still belong to the group immediately before TERM. The
+# leader is revalidated before KILL.
+_kill_group_escalate_if_identities() {
+  local pid="$1" pid_identity="$2" pg="$3" pg_identity="$4" grace="${5:-10}"
+  local own_pg i
+  [[ "$pid" =~ ^[0-9]+$ && "$pid" -gt 0 && "$pid" != "$$" ]] || return 3
+  [[ "$pg" =~ ^[0-9]+$ && "$pg" -gt 1 ]] || return 3
+  own_pg="$(proc_pgid "$$" 2>/dev/null)" || own_pg=""
+  [[ -n "$own_pg" && "$pg" != "$own_pg" ]] || return 3
+  proc_identity_authorizes_signal "$pid" "$pid_identity" || return 3
+  proc_identity_authorizes_signal "$pg" "$pg_identity" || return 3
+  [[ "$(proc_pgid "$pid" 2>/dev/null)" == "$pg" ]] || return 3
+
+  if ! kill -TERM -- "-${pg}" 2>/dev/null; then
+    kill -0 -- "-${pg}" 2>/dev/null && return 3
+    return 0
+  fi
+  for ((i = 0; i < grace; i++)); do
+    kill -0 -- "-${pg}" 2>/dev/null || return 0
+    sleep 1
+  done
+  proc_identity_authorizes_signal "$pg" "$pg_identity" || return 3
+  kill -KILL -- "-${pg}" 2>/dev/null || true
+  return 0
+}
+
 # lane_install <project_id> <lane_id> [worktree] — atomically install the
 # registry dir for <lane_id> (design §4-C1 F1 timing: closes the
 # pre-existence race). Builds the FULL lane KV + pgids + reap.lock inside
@@ -1027,12 +1211,14 @@ lane_install() {
     printf 'WRAPPER_START=%s\n' "$wrapper_start"
     printf 'WRAPPER_FINGERPRINT=%s\n' "$wrapper_fingerprint"
     printf 'GUARDIAN_PID=-\n'
+    printf 'GUARDIAN_IDENTITY=-\n'
     printf 'WORKTREE=%s\n' "$worktree"
     printf 'CHROME_PROFILE_HINT=-\n'
     printf 'CREATED_EPOCH=%s\n' "$(date +%s 2>/dev/null || echo 0)"
     printf 'STATE=live\n'
   } > "${pending}/lane" 2>/dev/null || { rm -rf "$pending" 2>/dev/null; return 1; }
   : > "${pending}/pgids" 2>/dev/null || true
+  : > "${pending}/pgids.lock" 2>/dev/null || true  # Missing lock degrades PGID recording, never lane install.
   : > "${pending}/reap.lock" 2>/dev/null || true
 
   if ! mv -T "$pending" "$final" 2>/dev/null && ! mv "$pending" "$final" 2>/dev/null; then
@@ -1101,18 +1287,30 @@ lane_set_state() {
 }
 
 # lane_record_pgid <lane_dir> <pgid> <role> — append one line to <lane_dir>/pgids:
-# `<pgid> <role> <epoch>`. One write(2) per line — the line is well under the
-# POSIX PIPE_BUF floor (512B), so concurrent appenders (fan-out sidecars, the
-# E2E lane, smoke probes) never interleave partial lines even without an
-# explicit flock (design §4-C1 completeness:F9). Silently no-ops (does not
-# abort the caller) when the lane dir is missing/unwritable — PGID tracking is
-# additive to, never a precondition for, the caller's own operation.
+# `<pgid> <role> <epoch> <identity>`. Identity is `-` only when the process
+# cannot be read at record time; delayed GC refuses such a live record while
+# immediate wrapper/guardian teardown remains best-effort. One write(2) per
+# line under the lane's `pgids.lock`. The lock is required because P8 widens
+# the original three-field schema with a process identity; future schema
+# changes must remain serialized. Silently no-ops (does not abort the caller)
+# when the lane dir/lock is missing or unwritable — PGID tracking is additive
+# to, never a precondition for, the caller's own operation.
 lane_record_pgid() {
-  local lane_dir="$1" pgid="$2" role="${3:-agent}"
+  local lane_dir="$1" pgid="$2" role="${3:-agent}" identity lock_fd
   [[ -n "$lane_dir" && -d "$lane_dir" ]] || return 0
   [[ "$pgid" =~ ^[0-9]+$ ]] || return 0
-  printf '%s %s %s\n' "$pgid" "$role" "$(date +%s 2>/dev/null || echo 0)" \
+  identity="$(proc_identity "$pgid" 2>/dev/null)" || identity="-"
+  # Scope stderr suppression to this group. Attaching `2>/dev/null` directly
+  # to a commandless `exec` would permanently redirect the caller's stderr.
+  { exec {lock_fd}>>"${lane_dir}/pgids.lock"; } 2>/dev/null || return 0
+  flock -w 5 "$lock_fd" 2>/dev/null || { exec {lock_fd}>&-; return 0; }
+  if [[ -e "${lane_dir}/pgids.closed" || -L "${lane_dir}/pgids.closed" ]]; then
+    exec {lock_fd}>&-
+    return 0
+  fi
+  printf '%s %s %s %s\n' "$pgid" "$role" "$(date +%s 2>/dev/null || echo 0)" "$identity" \
     >> "${lane_dir}/pgids" 2>/dev/null || true
+  exec {lock_fd}>&-
   return 0
 }
 
@@ -1290,7 +1488,175 @@ _lane_scope_kill() {
   return 0
 }
 
-# lane_kill <lane_dir> [grace_secs] — registry-authoritative TERM→grace→KILL
+# _lane_recorded_identity_for_pgid <pgids_file> <pgid> — echo one recorded
+# identity that matches the CURRENT process at pid==pgid. A process-group
+# leader is its own pid; if that leader exited while members remain, delayed
+# GC cannot prove the surviving group is still the recorded one and refuses
+# it. Duplicate records are allowed: one matching identity is sufficient.
+_lane_recorded_identity_for_pgid() {
+  local pgids_file="$1" wanted="$2"
+  local pg _role _epoch identity _extra
+  while read -r pg _role _epoch identity _extra; do
+    [[ "$pg" == "$wanted" ]] || continue
+    [[ -n "$identity" && "$identity" != "-" ]] || continue
+    proc_identity_is_durable "$identity" || continue
+    if proc_identity_authorizes_signal "$wanted" "$identity"; then
+      printf '%s\n' "$identity"
+      return 0
+    fi
+  done < "$pgids_file"
+  return 1
+}
+
+# lane_delayed_signal_backend_verified <lane_dir> — delayed GC accepts only
+# the exact portable backend. Missing, unknown, and systemd-scope records all
+# fail closed until #522 proves complete wrapper enrollment.
+lane_delayed_signal_backend_verified() {
+  local lane_dir="$1" backend
+  backend="$(lane_get "$lane_dir" BACKEND 2>/dev/null)" || return 3
+  [[ "$backend" == "pgid" ]] || return 3
+}
+
+# lane_pgid_identities_verified <lane_dir> — delayed-GC preflight. Every live
+# recorded process group must be safe (>1, not this caller's own group) and
+# have a matching leader identity. Returns 3 when any live group is
+# unverifiable/recycled; no signals are sent. Missing/dead groups return 0.
+lane_pgid_identities_verified() {
+  local lane_dir="$1"
+  local pgids_file="${lane_dir}/pgids"
+  lane_delayed_signal_backend_verified "$lane_dir" || return 3
+  [[ -f "$pgids_file" ]] || return 0
+
+  local pgids_lock_fd=""
+  [[ -f "${lane_dir}/pgids.lock" ]] || return 3
+  { exec {pgids_lock_fd}>>"${lane_dir}/pgids.lock"; } 2>/dev/null || return 3
+  if ! flock -w 5 "$pgids_lock_fd" 2>/dev/null; then
+    exec {pgids_lock_fd}>&-
+    return 3
+  fi
+
+  local own_pg
+  own_pg="$(proc_pgid "$$" 2>/dev/null)" || own_pg=""
+  local seen=() pg result=0
+  while read -r pg _rest; do
+    [[ "$pg" =~ ^[0-9]+$ ]] || continue
+    local already=0 s
+    for s in "${seen[@]:-}"; do [[ "$s" == "$pg" ]] && { already=1; break; }; done
+    [[ "$already" -eq 1 ]] && continue
+    seen+=("$pg")
+
+    if [[ "$pg" -le 1 || -z "$own_pg" || "$pg" == "$own_pg" ]]; then
+      result=3
+      break
+    fi
+    kill -0 -- "-${pg}" 2>/dev/null || continue
+    if ! _lane_recorded_identity_for_pgid "$pgids_file" "$pg" >/dev/null; then
+      result=3
+      break
+    fi
+  done < "$pgids_file"
+  exec {pgids_lock_fd}>&-
+  return "$result"
+}
+
+# _lane_kill_strict_pgids <lane_dir> <pgids_file> <grace_secs> — delayed-GC
+# two-phase signaling. The whole lane is revalidated before any TERM; after
+# one shared grace interval, every surviving leader is revalidated before the
+# KILL phase starts. Each leader is then revalidated again immediately before
+# its own TERM/KILL. Phase-preflight refusal sends nothing in that phase;
+# signal-time refusal stops the remaining signals and returns 3.
+_lane_kill_strict_pgids() {
+  local lane_dir="$1" pgids_file="$2" grace="$3"
+  lane_delayed_signal_backend_verified "$lane_dir" || return 3
+  [[ -f "$pgids_file" ]] || return 0
+
+  local own_pg
+  own_pg="$(proc_pgid "$$" 2>/dev/null)" || own_pg=""
+  [[ -n "$own_pg" ]] || return 3
+
+  local pgids_lock_fd=""
+  [[ -f "${lane_dir}/pgids.lock" ]] || return 3
+  { exec {pgids_lock_fd}>>"${lane_dir}/pgids.lock"; } 2>/dev/null || return 3
+  if ! flock -w 5 "$pgids_lock_fd" 2>/dev/null; then
+    exec {pgids_lock_fd}>&-
+    return 3
+  fi
+  if ! : > "${lane_dir}/pgids.closed" 2>/dev/null; then
+    exec {pgids_lock_fd}>&-
+    return 3
+  fi
+
+  local strict_pgids=() strict_identities=()
+  local pg identity already s scan_rc=0
+  while read -r pg _rest; do
+    [[ "$pg" =~ ^[0-9]+$ ]] || continue
+    already=0
+    for s in "${strict_pgids[@]:-}"; do
+      [[ "$s" == "$pg" ]] && { already=1; break; }
+    done
+    [[ "$already" -eq 1 ]] && continue
+    if [[ "$pg" -le 1 || "$pg" == "$own_pg" ]]; then
+      scan_rc=3
+      break
+    fi
+    kill -0 -- "-${pg}" 2>/dev/null || continue
+    if ! identity="$(_lane_recorded_identity_for_pgid "$pgids_file" "$pg")"; then
+      if kill -0 -- "-${pg}" 2>/dev/null; then
+        scan_rc=3
+        break
+      fi
+      continue
+    fi
+    strict_pgids+=("$pg")
+    strict_identities+=("$identity")
+  done < "$pgids_file"
+  exec {pgids_lock_fd}>&-
+  [[ "$scan_rc" -eq 0 ]] || return "$scan_rc"
+
+  local i
+  for ((i = 0; i < ${#strict_pgids[@]}; i++)); do
+    kill -0 -- "-${strict_pgids[$i]}" 2>/dev/null || continue
+    proc_identity_authorizes_signal "${strict_pgids[$i]}" "${strict_identities[$i]}" || return 3
+  done
+
+  for ((i = 0; i < ${#strict_pgids[@]}; i++)); do
+    pg="${strict_pgids[$i]}"
+    kill -0 -- "-${pg}" 2>/dev/null || continue
+    proc_identity_authorizes_signal "$pg" "${strict_identities[$i]}" || return 3
+    kill -TERM -- "-${pg}" 2>/dev/null || true  # Group may exit after the signal-time revalidation.
+  done
+
+  local tick any_live
+  for ((tick = 0; tick < grace; tick++)); do
+    any_live=0
+    for pg in "${strict_pgids[@]:-}"; do
+      if kill -0 -- "-${pg}" 2>/dev/null; then
+        any_live=1
+        break
+      fi
+    done
+    [[ "$any_live" -eq 1 ]] || return 0
+    sleep 1
+  done
+
+  local survivors=() survivor_identities=()
+  for ((i = 0; i < ${#strict_pgids[@]}; i++)); do
+    pg="${strict_pgids[$i]}"
+    kill -0 -- "-${pg}" 2>/dev/null || continue
+    proc_identity_authorizes_signal "$pg" "${strict_identities[$i]}" || return 3
+    survivors+=("$pg")
+    survivor_identities+=("${strict_identities[$i]}")
+  done
+  for ((i = 0; i < ${#survivors[@]}; i++)); do
+    pg="${survivors[$i]}"
+    kill -0 -- "-${pg}" 2>/dev/null || continue
+    proc_identity_authorizes_signal "$pg" "${survivor_identities[$i]}" || return 3
+    kill -KILL -- "-${pg}" 2>/dev/null || true  # Survivor may exit after the signal-time revalidation.
+  done
+  return 0
+}
+
+# lane_kill <lane_dir> [grace_secs] [identity_policy] — registry-authoritative TERM→grace→KILL
 # over every DISTINCT pgid recorded in <lane_dir>/pgids, PLUS (design §4-C7;
 # INV-120) the cgroup fast path when this lane's own recorded BACKEND is
 # `systemd-scope` — see `_lane_scope_kill` immediately above. The scope path
@@ -1300,9 +1666,12 @@ _lane_scope_kill() {
 # silently no-ops for any reason, e.g. an already-collected transient unit,
 # must never leave a still-registered pgid unreaped).
 #
-# Does NOT consult lane_probe — callers (the kill_stale_wrapper delegate,
-# guardian, GC) decide liveness first; this function only performs the
-# escalation once a caller has decided a lane's residue should die.
+# Does NOT consult lane_probe — callers decide lane liveness first.
+# `identity_policy=require-identity` is reserved for delayed GC: every live
+# group must match the durable fourth pgids field before ANY scope/group
+# signal is sent, otherwise rc=3 and the whole lane fails toward leak.
+# Immediate ownership paths omit the policy and retain their existing
+# best-effort behavior.
 # Idempotent: an already-empty/missing pgids file (and, for the scope path,
 # an already-gone unit) is a clean no-op.
 #
@@ -1323,18 +1692,36 @@ _lane_scope_kill() {
 # wall-clock stays ~grace regardless of how many groups are recorded, not
 # grace*N.
 lane_kill() {
-  local lane_dir="$1" grace="${2:-10}"
+  local lane_dir="$1" grace="${2:-10}" identity_policy="${3:-best-effort}"
   local pgids_file="${lane_dir}/pgids"
 
+  case "$identity_policy" in
+    best-effort|require-identity) ;;
+    *) return 2 ;;
+  esac
+
   local lock_fd=""
-  if [[ -f "${lane_dir}/reap.lock" ]]; then
-    exec {lock_fd}>>"${lane_dir}/reap.lock" 2>/dev/null || lock_fd=""
+  if [[ "$identity_policy" == "require-identity" ]]; then
+    [[ -f "${lane_dir}/reap.lock" ]] || return 3
+    { exec {lock_fd}>>"${lane_dir}/reap.lock"; } 2>/dev/null || return 3
+    if ! flock -w 10 "$lock_fd" 2>/dev/null; then
+      exec {lock_fd}>&-
+      return 3
+    fi
+  elif [[ -f "${lane_dir}/reap.lock" ]]; then
+    { exec {lock_fd}>>"${lane_dir}/reap.lock"; } 2>/dev/null || lock_fd=""
     [[ -n "$lock_fd" ]] && { flock -w 10 "$lock_fd" 2>/dev/null || true; }
   fi
 
-  _lane_scope_kill "$lane_dir" "$grace"
+  if [[ "$identity_policy" == "require-identity" ]]; then
+    local strict_rc=0
+    _lane_kill_strict_pgids "$lane_dir" "$pgids_file" "$grace" || strict_rc=$?
+    [[ -n "$lock_fd" ]] && exec {lock_fd}>&-
+    return "$strict_rc"
+  fi
 
   if [[ ! -f "$pgids_file" ]]; then
+    _lane_scope_kill "$lane_dir" "$grace"
     [[ -n "$lock_fd" ]] && exec {lock_fd}>&-
     return 0
   fi
@@ -1349,6 +1736,8 @@ lane_kill() {
     [[ "$already" -eq 1 ]] && continue
     seen+=("$pg")
   done < "$pgids_file"
+
+  _lane_scope_kill "$lane_dir" "$grace"
 
   if [[ "${#seen[@]}" -gt 0 ]]; then
     # [INV-114] Escalator pgid isolation (review round-8 [P1], same class as

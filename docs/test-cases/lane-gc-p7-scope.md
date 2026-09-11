@@ -17,42 +17,47 @@ sufficient alone; any missing prerequisite is a silent, complete fallback.
    `_lane_scope_kill()` (the TERM → poll → `cgroup.kill` fast path);
    `lane_install()` records the probed `BACKEND`/`UNIT` instead of the
    PR-2-era hardcoded `BACKEND=pgid`/`UNIT=-`; `lane_spawn()` dispatches on
-   the lane's own recorded backend; `lane_kill()` calls the scope fast path
-   BEFORE its existing pgid escalation, unconditionally, every time
-   (defense in depth — the pgid escalation always also runs).
+   the lane's own recorded backend; best-effort `lane_kill()` calls the scope
+   fast path BEFORE its existing pgid escalation (defense in depth — the pgid
+   escalation always also runs). P8's delayed-GC `require-identity` policy is
+   the explicit exception and refuses scope pending #522.
 2. **`skills/autonomous-dispatcher/scripts/lib-guardian.sh`**: `do_reap()`
    gains the identical `_lane_scope_kill()` call in the identical position.
 3. **`skills/autonomous-dispatcher/scripts/adt-gc.sh`**: `--doctor` gains a
    bus-socket-reachability check and a `backend_eligibility=` summary line.
-   No GC decision-table changes — rule 1.3's existing `lane_kill` call
-   inherits the scope path for free.
+   P7 originally let rule 1.3 inherit the scope path; P8 now refuses that
+   delayed strict path until #522 proves full-wrapper enrollment.
 
 Test runner: `bash tests/unit/test-lane-gc-p7-scope.sh` (auto-discovered by
 the CI `hermetic-unit` job's `tests/unit/test-*.sh` glob). No new E2E job —
 see `docs/designs/lane-gc-p7-scope.md`'s CI-feasibility section for why
 (GitHub-hosted `ubuntu-latest` runners have no linger/user-bus by default;
-deferred to a follow-up PR that must land before PR-8's enforcement flip,
-matching the parent design's own macOS-runner-deferral precedent).
+deferred to a follow-up). The production host is already `Linger=yes`, but
+the current no-user probe returns empty and falls back to PGID. P8 leaves
+that probe unchanged and makes its explicit-user correction plus the
+full-wrapper E2E hard prerequisites for scope enablement; it does not claim
+this deferred coverage passed.
 
 **Test-class legend** used throughout this doc:
 - **REAL** — runs against this box's actual `systemd-run`/`loginctl`/
-  `systemctl`, no shim. Proves genuine behavior, not merely argv shape.
+  `systemctl`, no shim, and skips explicitly when the host does not satisfy
+  the scenario's prerequisite. Proves genuine behavior, not merely argv shape.
 - **SHIM** — a PATH-prepended fixture script replaces `systemd-run`/
   `systemctl`/`loginctl` to force/observe a specific branch. Proves
   selection logic and kill-path command construction ONLY — see the
   "Honest-scope note" in the design doc for exactly what a shim cannot
   prove.
 
-## Backend selection — REAL refusal on this Linger=no host (design AC:
+## Backend selection — REAL refusal when the host is Linger=no (design AC:
 "linger=no host: backend probe refuses systemd-scope with WARN,
 `BACKEND=pgid` recorded, wrapper spawns fine")
 
 | ID | Scenario | Expected | Class |
 |----|----------|----------|-------|
-| TC-LGC7-001 | `_lane_backend()` called directly on this suite's real host (no override) | echoes `pgid` (this host's real `Linger` value is not `yes`) | REAL |
-| TC-LGC7-002 | Same call, stderr captured | one `[lib-lane] WARN:` line naming linger explicitly | REAL |
-| TC-LGC7-003 | `lane_install` with no override on this host | lane file's `BACKEND=pgid`, `UNIT=-` | REAL |
-| TC-LGC7-004 | `lane_spawn`+`lane_kill` roundtrip against that lane | wrapper spawns and is killed exactly as pre-PR-7 (no scope machinery invoked) | REAL |
+| TC-LGC7-001 | `_lane_backend()` called directly on this suite's real host (no override) | on an explicit-user `Linger!=yes` host, echoes `pgid`; otherwise SKIP with the actual value | REAL, conditional |
+| TC-LGC7-002 | Same call, stderr captured | on an explicit-user `Linger!=yes` host, one `[lib-lane] WARN:` line names linger; otherwise SKIP | REAL, conditional |
+| TC-LGC7-003 | `lane_install` with no override on this host | on an explicit-user `Linger!=yes` host, lane file has `BACKEND=pgid`, `UNIT=-`; otherwise SKIP | REAL, conditional |
+| TC-LGC7-004 | force `BACKEND=pgid`, then run `lane_spawn`+`lane_kill` | wrapper spawns and is killed exactly as pre-PR-7, independent of host linger state | REAL |
 
 ## Backend selection — per-prerequisite isolation (design AC: "probe-failure
 host falls back to pgid backend with `BACKEND=pgid` recorded")
@@ -71,7 +76,7 @@ var must never enroll scopes past the real linger gate)
 
 | ID | Scenario | Expected | Class |
 |----|----------|----------|-------|
-| TC-LGC7-080 | `ADT_LANE_BACKEND_OVERRIDE=systemd-scope` on THIS suite's real Linger=no host | still `pgid` — the override REQUESTS scope but the real linger check still refuses it; the override cannot bypass the check | REAL |
+| TC-LGC7-080 | `ADT_LANE_BACKEND_OVERRIDE=systemd-scope` on a real explicit-user `Linger!=yes` host | still `pgid`; on `Linger=yes`, SKIP and rely on TC-LGC7-011 for the refusal branch | REAL, conditional |
 | TC-LGC7-080c | `ADT_LANE_BACKEND_OVERRIDE=pgid` | unconditionally `pgid`, no checks run at all (the only direction the override may safely force) | REAL |
 
 ## Unit naming (design AC: "unit-name collision test (two lanes, same
@@ -92,10 +97,10 @@ registration failure must never mean the payload silently never ran)
 
 | ID | Scenario | Expected | Class |
 |----|----------|----------|-------|
-| TC-LGC7-023 | `lane_spawn` with an intentionally-invalid unit (`bad@unit-name`, verified to make `systemd-run` reject registration outright) | the payload (a marker-file `touch`) STILL RUNS, via the pgid fallback | REAL |
-| TC-LGC7-023b | Same | `lane_spawn`'s own reported rc is the FALLBACK payload's real exit code, never a leaked internal sentinel | REAL |
-| TC-LGC7-023c | Same, stderr captured | a WARN names the registration failure and the fallback | REAL |
-| TC-LGC7-024 | Same scenario, payload increments a counter file | counter is exactly `1` — the fallback runs the payload EXACTLY ONCE, never twice | REAL |
+| TC-LGC7-023 | `lane_spawn` with a PATH-shimmed `systemd-run` that emits its registration-failure diagnostic and exits before payload exec | the payload (a marker-file `touch`) STILL RUNS, via the pgid fallback | SHIM |
+| TC-LGC7-023b | Same | `lane_spawn`'s own reported rc is the FALLBACK payload's real exit code, never a leaked internal sentinel | SHIM |
+| TC-LGC7-023c | Same, stderr captured | a WARN names the registration failure and the fallback | SHIM |
+| TC-LGC7-024 | Same scenario, payload increments a counter file | counter is exactly `1` — the fallback runs the payload EXACTLY ONCE, never twice | SHIM |
 | TC-LGC7-025 | A GENUINE payload failure (valid unit, payload itself `exit 9`) | counter is exactly `1` (no spurious fallback/double-run) AND `lane_spawn`'s rc is exactly `9` (the real payload exit code, unchanged) | REAL |
 
 ## Bounded systemd/loginctl calls (review round-1 P1-2/P2-1 fix — no call
@@ -160,8 +165,8 @@ afterward regardless of what the scope path did or didn't reap")
 
 | ID | Scenario | Expected | Class |
 |----|----------|----------|-------|
-| TC-LGC7-080 | `lane_install` with `ADT_LANE_BACKEND_OVERRIDE=systemd-scope` | lane file: `BACKEND=systemd-scope`, `UNIT=adt-<lane_id_fs>` | REAL |
-| TC-LGC7-081 | `lane_install` with no override, on this Linger=no host | lane file: `BACKEND=pgid`, `UNIT=-` | REAL |
+| TC-LGC7-080 | `lane_install` requests `ADT_LANE_BACKEND_OVERRIDE=systemd-scope` on a real explicit-user `Linger!=yes` host | lane file remains `BACKEND=pgid`, `UNIT=-`; `Linger=yes` hosts SKIP this refusal scenario | REAL, conditional |
+| TC-LGC7-081 | `lane_install` with no override on a real explicit-user `Linger!=yes` host | lane file: `BACKEND=pgid`, `UNIT=-`; `Linger=yes` hosts SKIP | REAL, conditional |
 
 ## Regression pin — pgid path fully unaffected (design's own acceptance
 gate: "pgid path byte-equivalent when backend=pgid — existing tests must
@@ -177,7 +182,7 @@ reaped correctly by the same GC pass")
 
 | ID | Scenario | Expected | Class |
 |----|----------|----------|-------|
-| TC-LGC7-100 | Two dead lanes under one `ADT_STATE_ROOT`: one real pgid lane, one lane whose file claims `BACKEND=systemd-scope` but whose `UNIT` was never actually created (degraded/mixed fleet) | `adt-gc.sh --kill` (or direct `lane_kill` calls, matching GC rule 1.3's own call shape) reaps BOTH with no error — the scope path degrades silently to pgid-only reaping for the second lane | REAL |
+| TC-LGC7-100 | Two dead lanes under one `ADT_STATE_ROOT`: one real pgid lane, one lane whose file claims `BACKEND=systemd-scope` but whose `UNIT` was never actually created (degraded/mixed fleet) | best-effort direct `lane_kill` reaps BOTH with no error — the scope path degrades silently to pgid-only reaping for the second lane; P8's later strict-GC refusal is covered by TC-LGC8-018 | REAL |
 
 ## Honest-scope note (repeated from the design doc, load-bearing enough to
 restate here)
@@ -185,7 +190,13 @@ restate here)
 SHIM-class tests prove selection logic and kill-path **command
 construction** — they cannot and do not prove real cgroup/kernel semantics.
 Those are proven instead by the REAL-class tests above (TC-LGC7-040..045),
-which run directly against this suite's own host's real systemd/kernel. A
-host where `systemd-run`/`loginctl`/`systemctl` are entirely absent from
-`PATH` SKIPs the REAL-class tests with an explicit `SKIP (reason: ...)`
+which exercise the `lane_spawn` primitive against a real systemd/kernel. They
+do **not** prove full-wrapper enrollment: the production agent chokepoint
+`_run_with_timeout` still starts the agent through plain `setsid` rather than
+calling `lane_spawn`. The production host is already `Linger=yes`; the
+current no-user probe returns empty and happens to keep it on PGID. P8 does
+not treat that as proof of correct scope gating. Full-wrapper scope enablement
+remains gated on the explicit-user probe correction and follow-up E2E in
+`docs/designs/lane-gc-p8-enforcement.md`. A host where the real primitive
+cannot run SKIPs the REAL-class tests with an explicit `SKIP (reason: ...)`
 line — never a silent pass, and never a fabricated result.

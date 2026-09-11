@@ -115,15 +115,17 @@ symlink_into_dispatcher_dir() {
 }
 
 # Resolve the on-disk autonomous-dispatcher scripts dir and
-# autonomous-common hooks dir. Mirrors lib-installer.sh's probe order so
-# a consumer with .agents/skills/, .claude/skills/, or vendored skills/
-# all bootstrap the same way.
+# autonomous-common hooks dir. Project-local roots retain precedence. The
+# invoked installer's canonical skills root is the fallback for user-scope
+# installs onboarding a project that intentionally has no vendored skill copy.
 DISPATCHER_DIR=""
 HOOKS_DIR=""
+INVOKED_SKILLS_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd -P)"
 for base in \
   "$ROOT/.agents/skills" \
   "$ROOT/.claude/skills" \
-  "$ROOT/skills"; do
+  "$ROOT/skills" \
+  "$INVOKED_SKILLS_ROOT"; do
   if [[ -d "$base/autonomous-dispatcher/scripts" ]]; then
     DISPATCHER_DIR="$base/autonomous-dispatcher/scripts"
     HOOKS_DIR="$base/autonomous-common/hooks"
@@ -137,6 +139,7 @@ ERROR: cannot find autonomous-dispatcher skill on disk under:
   $ROOT/.agents/skills/
   $ROOT/.claude/skills/
   $ROOT/skills/
+  invoked installer root: $INVOKED_SKILLS_ROOT/
 
 Install the skills first:
   npx skills add zxkane/autonomous-dev-team -a claude-code -y
@@ -349,6 +352,6 @@ if (( INSTALL_GIT_HOOK == 1 )); then
   install_per_worktree_pre_push
 fi
 
-ensure_dispatcher_scripts_executable
+ensure_dispatcher_scripts_executable "$DISPATCHER_DIR"
 
 echo "Done. Project-side scripts/ + hooks symlinks are in sync with the installed skills." >&2
