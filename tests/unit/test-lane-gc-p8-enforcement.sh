@@ -1083,7 +1083,7 @@ assert_identity_capture_precedes "_gc_pass2" \
   '_gc_env_unknowable|env_lookup' \
   "TC-LGC8-022a: Pass 2 binds PID identity before env classification"
 assert_identity_capture_precedes "_gc_pass3_chrome_lane_scoped" \
-  'argv=.*proc_argv' \
+  'profile=.*_gc_chrome_profile' \
   "TC-LGC8-022b: Pass 3.1 binds PID identity before argv classification"
 assert_identity_capture_precedes "_gc_pass3_chrome_heuristic" \
   'argv=.*proc_argv' \
@@ -1092,7 +1092,7 @@ assert_identity_capture_precedes "_gc_pass3_wedged_gh" \
   'argv=.*proc_argv' \
   "TC-LGC8-022d: Pass 3.3 binds PID identity before argv classification"
 assert_identity_capture_precedes "_gc_pass3_e2e_servers" \
-  'cwd=.*readlink' \
+  'read -r -d.*cwd.*readlink' \
   "TC-LGC8-022e: Pass 3.4 binds PID identity before cwd classification"
 
 if grep -Eq '_GC_CANDIDATE_(PID|PG)_IDENTITY' "$ADT_GC"; then
@@ -1140,11 +1140,11 @@ TEST_SCAN_LANES="$SCAN_LANES" TEST_SCAN_PIDS="$SCAN_PIDS" \
   }
   proc_identity() { printf "v2-linux:00000000-0000-0000-0000-000000000000:%s\n" "$1"; }
   proc_identity_is_durable() { return 0; }
-  proc_argv() {
+  _gc_chrome_profile() {
     local n
     n="$(( $(cat "$TEST_ARGV_COUNT") + 1 ))"
     printf "%s\n" "$n" > "$TEST_ARGV_COUNT"
-    printf "unrelated-process\n"
+    printf "/unrelated/profile\n"
   }
   _gc_log() { :; }
   GC_MODE=dry-run
@@ -1188,7 +1188,7 @@ TEST_SCAN_LANES="$SCAN_LANES" TEST_SCAN_PIDS="$SCAN_PIDS" \
     local n
     n="$(( $(cat "$TEST_CWD_COUNT") + 1 ))"
     printf "%s\n" "$n" > "$TEST_CWD_COUNT"
-    printf "/unrelated/cwd\n"
+    printf "/unrelated/cwd\0"
   }
   _gc_log() { :; }
   GC_MODE=dry-run

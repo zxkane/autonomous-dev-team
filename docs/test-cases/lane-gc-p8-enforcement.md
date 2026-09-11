@@ -62,3 +62,26 @@ Test runner: `bash tests/unit/test-lane-gc-p8-enforcement.sh`.
 
 All fixtures use a fresh `ADT_STATE_ROOT`; the tests never inspect or mutate the
 operator's real lane registry.
+
+## Pass 3 ownership boundaries (acceptance fixes)
+
+Run `bash tests/unit/test-lane-gc-p8-boundaries.sh`. The fixture uses a fresh
+registry and real same-user processes with isolated process groups. Candidate
+enumeration is limited to the fixture; process identity, ownership guards,
+argv and cwd reads are the production implementations. All GC calls are
+classification-only, and cleanup signals only fixture-owned groups.
+
+| ID | Scenario | Expected |
+|---|---|---|
+| TC-LGC8-B01 | Missing `worktree` and live sibling `worktree-other` | Rule 3.4 refuses the unrelated process |
+| TC-LGC8-B02 | Deleted worktree root or deleted descendant; paths containing spaces | Rule 3.4 still classifies true residue |
+| TC-LGC8-B03 | Worktree still exists | Rule 3.4 does not classify it |
+| TC-LGC8-B04 | Exact profile in canonical `--user-data-dir=value` | Rule 3.1 classifies the matching dead-lane residue |
+| TC-LGC8-B05 | Profile prefix collision, unrelated argument, or embedded option text | Rule 3.1 refuses all unrelated processes |
+| TC-LGC8-B06 | Profile path contains whitespace or shell metacharacters | Only exact complete argument values match; nothing executes |
+| TC-LGC8-B07 | Separate-value, single-hyphen, duplicate, empty, missing, relative or whitespace-normalized profile options; option after `--`; newline injection | Fail toward leak without classification |
+| TC-LGC8-B08 | All boundary cases | Fixture survives dry-run and legacy counter remains zero |
+
+Linux raw NUL-delimited argv is required for delayed rule 3.1 authority.
+Formatted or newline-delimited command text is never substituted when raw
+argv cannot be read. The existing non-Linux delayed-signal guard remains.

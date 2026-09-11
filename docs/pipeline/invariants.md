@@ -6865,6 +6865,15 @@ _Triage (issue #236): [machine-checked: tests/unit/test-lane-gc-p4-gc.sh, tests/
 
 ---
 
+**P8 acceptance boundary correction (#384):** rule 3.4 matches only the exact
+missing worktree or a slash-delimited descendant, preserving raw cwd bytes
+including newlines. Rule 3.1 reads NUL-delimited Linux argv once per candidate
+and requires one unambiguous, complete absolute `--user-data-dir` value equal
+to the lane hint. Neither sibling path prefixes nor profile text embedded in
+another argument proves lane ownership. Duplicate, malformed, unreadable, or
+multiline profile values fail toward leak. Regression surface:
+`tests/unit/test-lane-gc-p8-boundaries.sh` (real-process dry-run cases).
+
 ## INV-118: each lane runs a `setsid`-detached guardian holding the read end of `guard.fifo`; the wrapper's write end is opened before the guardian ever spawns, so kernel EOF on any death — including SIGKILL/OOM — triggers an idempotent, lane-scoped reap
 
 _Triage (issue #236): [machine-checked: tests/unit/test-lane-gc-p5-guardian.sh]_
