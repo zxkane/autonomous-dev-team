@@ -179,7 +179,7 @@ reading remote lane markers.
 
 ## Verification
 
-`tests/unit/test-lane-gc-p8-enforcement.sh` contains 113 passing assertions.
+`tests/unit/test-lane-gc-p8-enforcement.sh` contains 120 passing assertions.
 They cover the default/rollback precedence, invalid and dangling config,
 custom timer roots and transactional rollback, shared local/remote state-root
 resolution, boot-bound identities, legacy refusal, guardian and Pass 2/3
@@ -191,3 +191,30 @@ Owner-side re-dispatch, legacy PID-file, wrapper cleanup, and guardian EOF
 paths intentionally retain their pre-P8 best-effort behavior because they act
 while ownership is contemporaneous. Moving those paths to the delayed-GC
 authority model is not part of the enforcement flip.
+
+## Pass 3 ownership matching
+
+The enforcement acceptance audit found that PID identity does not establish
+lane ownership when cwd/profile matching accepts string prefixes. Rule 3.4
+must compare the exact worktree directory or a slash-delimited descendant,
+including the kernel's deleted-cwd suffix, and still exclude existing
+worktrees. Rule 3.1 reads Linux NUL-delimited argv once per PID, accepts one
+unambiguous absolute `--user-data-dir` value (canonical joined form only), and
+compares the whole value to the lane hint. Chromium's
+[`base/command_line.cc`](https://github.com/chromium/chromium/blob/main/base/command_line.cc)
+accepts switch values after `=`, recognizes single-hyphen switches, and trims
+ASCII boundary whitespace. Accordingly, alternate/duplicate/malformed
+switches, separate values, boundary whitespace, newline-containing values,
+and unreadable or unterminated argv fail toward leak. There is no
+flattened-argv fallback. This preserves the bounded scan while removing
+sibling-directory and profile-prefix collisions. The rule 3.2 protective
+live-sharer veto retains its conservative matching behavior.
+
+These negative cases are tested with real processes and the production
+identity/ownership guards. `would_kill_legacy_signature` covers Pass 2's
+legacy arm and cannot establish absence of Pass 3 false positives. Soak
+acceptance remains an operator gate after code verification.
+
+Follow-up #552 tracks timestamped, candidate-bound summary retention and
+synthetic-window roll-up verification. Existing observation records must not
+be relabeled as evidence for a changed candidate.

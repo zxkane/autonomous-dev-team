@@ -953,8 +953,44 @@ _gc_pass3_candidate_backend_verified() {
   return 0
 }
 
+# Parse NUL-delimited argv from stdin. Chromium's IsSwitch accepts values only
+# after '=', recognizes '-' as well as '--', trims ASCII boundary whitespace,
+# and normally lets the last duplicate win (base/command_line.cc). Accept only
+# one canonical joined option; ambiguous/alternate spellings fail toward leak.
+_gc_chrome_profile_from_argv() {
+  local arg profile="" parse_switches=true
+  local whitespace=$' \t\n\r\v\f'
+  IFS= read -r -d '' arg || return 1  # Discard argv[0], never a switch.
+  while IFS= read -r -d '' arg; do
+    [[ "$parse_switches" == true ]] || continue
+    [[ "$arg" != ["$whitespace"]* && "$arg" != *["$whitespace"] ]] || return 1
+    case "$arg" in
+      --) parse_switches=false ;;
+      --user-data-dir=*)
+        [[ -z "$profile" ]] || return 1
+        profile="${arg#--user-data-dir=}"
+        [[ "$profile" == /* && "$profile" != *$'\n'* && "$profile" != *$'\r'* ]] || return 1
+        ;;
+      --user-data-dir|-user-data-dir|-user-data-dir=*) return 1 ;;
+    esac
+  done
+  # read returns failure for both clean EOF and an unterminated argument.
+  # Never accept a complete profile followed by a partially read override.
+  [[ -z "$arg" && -n "$profile" ]] || return 1
+  printf '%s\n' "$profile"
+}
+
+# Read Linux argv once per candidate without flattening argument boundaries.
+# Delayed signaling already requires Linux v2 identities; never substitute
+# formatted ps/proc_argv output when this ownership evidence is unavailable.
+_gc_chrome_profile() {
+  local pid="$1"
+  [[ "$pid" =~ ^[0-9]+$ && -r "/proc/${pid}/cmdline" ]] || return 1
+  _gc_chrome_profile_from_argv < "/proc/${pid}/cmdline"
+}
+
 _gc_pass3_chrome_lane_scoped() {
-  local lane_dir hint pid pid_identity argv pg pg_identity index matched_index
+  local lane_dir hint pid pid_identity profile pg pg_identity index matched_index
   local -a lane_dirs=()
   local -a hints=()
 
@@ -979,11 +1015,11 @@ _gc_pass3_chrome_lane_scoped() {
     [[ -n "$pid" ]] || continue
     pid_identity="$(proc_identity "$pid" 2>/dev/null)" || continue
     proc_identity_is_durable "$pid_identity" || continue
-    argv="$(proc_argv "$pid" 2>/dev/null | tr '\n' ' ')"
+    profile="$(_gc_chrome_profile "$pid" 2>/dev/null)" || continue
     matched_index=-1
     for index in "${!hints[@]}"; do
       hint="${hints[$index]}"
-      if [[ "$argv" == *"--user-data-dir=${hint}"* || "$argv" == *"$hint"* ]]; then
+      if [[ "$profile" == "$hint" ]]; then
         matched_index="$index"
         break
       fi
@@ -1196,11 +1232,14 @@ _gc_pass3_e2e_servers() {
     [[ -n "$pid" ]] || continue
     pid_identity="$(proc_identity "$pid" 2>/dev/null)" || continue
     proc_identity_is_durable "$pid_identity" || continue
-    cwd="$(readlink "/proc/${pid}/cwd" 2>/dev/null || echo "")"
+    # Preserve literal newlines: command substitution would trim them and
+    # could turn a sibling directory into an apparent exact match.
+    IFS= read -r -d '' cwd < <(readlink -z "/proc/${pid}/cwd" 2>/dev/null) || continue
     matched_index=-1
     for index in "${!worktrees[@]}"; do
       worktree="${worktrees[$index]}"
-      if [[ "$cwd" == "${worktree}"* || "$cwd" == "${worktree} (deleted)"* ]]; then
+      if [[ "$cwd" == "$worktree" || "$cwd" == "${worktree}/"* \
+          || ( "$cwd" == "${worktree} (deleted)" && ! -e "$cwd" ) ]]; then
         matched_index="$index"
         break
       fi
