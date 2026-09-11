@@ -19,7 +19,7 @@ stop_fixture() {
     FIXTURE_PID=""
   fi
 }
-trap 'stop_fixture; rm -rf "$TMPROOT"' EXIT
+trap 'stop_fixture; chmod 700 "$TMPROOT/denied-parent" 2>/dev/null || true; rm -rf "$TMPROOT"' EXIT
 
 # Load only function declarations; never run the collector's main entry point.
 source "$SCRIPTS/lib-lane.sh"
@@ -96,6 +96,13 @@ write_lane "$TMPROOT/cwd" -
 check_rule 'B03 existing worktree is protected' 0 _gc_pass3_e2e_servers
 rmdir "$TMPROOT/cwd"
 check_rule 'B02 deleted exact worktree is residue' 1 _gc_pass3_e2e_servers
+# Simulate unavailable inode evidence while retaining real identity/guards.
+stat() {
+  [[ "${*: -1}" == "/proc/${FIXTURE_PID}/cwd" ]] && return 1
+  command stat "$@"
+}
+check_rule 'B09 unreadable cwd inode fails toward leak' 0 _gc_pass3_e2e_servers
+unset -f stat
 stop_fixture
 
 mkdir -p "$TMPROOT/space tree/child" "$TMPROOT/cwd"
@@ -125,6 +132,20 @@ for suffix in $'\n' ' (deleted)'; do
   mkdir "$TMPROOT/cwd"
 done
 
+for suffix in '' ' (deleted)'; do
+  rmdir "$TMPROOT/cwd"
+  mkdir -p "$TMPROOT/denied-parent/worktree${suffix}"
+  ln -s "$TMPROOT/denied-parent/worktree${suffix}" "$TMPROOT/cwd"
+  start_fixture
+  write_lane "$TMPROOT/denied-parent/worktree" -
+  chmod 000 "$TMPROOT/denied-parent"
+  check_rule 'B09 permission-denied existing cwd is protected' 0 _gc_pass3_e2e_servers
+  chmod 700 "$TMPROOT/denied-parent"
+  stop_fixture
+  rm "$TMPROOT/cwd"
+  rmdir "$TMPROOT/denied-parent/worktree${suffix}" "$TMPROOT/denied-parent"
+  mkdir "$TMPROOT/cwd"
+done
 PROFILE="$TMPROOT/profile with spaces;literal"
 write_lane - "$PROFILE"
 profile_case() {
