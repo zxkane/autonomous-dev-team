@@ -105,6 +105,20 @@ if ! declare -F chp_ci_status >/dev/null 2>&1; then
   unset _ld_self _ld_dir
 fi
 
+# [INV-149] Same-HEAD terminal recovery reuses the provider-neutral,
+# HEAD-pinned mergeability refresh primitive. Loading the shared library here
+# keeps standalone lib-dispatch tests on the same classifier as the review
+# wrapper without duplicating provider token policy.
+if ! declare -F review_refresh_mergeability >/dev/null 2>&1; then
+  _ld_self="${BASH_SOURCE[0]:-$0}"
+  _ld_dir="$(cd "$(dirname "$(readlink -f "$_ld_self")")" && pwd 2>/dev/null)" || _ld_dir=""
+  if [ -n "$_ld_dir" ] && [ -r "${_ld_dir}/lib-review-mergeable.sh" ]; then
+    # shellcheck source=lib-review-mergeable.sh
+    source "${_ld_dir}/lib-review-mergeable.sh"
+  fi
+  unset _ld_self _ld_dir
+fi
+
 # [#495] resolve_pr_author_mention — PR-scoped escalation-comment mention
 # target (bot-detection + HUMAN_ESCALATION_LOGIN/REPO_OWNER fallback). Same
 # readlink -f idiom as the chp/itp sources above; idempotent.
@@ -1387,16 +1401,67 @@ classify_recent_review_verdict() {
   return 0
 }
 
-# Echo the count of review-aware-flip markers scoped to a given dev session.
-# Used by Step 4b.5.1 to enforce REVIEW_RETRY_LIMIT on a per-session basis
-# (a fresh dev_new resets the counter, by design).
+# Echo the count of logical review-aware flips scoped to one dev session.
+# Ordinary flip comments count individually. INV-149 reservations and their
+# completion comments share a (session, HEAD, ordinal) key and count once even
+# when both exist or a concurrent check-then-post race duplicates either one.
+# Comment transport/schema failures and malformed body-start-recognized markers
+# return nonzero; callers must never fabricate zero because that would reset a
+# consumed retry budget. Marker-looking substrings in prose are not recognized.
 count_review_aware_flips() {
   local issue_num="$1"
   local session_id="$2"
+  local comments
   [ -n "$session_id" ] || { printf '%s' "0"; return 0; }
-  itp_list_comments "$issue_num" 2>/dev/null \
-    | jq -r "[.[].body | select(contains(\"<!-- review-aware-flip:non-substantive\")) | select(contains(\"session=${session_id}\"))] | length" \
-    2>/dev/null || printf '%s' "0"
+  comments=$(itp_list_comments "$issue_num" 2>/dev/null) || return 1
+  jq -er --arg session "$session_id" '
+    def ordinary_re:
+      "^<!-- review-aware-flip:non-substantive cause=[^[:space:]>]+ session=(?<session>[^[:space:]>]+) -->";
+    def refresh_re:
+      "^<!-- review-aware-flip:non-substantive cause=mergeable-unknown session=(?<session>[^[:space:]>]+) head=(?<head>[^[:space:]>]+) source=same-head-refresh flip=(?<flip>[0-9]+) -->";
+    def intent_re:
+      "^<!-- same-head-mergeability-requeue: issue=[0-9]+ head=(?<head>[^[:space:]>]+) session=(?<session>[^[:space:]>]+) flip=(?<flip>[0-9]+) status=(MERGEABLE|CONFLICTING) -->";
+    def freshness_key:
+      .session + "\u001f" + .head + "\u001f" + .flip;
+
+    if type != "array"
+       or any(.[]; type != "object" or (.body | type) != "string")
+    then error("comments must be an array of objects with string bodies")
+    else
+      reduce .[].body as $body (
+        {ordinary: 0, freshness: {}};
+        if ($body | startswith("<!-- same-head-mergeability-requeue:"))
+        then
+          if ($body | test(intent_re))
+          then ($body | capture(intent_re)) as $marker
+            | if $marker.session == $session
+              then .freshness[($marker | freshness_key)] = true
+              else .
+              end
+          else error("malformed same-head mergeability reservation")
+          end
+        elif ($body | startswith("<!-- review-aware-flip:non-substantive"))
+        then
+          if ($body | test(refresh_re))
+          then ($body | capture(refresh_re)) as $marker
+            | if $marker.session == $session
+              then .freshness[($marker | freshness_key)] = true
+              else .
+              end
+          elif ($body | test(ordinary_re))
+          then ($body | capture(ordinary_re)) as $marker
+            | if $marker.session == $session
+              then .ordinary += 1
+              else .
+              end
+          else error("malformed review-aware flip marker")
+          end
+        else .
+        end
+      )
+      | .ordinary + (.freshness | length)
+    end
+  ' <<<"$comments" 2>/dev/null
 }
 
 # ---------------------------------------------------------------------------
@@ -1796,7 +1861,8 @@ _stall_dev_conflict_context_failure() {
 #
 # handle_completed_session_routing <issue_num> <session_id> <session_end_iso> [routing_head]
 #
-# Returns 0 always (caller `continue`s after this branch).
+# Returns 0 after a handled route. Operational accounting failures return 3 so
+# the caller can defer without requeueing or stalling from a fabricated count.
 #
 # Routes a `pending-dev` issue whose prior dev session reached
 # `end_turn|completed` per the verdict-classification table in
@@ -1978,8 +2044,12 @@ handle_completed_session_routing() {
 
     failed-non-substantive)
       local _flip_count
-      _flip_count=$(count_review_aware_flips "$issue_num" "$session_id")
-      _flip_count="${_flip_count:-0}"
+      if ! _flip_count=$(count_review_aware_flips \
+          "$issue_num" "$session_id") \
+         || ! [[ "$_flip_count" =~ ^[0-9]+$ ]]; then
+        log "  WARN: issue #${issue_num} could not read review-aware flip accounting for session ${session_id} — deferring without resetting the retry budget"
+        return 3
+      fi
       local _limit="${REVIEW_RETRY_LIMIT:-2}"
       # cap=0 → unbounded (operator opt-in to bounce-forever).
       if [ "$_limit" -gt 0 ] && [ "$_flip_count" -ge "$_limit" ]; then
@@ -4069,6 +4139,130 @@ recent_error_envelope() {
   return 0
 }
 
+# Return bodies that start with a marker prefix after strict transport shape
+# validation. Both reservation counting and idempotency use this selector so
+# prose that quotes a marker cannot be "present" to one path and absent from
+# the other.
+_same_head_marker_bodies() {
+  local issue_num="$1" marker_prefix="$2"
+  local comments
+  comments=$(itp_list_comments "$issue_num" 2>/dev/null) || return 1
+  jq -ec --arg marker_prefix "$marker_prefix" '
+    if type != "array"
+       or any(.[]; type != "object" or (.body | type) != "string")
+    then error("comments must be an array of objects with string bodies")
+    else [.[] | .body | select(startswith($marker_prefix))]
+    end
+  ' <<<"$comments" 2>/dev/null
+}
+
+# Ensure one exact recovery comment. A read failure is distinct from absence so
+# a provider outage cannot turn an idempotency check into duplicate writes.
+_same_head_ensure_comment() {
+  local issue_num="$1" marker="$2" body="$3"
+  local matching
+  matching=$(_same_head_marker_bodies "$issue_num" "$marker") || return 1
+  if jq -e 'length > 0' >/dev/null 2>&1 <<<"$matching"; then
+    return 0
+  fi
+  itp_post_comment "$issue_num" "$body" >/dev/null 2>&1
+}
+
+_same_head_requeue_intent_stats() {
+  local issue_num="$1" scope="$2" current_head="$3"
+  local matching
+  matching=$(_same_head_marker_bodies \
+    "$issue_num" "<!-- same-head-mergeability-requeue:") || return 1
+  jq -er \
+    --arg head "$current_head" \
+    --arg session "$scope" \
+    'def intent_re:
+       "^<!-- same-head-mergeability-requeue: issue=[0-9]+ head=(?<head>[^[:space:]>]+) session=(?<session>[^[:space:]>]+) flip=(?<flip>[0-9]+) status=(MERGEABLE|CONFLICTING) -->";
+     [.[]
+      | if test(intent_re)
+        then capture(intent_re)
+        else error("malformed same-head mergeability reservation")
+        end
+      | select(.head == $head and .session == $session)
+      | (.flip | tonumber)
+     ] | unique as $ordinals
+     | [$ordinals | length, ((($ordinals | max) // 0) + 1)]
+     | @tsv' <<<"$matching" 2>/dev/null
+}
+
+# INV-149 freshness requeue. Each durable intent reserves one bounded attempt
+# before the label transition. The reservation remains authoritative if the
+# provider applies the label write but reports failure, or if the optional
+# completion marker cannot be persisted after a successful transition.
+_same_head_refresh_requeue_review() {
+  local issue_num="$1" pr_ref="$2" current_head="$3"
+  local session_id="$4" status="${5^^}"
+  local scope="${session_id:-same-head-${current_head}}"
+  local reservation_stats reservation_count limit ordinal
+  local intent_marker intent_body complete_marker
+
+  if ! reservation_stats=$(_same_head_requeue_intent_stats \
+      "$issue_num" "$scope" "$current_head"); then
+    log "  WARN: issue #${issue_num} could not read same-HEAD requeue reservations — deferring for INV-128"
+    return 3
+  fi
+  read -r reservation_count ordinal <<<"$reservation_stats"
+  if ! [[ "$reservation_count" =~ ^[0-9]+$ && "$ordinal" =~ ^[1-9][0-9]*$ ]]; then
+    log "  WARN: issue #${issue_num} received malformed same-HEAD requeue reservation stats — deferring for INV-128"
+    return 3
+  fi
+  limit="${REVIEW_RETRY_LIMIT:-2}"
+  if [[ "$limit" -gt 0 && "$reservation_count" -ge "$limit" ]]; then
+    local limit_marker limit_body
+    limit_marker="<!-- same-head-mergeability-requeue-limit: issue=${issue_num} head=${current_head} session=${scope} count=${reservation_count} limit=${limit} -->"
+    limit_body="$(printf '%s\n%s' \
+      "$limit_marker" \
+      "PR ${pr_ref} HEAD \`${current_head}\` reached the same-HEAD mergeability refresh requeue limit (${reservation_count}/${limit}) without converging through normal review. Marking stalled rather than requeueing indefinitely. $(resolve_escalation_mention "$issue_num") please investigate.")"
+    _same_head_ensure_comment \
+      "$issue_num" "$limit_marker" "$limit_body" >/dev/null 2>&1 || true # Best-effort report; mark_stalled remains authoritative.
+    mark_stalled "$issue_num"
+    return 0
+  fi
+
+  intent_marker="<!-- same-head-mergeability-requeue: issue=${issue_num} head=${current_head} session=${scope} flip=${ordinal} status=${status} -->"
+  intent_body="$(printf '%s\n%s' \
+    "$intent_marker" \
+    "PR ${pr_ref} HEAD \`${current_head}\` now has fresh provider mergeability \`${status}\`. Re-routing to review so the normal preflight and final gates act on current evidence.")"
+  if ! _same_head_ensure_comment \
+      "$issue_num" "$intent_marker" "$intent_body"; then
+    log "  WARN: issue #${issue_num} could not persist same-HEAD mergeability requeue intent — deferring for INV-128"
+    return 3
+  fi
+  if ! label_swap "$issue_num" "pending-dev" "pending-review"; then
+    log "  WARN: issue #${issue_num} same-HEAD mergeability requeue label transition failed — deferring for INV-128"
+    return 3
+  fi
+
+  complete_marker="<!-- review-aware-flip:non-substantive cause=mergeable-unknown session=${scope} head=${current_head} source=same-head-refresh flip=${ordinal} -->"
+  if ! _same_head_ensure_comment \
+      "$issue_num" "$complete_marker" "$complete_marker"; then
+    log "  WARN: issue #${issue_num} requeued review but could not persist its completion marker — the durable intent still consumes the bounded reservation"
+  fi
+  return 0
+}
+
+_same_head_refresh_requeue_changed_head() {
+  local issue_num="$1" previous_head="$2" current_head="$3"
+  local marker body
+  marker="<!-- same-head-mergeability-head-changed: issue=${issue_num} previous=${previous_head} current=${current_head} -->"
+  body="$(printf '%s\n%s' \
+    "$marker" \
+    "PR HEAD changed during same-HEAD mergeability revalidation (\`${previous_head}\` -> \`${current_head}\`). Re-queuing review so the current HEAD is evaluated without stale evidence.")"
+  if ! _same_head_ensure_comment "$issue_num" "$marker" "$body"; then
+    log "  WARN: issue #${issue_num} could not persist changed-HEAD requeue intent — deferring for INV-128"
+    return 3
+  fi
+  if ! label_swap "$issue_num" "pending-dev" "pending-review"; then
+    log "  WARN: issue #${issue_num} changed-HEAD requeue label transition failed — deferring for INV-128"
+    return 3
+  fi
+}
+
 # [INV-111] (#402) / [INV-125] (#466): shared verdict-aware recovery for the
 # `handle_pending_dev_pr_exists` same-HEAD park. Two disjoint callers reach
 # this helper, distinguished only by `cause` (cosmetic — log/notice wording):
@@ -4107,22 +4301,29 @@ recent_error_envelope() {
 #     crashed-session-retry:<head> — either present means this HEAD already
 #     consumed its one self-heal/crash-recovery dev-new with no progress.
 #
-# [INV-125] Part 2 (closing the counting hole): every marker-present /
-# budget-exhausted case above calls `mark_stalled` directly — NEVER falls to
-# the residual `stale-verdict:<head>` park. In a park, `count_retries` is
-# frozen (no dispatch → no countable comment), so "MAX_RETRIES remains the
-# backstop" can never come true; the marker itself IS the evidence that the
-# one bounded recovery for this HEAD was already spent with no progress.
+# [INV-125]/[INV-149] marker-present behavior: other non-substantive causes
+# and exhausted dev-new budgets call `mark_stalled` directly. Historical
+# `mergeable-unknown` first gets one HEAD-pinned provider refresh: current
+# MERGEABLE/CONFLICTING requeues review under REVIEW_RETRY_LIMIT, persistent
+# UNKNOWN stalls, and an unavailable read returns operational defer. In a park,
+# `count_retries` is frozen (no dispatch → no countable comment), so only the
+# explicit INV-128 operational-defer contract can bound a persistent provider
+# or label outage.
 #
 # Returns:
-#   0 — handled (caller should `return 0`).
+#   0 — handled (stall, requeue, dispatch, or terminal no-op).
 #   1 — EITHER the dev-new dispatch marker is held by a concurrent tick
 #       ([INV-108]) OR the comment-read preflight below failed (rate-limit /
 #       auth / transport blip). Both are transient races, NOT a
 #       marker-present exhaustion. Caller falls through to the residual
 #       `stale-verdict:<head>` park, unchanged.
+#   3 — current provider mergeability could not be read safely. Caller retains
+#       the residual notice but returns operational defer so the tick omits
+#       JUST_DISPATCHED and INV-128 can count the unchanged issue. Freshness
+#       intent/comment or label-transition failures use the same contract.
 _same_head_verdict_aware_recovery() {
-  local issue_num="$1" pr_ref="$2" current_head="$3" cause="$4" pr_num="${5:-}"
+  local issue_num="$1" pr_ref="$2" current_head="$3" cause="$4"
+  local pr_num="${5:-}" session_id="${6:-}"
 
   # (codex review, PR #471 / [INV-125]): every verdict/marker check below
   # reads `itp_list_comments` and treats EMPTY jq output as a legitimate
@@ -4211,9 +4412,56 @@ _same_head_verdict_aware_recovery() {
       label_swap "$issue_num" "pending-dev" "pending-review"
       return 0
     fi
-    # [INV-125] Part 2: the shared per-HEAD budget is already spent with no
-    # progress — mark_stalled, never the residual park (a park here would
-    # freeze count_retries forever with no way for MAX_RETRIES to trip).
+
+    # [INV-149] `mergeable-unknown` is a historical observation of mutable
+    # provider state, not terminal evidence by itself. Before the consumed
+    # retry marker can justify a stall, refresh mergeability between two
+    # provider snapshots of the same open HEAD. MERGEABLE and CONFLICTING both
+    # return through the normal review preflight: the former can reach
+    # E2E/fan-out, while the latter enters the canonical conflict/rebase route.
+    # A provider read failure defers to the residual park and INV-128 instead
+    # of being fabricated into fresh UNKNOWN evidence.
+    if [ "${_ns_present:-1}" != "0" ] \
+        && [ "$_v_cause" = "mergeable-unknown" ]; then
+      local _fresh_head="" _fresh_status="" _fresh_action="read-failed"
+      if [ -z "$pr_num" ]; then
+        log "  WARN: issue #${issue_num} ${cause} same-HEAD mergeability refresh has no PR number — deferring terminal action"
+        return 3
+      fi
+      review_refresh_mergeability \
+        "$pr_num" "$current_head" \
+        _fresh_head _fresh_status _fresh_action
+      case "$_fresh_action" in
+      proceed|conflict-rebase)
+        log "  issue #${issue_num} ${cause} same-HEAD branch: provider now reports ${_fresh_status^^} for HEAD ${current_head} — re-routing to normal review"
+        _same_head_refresh_requeue_review \
+          "$issue_num" "$pr_ref" "$current_head" "$session_id" "$_fresh_status"
+        return $?
+        ;;
+      mergeable-unknown)
+        log "  issue #${issue_num} ${cause} same-HEAD branch: provider still reports UNKNOWN for HEAD ${current_head} — consumed retry remains terminal"
+        ;;
+      head-changed)
+        log "  issue #${issue_num} ${cause} mergeability refresh observed a different HEAD (${current_head} -> ${_fresh_head:-unknown}) — re-queuing review"
+        _same_head_refresh_requeue_changed_head \
+          "$issue_num" "$current_head" "$_fresh_head"
+        return $?
+        ;;
+      closed)
+        log "  issue #${issue_num} ${cause} mergeability refresh found PR ${pr_ref} closed or merged — no-op, Step 0 will reconcile"
+        return 0
+        ;;
+      *)
+        log "  WARN: issue #${issue_num} ${cause} mergeability refresh failed for HEAD ${current_head} — deferring terminal action to the bounded residual park"
+        return 3
+        ;;
+      esac
+    fi
+
+    # [INV-125] Part 2: after INV-149 has either refreshed mutable
+    # mergeable-unknown evidence or determined this is another cause, the
+    # shared per-HEAD budget is spent with no progress — mark_stalled, never
+    # the residual park (a park here would freeze count_retries forever).
     log "  issue #${issue_num} ${cause} same-HEAD branch: non-substantive re-review budget already spent for HEAD ${current_head} — marking stalled ([INV-125])"
     itp_post_comment "$issue_num" \
       "PR ${pr_ref} HEAD \`${current_head}\` already consumed its one bounded non-substantive re-review for this HEAD (\`${_ns_marker}\`) with no progress. Marking stalled rather than parking indefinitely. $(resolve_escalation_mention "$issue_num" "$pr_num") please investigate."
@@ -4292,11 +4540,11 @@ _same_head_verdict_aware_recovery() {
 #   1 — no PR for this issue, OR the same-HEAD session hit `prompt_too_long`
 #       (caller falls through to session/dispatch logic — the tick's INV-12
 #       PTL branch owns PTL recovery; see the same-HEAD block below).
-#   3 — strict routing-evidence read failed; caller leaves `pending-dev`
-#       unchanged and does not add JUST_DISPATCHED so INV-128 can bound a
-#       persistent operational defer.
+#   3 — strict routing evidence or current mergeability could not be read;
+#       caller leaves `pending-dev` unchanged and does not add JUST_DISPATCHED
+#       so INV-128 can bound a persistent operational defer.
 #
-# Side effects (only when returning 0):
+# Side effects:
 #   - HEAD differs OR no prior review → flips pending-dev → pending-review
 #     and posts the Bug 3 transition comment.
 #   - Same HEAD already reviewed ([INV-98], #351): the park is NOT terminal.
@@ -4315,7 +4563,9 @@ _same_head_verdict_aware_recovery() {
 #     (`may_stall_now` defers), a concurrent tick holds the dev-new dispatch
 #     marker ([INV-108]), or the helper's own comment-read preflight failed
 #     (rate-limit/auth/transport blip, [INV-125] follow-up, PR #471 review) —
-#     never misclassified as a genuine verdict=none / marker-absent read.
+#     never misclassified as a genuine verdict=none / marker-absent read. A
+#     current mergeability-read failure uses return 3 after the same notice so
+#     the tick does not suppress INV-128 with JUST_DISPATCHED.
 handle_pending_dev_pr_exists() {
   local issue_num="$1"
   local pr_info pr_num current_head pr_ref last_head notice_marker
@@ -4371,7 +4621,11 @@ handle_pending_dev_pr_exists() {
       local _completed_route_rc=0
       handle_completed_session_routing "$issue_num" "$_sid" "$_end_iso" "$last_head" \
         || _completed_route_rc=$?
-      [[ "$_completed_route_rc" -eq 0 ]] || return 2
+      if [[ "$_completed_route_rc" -eq 3 ]]; then
+        return 3
+      elif [[ "$_completed_route_rc" -ne 0 ]]; then
+        return 2
+      fi
       return 0
     fi
 
@@ -4414,6 +4668,7 @@ handle_pending_dev_pr_exists() {
     # no reason to run it twice): empty id → self-heal ([INV-111]), resolved
     # id → crashed-session ([INV-125]).
     local _recovery_cause="crashed-session"
+    local _same_head_operational_defer=0
     [ -z "$_sid" ] && _recovery_cause="self-heal"
     if may_stall_now "$issue_num"; then
       # The routing-evidence comparison above and may_stall_now can span enough
@@ -4442,21 +4697,24 @@ handle_pending_dev_pr_exists() {
 
       local _same_head_recovery_rc=0
       _same_head_verdict_aware_recovery \
-        "$issue_num" "$pr_ref" "$current_head" "$_recovery_cause" "$pr_num" \
+        "$issue_num" "$pr_ref" "$current_head" "$_recovery_cause" "$pr_num" "$_sid" \
         || _same_head_recovery_rc=$?
       if [[ "$_same_head_recovery_rc" -eq 0 ]]; then
         return 0
+      elif [[ "$_same_head_recovery_rc" -eq 3 ]]; then
+        _same_head_operational_defer=1
       elif [[ "$_same_head_recovery_rc" -ne 1 ]]; then
         return "$_same_head_recovery_rc"
       fi
     fi
 
     # Residual park: a dev wrapper IS still alive (`may_stall_now` deferred —
-    # Step 5 owns liveness), or a concurrent tick holds the dev-new dispatch
-    # marker ([INV-108], the helper's rc=1). Both are genuinely transient —
-    # never a marker-present budget exhaustion, which [INV-125] Part 2 routes
-    # to `mark_stalled` inside the helper instead of reaching here. Surface
-    # the stale verdict and keep pending-dev.
+    # Step 5 owns liveness), a concurrent tick holds the dev-new dispatch
+    # marker ([INV-108]), or a provider/comment freshness read failed. Each is
+    # genuinely transient — never a marker-present budget exhaustion with
+    # usable current evidence, which [INV-125]/[INV-149] route inside the
+    # helper instead of reaching here. Surface the stale verdict and keep
+    # pending-dev; INV-128 bounds a persistent read outage.
     #
     # Idempotency check uses `grep -q '^0$'` (fail-closed): a transient
     # `gh issue view` error yields empty output, grep returns 1, and we
@@ -4468,8 +4726,9 @@ handle_pending_dev_pr_exists() {
         | jq -r "[.[].body | select(contains(\"${notice_marker}\"))] | length" \
         2>/dev/null | grep -q '^0$'; then
       itp_post_comment "$issue_num" \
-        "PR ${pr_ref} HEAD \`${current_head}\` already reviewed with FAILED verdict; awaiting new commits before re-review. A dev wrapper appears to still be running for this issue, or a concurrent dispatcher tick is mid-dispatch — this is a transient wait, not a permanent park (\`${notice_marker}\`)."
+        "PR ${pr_ref} HEAD \`${current_head}\` already reviewed with FAILED verdict; awaiting a safe recovery decision. A dev wrapper may still be running, a concurrent dispatcher tick may be mid-dispatch, or current provider evidence may be unreadable — this is a transient wait bounded by the liveness watchdog (\`${notice_marker}\`)."
     fi
+    [[ "$_same_head_operational_defer" -eq 0 ]] || return 3
     return 0
   fi
 

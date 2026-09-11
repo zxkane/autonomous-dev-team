@@ -17,13 +17,10 @@ if hook_common_dir=$(git rev-parse --path-format=absolute --git-common-dir 2>/de
   hook_common_dir=$(_canonical_existing_directory "$hook_common_dir") || hook_common_dir=""
 fi
 
-# Resolve command context independently from the boolean detector. The resolver
-# also recognizes supported quoted `git -C` paths that the detector strips.
-detected_commit=0
-if is_git_command "commit" "$command"; then
-  detected_commit=1
-fi
-
+# The resolver is the single source of truth: rc=0 is a supported commit,
+# rc=1 is a proven no-match, and rc=2 is a matching but uncertain command that
+# must fail closed. Avoid running the same shell scanner twice inside the
+# hook's five-second budget.
 resolved_dir=""
 if resolved_dir=$(resolve_git_command_cwd "commit" "$command" "$base_dir"); then
   resolve_rc=0
@@ -31,7 +28,7 @@ else
   resolve_rc=$?
 fi
 
-if [[ "$resolve_rc" -eq 1 && "$detected_commit" -eq 0 ]]; then
+if [[ "$resolve_rc" -eq 1 ]]; then
   exit 0
 fi
 
@@ -40,8 +37,35 @@ if [[ "$command" =~ --amend ]]; then
   exit 0
 fi
 
-# Any mismatch or resolution uncertainty falls back to the inherited cwd.
+block_unverified_target() {
+  cat >&2 <<'EOF'
+## BLOCKED - Unable to Verify Target Repository
+
+The commit was blocked because this hook could not statically verify the repository and worktree context without executing the command.
+
+### Re-issue as One Supported Command:
+Run from the repository or linked worktree whose policy applies, and use a literal path to an existing Git repository:
+
+```bash
+git -C /absolute/path/to/repo commit -F /path/to/message
+```
+
+or:
+
+```bash
+cd /absolute/path/to/repo && git commit -F /path/to/message
+```
+
+Variables, substitutions, wrappers, pipelines, and multiple commit invocations are unsupported as repository evidence. Other compound command shapes, such as a bare `git add ... && git commit ...`, must be rewritten as one supported command. Missing paths and non-Git directories cannot be verified.
+
+If the intended target is this repository, create or switch to a linked worktree and issue the commit as one supported command there.
+EOF
+  exit 2
+}
+
+verification_uncertain=false
 if [[ "$resolve_rc" -ne 0 ]]; then
+  verification_uncertain=true
   resolved_dir="$base_dir"
 fi
 
@@ -53,6 +77,7 @@ if [[ -n "$hook_common_dir" ]] &&
     exit 0
   fi
 else
+  verification_uncertain=true
   resolved_dir="$base_dir"
   target_common_dir="$hook_common_dir"
 fi
@@ -61,12 +86,19 @@ fi
 target_git_dir=""
 if [[ -n "$target_common_dir" ]] &&
   target_git_dir=$(git -C "$resolved_dir" rev-parse --path-format=absolute --git-dir 2>/dev/null) &&
-  target_git_dir=$(_canonical_existing_directory "$target_git_dir") &&
-  [[ "$target_git_dir" != "$target_common_dir" ]]; then
-  exit 0
+  target_git_dir=$(_canonical_existing_directory "$target_git_dir"); then
+  if [[ "$target_git_dir" != "$target_common_dir" ]]; then
+    exit 0
+  fi
+else
+  verification_uncertain=true
 fi
 
-# Block the commit
+if [[ "$verification_uncertain" == true ]]; then
+  block_unverified_target
+fi
+
+# The target is positively proven to be this repository's main workspace.
 cat >&2 <<'EOF'
 ## BLOCKED - Must Use Git Worktree
 

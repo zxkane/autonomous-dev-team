@@ -751,7 +751,12 @@ for i in $(seq 0 $((pd_count - 1))); do
     _completed_route_rc=0
     handle_completed_session_routing "$issue_num" "$session_id" "$_session_end_iso" \
       || _completed_route_rc=$?
-    if [ "$_completed_route_rc" -ne 0 ]; then
+    if [ "$_completed_route_rc" -eq 3 ]; then
+      # Operational defer: leave this issue eligible for INV-128 and keep
+      # scanning the project. Do not add JUST_DISPATCHED because no wrapper or
+      # state transition was launched.
+      continue
+    elif [ "$_completed_route_rc" -ne 0 ]; then
       exit "$_completed_route_rc"
     fi
     JUST_DISPATCHED+=("$issue_num")

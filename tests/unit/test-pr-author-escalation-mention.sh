@@ -381,10 +381,10 @@ assert_contains "TC-PAEM-034c _same_head_verdict_aware_recovery self-heal/crash-
   "$DISPATCH_SRC" 'self-heal/crash-recovery \`dev-new\` for this HEAD with no progress. Marking stalled rather than parking indefinitely. $(resolve_escalation_mention "$issue_num" "$pr_num") please investigate."'
 
 assert_contains "TC-PAEM-034d _same_head_verdict_aware_recovery signature carries pr_num as 5th positional" \
-  "$DISPATCH_SRC" 'local issue_num="$1" pr_ref="$2" current_head="$3" cause="$4" pr_num="${5:-}"'
+  "$DISPATCH_SRC" 'local pr_num="${5:-}" session_id="${6:-}"'
 
 assert_contains "TC-PAEM-034e caller passes pr_num to _same_head_verdict_aware_recovery" \
-  "$DISPATCH_SRC" $'_same_head_verdict_aware_recovery \\\n        "$issue_num" "$pr_ref" "$current_head" "$_recovery_cause" "$pr_num" \\\n        || _same_head_recovery_rc=$?'
+  "$DISPATCH_SRC" $'_same_head_verdict_aware_recovery \\\n        "$issue_num" "$pr_ref" "$current_head" "$_recovery_cause" "$pr_num" "$_sid" \\\n        || _same_head_recovery_rc=$?'
 
 # --- Converted site (autonomous-review.sh) ---
 assert_contains "TC-PAEM-035 INV-127 round-cap report calls resolve_escalation_mention(ISSUE_NUMBER, PR_NUMBER)" \

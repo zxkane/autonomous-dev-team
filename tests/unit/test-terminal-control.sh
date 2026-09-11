@@ -766,7 +766,7 @@ call_site_sha="$(
   } | sha256sum | awk '{print $1}'
 )"
 assert_eq "TC-TERMCTRL-071 mark_stalled call-site byte pin" \
-  "fbb6e79ca05139ad36019882aab7966d77bbf76aaabb549971e116d5000d77e4" "$call_site_sha"
+  "3ea7d227b453b9f6dca663241527db02c47dc06b3211eb261dc2db49d587b299" "$call_site_sha"
 
 raw_calls="$(grep -En '(^|[;&|[:space:]])(gh|glab)([[:space:]]|$)|https?://|graphql' "$LIB" || true)"
 assert_eq "TC-TERMCTRL-072 no raw provider calls" "" "$raw_calls"

@@ -7281,7 +7281,8 @@ _Triage (issue #236): [machine-checked: tests/unit/test-issue-461-completed-none
 
 ---
 
-## INV-125: a resolved dev session id whose completion `is_session_completed` cannot confirm (a non-terminal stop reason such as `api_error`, a non-claude dev CLI, or an unreadable log), with no live wrapper, gets the SAME bounded verdict-aware recovery as the [INV-111] self-heal branch — and every marker-present same-HEAD fall-through escalates to `mark_stalled`, never the residual park
+<a id="inv-125-a-resolved-dev-session-id-whose-completion-is_session_completed-cannot-confirm-a-non-terminal-stop-reason-such-as-api_error-a-non-claude-dev-cli-or-an-unreadable-log-with-no-live-wrapper-gets-the-same-bounded-verdict-aware-recovery-as-the-inv-111-self-heal-branch--and-every-marker-present-same-head-fall-through-escalates-to-mark_stalled-never-the-residual-park"></a>
+## INV-125: a resolved dev session id whose completion `is_session_completed` cannot confirm gets the same bounded verdict-aware recovery as the [INV-111] self-heal branch, and marker-present same-HEAD fall-throughs with current terminal evidence escalate to `mark_stalled`
 
 _Triage (issue #236): [machine-checked: tests/unit/test-issue-466-crashed-session-recovery.sh, tests/unit/test-issue-351-stale-verdict-delegate.sh]_
 
@@ -7300,9 +7301,9 @@ Both call sites gate on `may_stall_now` (no live dev wrapper) BEFORE invoking th
 - `failed-non-substantive` → `label_swap pending-dev → pending-review` (re-review, not a `dev-new` — the code isn't the problem), bounded via the **shared** `self-heal-non-substantive:<head>` marker — the SAME marker namespace regardless of which cause requested the re-review, because a re-review costs the same either way; a separate per-cause marker would silently double the budget.
 - `failed-substantive` (dev-actionable=true) or `none` (fail OPEN, the same posture the pre-existing self-heal behavior and the classifier's own legacy no-trailer fallback take) → bounded `dev-new`, gated on a **shared** budget check across BOTH `self-heal-lost-session:<head>` AND `crashed-session-retry:<head>` — either marker present means this HEAD already consumed its one self-heal/crash-recovery `dev-new` with no progress, regardless of which cause is asking now.
 
-**Part 2 — closing the counting hole.** Every marker-present / budget-exhausted arm above calls `mark_stalled` **directly** — it NEVER falls through to the residual `stale-verdict:<head>` park. In a park, `count_retries` is frozen by construction (a park posts only an idempotent notice, which `count_retries` never counts — no dispatch, no countable comment), so the pre-existing code comments claiming "MAX_RETRIES remains the eventual backstop" for a marker-present fall-through were **false as written**: with no dispatch ever running again for that HEAD, no comment `count_retries` scans for can ever be posted, so the counter can never grow and `MAX_RETRIES` can never trip. The marker itself IS the evidence that the one bounded recovery for this HEAD was already spent with no progress — that is sufficient grounds for `mark_stalled` on its own, without needing `count_retries` to independently confirm it. (Teaching `count_retries` to count park notices instead was rejected: notices are idempotent, at most one per HEAD, so they could never accumulate to any threshold either — the explicit `mark_stalled` call is the only shape that actually closes the hole.)
+**Part 2 — closing the counting hole.** Every marker-present / budget-exhausted arm above is terminal once its underlying evidence is current. [INV-149] narrows the `mergeable-unknown` case: the marker proves budget consumption but the historical provider observation must be refreshed before it can justify `mark_stalled`. A current `MERGEABLE`/`CONFLICTING` re-enters review under the existing per-session/per-HEAD `REVIEW_RETRY_LIMIT`; an undecided bounded poll containing a provider-read failure defers under INV-128; and only a fully successful poll that remains `UNKNOWN` retains the direct stall. Other non-substantive causes and the shared dev-new budget still call `mark_stalled` directly. In a park, `count_retries` is frozen by construction (a park posts only an idempotent notice, which `count_retries` never counts — no dispatch, no countable comment), so usable marker-present evidence must never fall through merely to wait for `MAX_RETRIES`.
 
-After this fix, the residual `stale-verdict:<head>` park is reachable ONLY for genuinely transient states: a dev wrapper is still alive (`may_stall_now` defers — Step 5 owns liveness), a concurrent tick holds the `dev-new` dispatch marker ([INV-108] — the helper returns 1, distinct from its `mark_stalled` arms which return 0), or the helper's own comment-read preflight fails (below — the helper also returns 1 here, same as the [INV-108] case).
+After this fix, the residual `stale-verdict:<head>` park is reachable ONLY for genuinely transient states: a dev wrapper is still alive (`may_stall_now` defers — Step 5 owns liveness), a concurrent tick holds the `dev-new` dispatch marker ([INV-108] — the helper returns 1, distinct from its `mark_stalled` arms which return 0), the helper's own comment-read preflight fails, or INV-149 cannot finish its bounded provider poll / reservation read or write / label transition. INV-149 operational failures return `3`, so the caller omits `JUST_DISPATCHED`. Provider and reservation-I/O outages remain bounded by INV-128; repeated label failures are bounded directly because each attempted transition already owns a durable reservation.
 
 **Comment-fetch-failure preflight (PR #471 review fix).** Every downstream check in the helper — `classify_recent_review_verdict`, and the `self-heal-lost-session`/`crashed-session-retry`/`self-heal-non-substantive` marker-present probes — reads `itp_list_comments` and treats an EMPTY result as a legitimate negative (`verdict=none`, "marker absent"). Left unguarded, a transient comment-fetch failure (rate-limit/auth/network blip) produces the exact same empty shape, so it would misclassify into `mark_stalled` (a fetch failure looks like "budget already spent" — the marker-present checks default fail-CLOSED via `${_budget_spent:-1}`/`${_ns_present:-1}`, i.e. *empty read → treated as marker PRESENT*) or an unwarranted fresh `dev-new` (a fetch failure looks like `verdict=none`, which fails OPEN to a dispatch) against an otherwise-healthy issue — precisely the transient class this invariant reserved the residual park for. Fix: `_same_head_verdict_aware_recovery` preflights `itp_list_comments` once at entry; a non-zero rc returns 1 immediately (before touching `classify_recent_review_verdict` or any marker probe), so the caller falls through to the unchanged residual park instead of misrouting. A same-HEAD branch is only reached after a review-FAILED verdict has already posted at least one comment, so a genuinely empty comment list can never be legitimate here — any empty/failed read at this call site is definitionally transient.
 
@@ -7320,6 +7321,7 @@ After this fix, the residual `stale-verdict:<head>` park is reachable ONLY for g
 - [INV-123](#inv-123-the-completed-session-verdict-none-route-is-bounded--a-no-pr-completed-session-retries-via-dev-new-under-max_retries-branch-c-mirror-no-escalation-ladder-and-a-pr-exists-none-no-qualifying-review-comment-found-still-fails-closed-to-the-inv-12-operator-handoff) — the sibling permanent-park bug this invariant fixes for a different entry condition (a resolved-but-unprovable session id vs. a `verdict=none` completed session); the two share the same "only branch with no bound" shape.
 - [INV-92](#inv-92-a-review-blocking-finding-the-dev-agent-provably-cannot-act-on-protected-path--missing-token-scope-is-not-routed-to-dev-resume--the-wrapper-classifies-each-findings-actionability-and-the-dispatcher-escalates-a-non-actionable-verdict-to-stalled) — the `dev-actionable=false` escalation this invariant's helper reuses (own per-cause marker, no dev-new).
 - [INV-108](#inv-108-every-dispatcher-tick-dispatch-site-acquires-a-controller-side-per-issuemode-marker-atomically-before-any-side-effect--a-losing-acquire-skips-cleanly-never-dispatches-the-marker-expires-via-ttl-never-wedging-the-issue-the-dispatch-token-gains-a-run-field-for-post-hoc-attribution) — the controller-side dedup guard the shared helper's dev-new dispatch adopts, identical sequencing to the pre-existing self-heal call site.
+- [INV-149](#inv-149-a-consumed-same-head-non-substantive-retry-marker-cannot-make-a-historical-mergeable-unknown-observation-terminal-without-a-current-head-pinned-provider-read) — the freshness exception for the mutable `mergeable-unknown` cause.
 - [`docs/designs/issue-466-crashed-session-recovery.md`](../designs/issue-466-crashed-session-recovery.md) — the full design, including the rejected "unconditional dev-new" and "separate per-cause markers" alternatives.
 
 ---
@@ -9405,15 +9407,39 @@ paths from resolving to a repository different from the command's real target.
 canonical `git-common-dir` is outside the installing repository's policy and is
 allowed. A target in the same repository is blocked when canonical `git-dir ==
 git-common-dir` and allowed when they differ, which identifies a linked
-worktree. Helper rc `2`, a missing/non-git target, or a failed canonical probe
-falls back to evaluating the hook cwd; uncertainty never grants a commit. The
-blanket `--amend` exemption remains unchanged.
+worktree. The hook prints `BLOCKED - Must Use Git Worktree` only after those
+repository and worktree identities are positively verified.
+
+Helper rc `2` or a failed target `git-common-dir` probe preserves the existing
+decision contract by evaluating the inherited hook cwd. A positively identified
+linked-worktree cwd remains allowed; a main-workspace cwd remains blocked.
+Uncertainty does not grant an allow by itself, and is never reported as proof
+of a main-workspace violation.
+
+When that fallback decision blocks, or when the installing-repository identity
+or target `git-dir` cannot be probed, the hook exits `2` with
+`BLOCKED - Unable to Verify Target Repository`. The diagnostic directs the
+caller to run from the repository or linked worktree whose policy applies and
+use one supported command with a literal path to an existing Git repository.
+The blanket `--amend` exemption remains unchanged.
 
 The supported grammar is intentionally not a general shell parser. Repeated
 `cd`, mixed `cd` plus `git -C`, wrappers, other git global options, control
 flow, substitutions/expansions, malformed quotes, multiple matching
 invocations, attached or repeated `-C`, and special/option-like `cd` operands
 are unsupported and take the rc `2` fail-closed path.
+
+Before detection and cwd resolution, shell comments and bounded file-generation
+heredocs are removed from consideration so documentation text is not mistaken
+for an invocation (#547). Heredoc masking applies only to simple external
+`cat` commands or external `gh pr create|comment|edit --body-file -` commands
+that are the first executable command, use identifier delimiters, and have no
+control operators or physical-line continuations.
+Unquoted heredoc substitutions, preceding setup commands, shell consumers,
+pipelines, ambiguous syntax, and unsupported quote contexts retain the original
+command text and fail closed. Once an ambiguous expansion is reached, later
+heredocs are intentionally not reclassified. The preprocessor never evaluates
+command text.
 
 **Producer**: `lib.sh::resolve_git_command_cwd`.
 
@@ -9422,11 +9448,33 @@ are unsupported and take the rc `2` fail-closed path.
 **Status**: **ENFORCED**.
 
 **Test**: `tests/unit/test-block-commit-outside-worktree.sh`
-(`TC-BCOW-001..013`) covers both repository identities and main/linked
+(`TC-BCOW-001..016`) covers both repository identities and main/linked
 worktrees, all supported path forms, helper return codes, the fail-closed
-syntax matrix, and non-execution sentinels. The exact unrelated-repository
-reproduction is red on the parent implementation and green with this
-invariant.
+syntax matrix, non-execution sentinels, and diagnostic selection for proven
+main-workspace violations versus unverified resolver or repository-probe
+context. The exact unrelated-repository reproduction is red on the parent
+implementation and green with this invariant.
+`tests/unit/test-is-git-command-non-executable-regions.sh`
+(`TC-IGC-547-001..175`) covers comment/heredoc false positives, dynamic
+git-free shell consumers, generic/quoted/dynamic operation forms, the
+five-second hook budget, and the fail-closed substitution, interpreter,
+pipeline, and shadowing controls. Ambiguous inputs at least 4 KiB take one
+linear static candidate pass plus a bounded substitution-span pass instead of
+the older repeated character scans. Substitution bodies are masked
+independently before the 64-body/8 KiB semantic-analysis budget is charged, so
+generated PR bodies remain data while executable siblings remain visible.
+Approximately 20 KiB unmasked inputs, 35 KiB masked heredocs, 53 KiB
+comment-masked inputs, and sub-4 KiB deeply nested substitutions pin the
+five-second hook budget.
+`tests/unit/test-block-push-regex.sh` (`TC-BP-35..61`) covers the same budget,
+chained, multiline, and prefixed feature pushes, git-free expansions,
+non-executable and shell-consumed push text, shell redirections, brace groups,
+line continuations, mixed quote fragments, dynamic refspecs, arithmetic
+expansions, ordinary data pipelines, benign versus executable substitutions,
+multi-stage and compound stdin evaluators, compact `env -S` forms, alternate
+shell applets, substitution-bearing large inputs, linear long-pipeline and
+indexed grouped-segment and command-list handling, and fail-closed handling for
+an unreadable operation or refspec.
 
 **Cross-reference**:
 [`docs/designs/block-commit-command-context.md`](../designs/block-commit-command-context.md)
@@ -9736,7 +9784,7 @@ they read only what the wrapper exported and never parse conf.
 
 **Status**: **ENFORCED**.
 
-**Test**: `tests/unit/test-block-push-regex.sh` (`TC-BP-01..34`, 74 assertions) —
+**Test**: `tests/unit/test-block-push-regex.sh` (`TC-BP-01..61`, 410 assertions) —
 the 11 pre-existing #64 cases unchanged, plus TC-BP-13b (bare push from inside
 the wiki), TC-BP-13c (no anchor → fail closed), TC-BP-16 (second clone of this
 project's remote, all three command shapes), TC-BP-17 (five URL spellings),
@@ -9762,6 +9810,120 @@ against the wrong repository (22), local push-config redirect (23), path-embedde
 `@` collapsing distinct hosts (24/24b), DNS/path-equivalent spellings of own
 trunk (26), and an unreadable anchor read as "not mine" (27).
 
+TC-BP-35 pins the five-second hook budget and fail-closed fallback when an
+approximately 8 KiB ambiguous command contains a real trunk push but the
+bounded refspec parser cannot produce a destination token.
+
+TC-BP-36..60 pin the review regressions. A single structured token snapshot is
+shared by destination and refspec parsing, with newlines and shell control
+operators preserving command boundaries. Each executable push in chained,
+multiline, subshell, assignment-prefixed, or supported wrapper-prefixed command
+text is classified independently; feature-only workflows are allowed while any
+trunk destination blocks. An unknown wrapper containing a possible push remains
+fail-closed. A quoted dynamic remote remains one shell word, so a following
+literal feature refspec stays readable; an unquoted dynamic remote remains
+fail-closed because word splitting could change the positional grammar.
+Expansion-bearing commands without a literal Git operation are not treated as
+pushes, while a single dynamic command-word token such as `$GIT` followed by the
+literal `push` operation remains fail-closed. Builtin `echo`/`printf` arguments
+and bounded heredoc data are non-executable when consumed only as data. Variable
+data piped to ordinary consumers such as `jq`, `tee`, `sort`, `gh`, `cut`,
+remote `cat`, or wrapped `jq` remains data. Consumers that execute stdin are
+recognized structurally:
+shell/interpreter commands, awk programs containing `system()` or command
+pipes, and awk source-loading options or directives. Awk classification permits
+only the statically safe `-F`/`--field-separator`, `-v`/`--assign`, and `--`
+option forms; every other option fails closed, covering gawk `-E`/`--exec`,
+source-loading forms, accepted long-option abbreviations, and future extension
+options. Sed programs that may contain the lowercase `e` execution command/flag,
+dynamic or unknown commands, executing output process substitutions, and
+`xargs` commands whose appended arguments complete a wrapper are likewise
+executable. Only explicit data commands and statically safe awk/sed programs
+remain data-only. A command-position scan descends through
+`if`/loop/`case`/group bodies and inspects static arguments of otherwise unknown
+wrappers, while unclassified consumers fail closed. `env -S` and
+`--split-string` command text, including attached and clustered short-option
+forms, is reconstructed with its trailing arguments and classified by the same
+scanner. Alternate shell names and BusyBox shell applets execute stdin.
+Classification follows each pipeline once until a command-list boundary, so
+data-only filters cannot hide a later executable consumer. Enclosing compound
+stages are indexed once per token snapshot, and each stage's downstream result
+is memoized. Each pipe token also memoizes its bounded transitive consumer
+result, and every token index memoizes whether it opens an executing process
+substitution. Flat and nested multi-producer pipelines therefore remain linear;
+deep output-process-substitution chains do not recursively rescan each enclosing
+stage. Inner data-only pipelines cannot hide an outer shell or executing process
+substitution, while grouped producers, long benign pipelines, and many distinct
+command-list stages avoid repeated downstream walks.
+Literal, ANSI-quoted, quote-concatenated, and dynamic shell input therefore
+fails closed without classifying arithmetic expansion as executable. Command
+and process substitution bodies are analyzed independently by the shared shell
+code scanner: benign `$(date)`-style data remains allowed, while a body that
+executes a possible push keeps the trunk check armed. Identical bodies reuse a
+per-scan result keyed by body text and trusted-data context. At most 64 distinct
+bodies and 8 KiB of cumulative uncached body text receive recursive parsing per
+top-level command. Exceeding either budget is unknown and fails closed,
+including deeply nested benign substitutions whose cumulative work crosses the
+byte cap. This keeps repeated command, backtick, and process substitutions
+bounded without allowing nested or unique-body input to exhaust the hook
+timeout. Within each body, the conservative whole-body verdict is computed once
+and reused by every dynamic command-position candidate rather than rescanning
+the same text per token. Redirections, brace-group delimiters, and
+backslash-newline continuations are shell syntax rather than refspecs. A dynamic
+global argument followed by more global flags and then a definite non-push
+operation remains allowed, while a dynamic refspec remains unknown because its
+runtime value could be trunk. Mixed quote fragments cannot hide either the push
+operation or a trunk refspec.
+Approximately 20–21 KiB unmasked PR-body and single-word push-option inputs stay
+inside the five-second budget. Ambiguous substitution-bearing inputs at least
+4 KiB use the preprocessor's bounded partial projection for the linear static
+command-position scan and refspec parser instead of rescanning masked heredoc or
+comment text. The scan preserves quote concatenation, ignores data-command
+arguments, and can prove an explicit trunk destination without paying for full
+refspec parsing. When the resolver proves no push and the command has no
+pipeline, expansion-only data and large heredoc prose reuse that negative
+result; data that reaches an executable pipeline consumer still enters the
+fail-closed refspec parser.
+Two hundred data-only pipeline stages complete in approximately 0.21–0.34
+seconds. Two hundred grouped data segments complete in approximately 0.71
+seconds through `cat` and 1.01 seconds through `bash`. Approximately 41 KiB
+benign substitution input allows in 0.51 seconds, while literal and
+quote-concatenated trunk controls block in 0.21–0.31 seconds in the pinned
+regression environment. Four hundred and eight hundred distinct command-list
+stages complete in approximately 0.91 and 2.01 seconds respectively. Flat
+50/100/200-stage producer pipelines complete in approximately 0.21/0.51/1.01
+seconds as data and 0.41/0.71/1.51 seconds with a trailing shell; the grouped
+200-stage forms have the same 1.01/1.51-second profile. Repeated command,
+backtick, and process-substitution controls complete in approximately
+0.45–0.68 seconds, a 300-unique-body trunk control in 1.12 seconds, the
+64-body benign boundary in 1.22 seconds, and its fail-closed 65th body in
+2.28 seconds. A 1.5 KiB body containing 500 dynamic command-position tokens
+completes in 0.34–0.43 seconds, and 40 nested output process substitutions
+complete in 1.47–1.50 seconds. All pinned forms remain below the five-second
+hook budget without relying on an early executable-consumer short circuit.
+
+Destination parsing consumes the same non-executable-region projection as
+operation detection. The direct-command parser returns `0` when every matched
+push is readable, `1` when its token stream contains no executable push, and `2`
+when a possible push is unreadable. The cwd resolver's substitution-aware result
+is reused before the parser's rc `1` early exit: resolver rc `1` already proves
+its bounded scanner found no push, while resolved or ambiguous commands without
+an already-readable trunk ref receive an independent substitution-body scan for
+a nested invocation. An already-readable trunk ref skips that potentially
+expensive scan because it has already proved the block. Thus only a parser rc
+`1` with no substitution-push evidence is a positive data-only result; combined
+rc `2` keeps the trunk check armed.
+Substitution spans are measured and sliced under `LC_ALL=C`, so byte offsets
+remain aligned even when UTF-8 text precedes the body. The top-level projection
+replaces each substitution with an adjacent dynamic marker rather than spaces,
+preserving split words such as `p$(echo ush)` as one unsafe operation token.
+Each body is masked independently before the 64-body/8 KiB semantic budget is
+charged. A static builtin `echo`/`printf` body may bypass the byte budget only
+when both the body and its outer `echo` or `gh pr ... --body` argument are
+proven data-only. The 4090-byte alternating `$()`/backtick stress case remains
+within its three-second serial test budget and concurrent verification remains
+below the five-second hook budget.
+
 Measured red/green: **20 of 56 red on PR #539's parent** (`216a906` — the wiki
 and allowlist allows, the second-clone forms, the URL spellings, the
 DNS-equivalent spellings, the wrapper-export statics) and **14 of 56 red on the
@@ -9774,5 +9936,133 @@ other failure mode unguarded.
 - [INV-17](#inv-17-trunk-protection-requires-defense-in-depth-across-3-layers) — the 3-layer model this is Layer 1 of; the destination comparison narrows Layer 1's *scope* without widening its *gaps*.
 - [INV-146](#inv-146-commit-worktree-enforcement-is-scoped-to-the-resolved-command-repository-and-fails-closed-when-command-context-is-uncertain) — supplies `resolve_git_command_cwd` and the fail-closed philosophy. Its **local-identity** decision is correct for worktree hygiene and is deliberately NOT reused here.
 - [INV-131](#inv-131-the-pipelines-base-branch-is-a-resolved-exported-validated-conf-value--never-a-hardcoded-main-literal-in-a-prompt-hook-or-provider-argv) — the resolve-once/export-once wrapper pattern the project anchor follows.
+
+## INV-149: a consumed same-HEAD non-substantive retry marker cannot make a historical `mergeable-unknown` observation terminal without a current HEAD-pinned provider read
+
+_Triage (issue #236): [machine-checked: tests/unit/test-issue-545-same-head-mergeability-freshness.sh]_
+
+**Rule**: when `_same_head_verdict_aware_recovery` classifies the newest
+same-HEAD verdict as `failed-non-substantive cause=mergeable-unknown` and finds
+`self-heal-non-substantive:<head>` already present, it MUST revalidate provider
+mergeability before calling `mark_stalled`. The durable marker proves that the
+one same-HEAD re-review budget was consumed; it does not prove that the
+provider state observed during review is still current.
+
+The refresh is provider-neutral and HEAD-pinned:
+
+1. Read normalized PR state, full HEAD, and branch.
+2. Require the PR to be open at the expected full HEAD.
+3. Poll `chp_mergeable` with the existing `MERGEABLE_RETRIES` /
+   `MERGEABLE_RETRY_DELAY_SECONDS` bound while preserving whether any read
+   failed.
+4. Read normalized state and full HEAD again.
+5. Interpret the mergeability token only when both snapshots describe the same
+   open expected HEAD.
+
+The resulting decision table is:
+
+| Fresh result | Dispatcher action |
+|---|---|
+| `MERGEABLE` | Under the per-session/per-HEAD `REVIEW_RETRY_LIMIT`, persist a counted requeue intent reservation, then transition `pending-dev -> pending-review`. The normal review preflight, E2E, fan-out, CI, approval, and merge gates remain authoritative. |
+| `CONFLICTING` | Use the same bounded requeue; the normal preflight enters INV-147's canonical conflict/rebase route and writes its required durable evidence. |
+| Every bounded read succeeds but remains `UNKNOWN`/empty/unrecognized | Retain INV-125's direct `mark_stalled`; the historical verdict now has persistent current same-HEAD corroboration. |
+| Poll never becomes decisive and any `chp_mergeable` read fails; malformed snapshot; unavailable PR number | Keep the residual `stale-verdict:<head>` notice but return operational defer (`3`), without dispatching, requeueing, or stalling. The tick omits `JUST_DISPATCHED` and INV-128 bounds the outage. A failed read is never fabricated as fresh `UNKNOWN`. |
+| Requeue reservation count/read/write fails | Return operational defer (`3`) without fabricating a zero count; INV-128 bounds the stable outage. |
+| Label transition fails or reports an ambiguous failure | Return operational defer (`3`) below the cap. The pre-transition reservation still counts, so repeated failures converge at `REVIEW_RETRY_LIMIT`; never return `2` or abort the remaining project tick. |
+| Post-transition completion marker fails | Continue through normal review; the durable pre-transition reservation already consumed the attempt. |
+| Fresh requeue reservation count reaches `REVIEW_RETRY_LIMIT` | `mark_stalled`; neither repeated transitions nor partial comment failures can escape the bound. Duplicate comments carrying the same session + HEAD + ordinal count once. |
+| HEAD changed | Requeue `pending-review` without binding the old verdict to the new HEAD. |
+| PR closed/merged | No-op; Step 0 terminal reconciliation owns cleanup. |
+
+`count_review_aware_flips` is the shared budget reader for both the freshness
+path and later completed-session routing. Ordinary
+`review-aware-flip:non-substantive` comments count individually. An INV-149
+reservation and its optional completion marker form one logical attempt keyed
+by session + full HEAD + ordinal; the union of those keys is counted, so
+reservation/completion pairs and concurrent duplicate posts cannot double
+spend the budget. A reservation without completion still counts. Comment
+recognition is body-start anchored: only a comment whose body starts with the
+declared `review-aware-flip:non-substantive` or
+`same-head-mergeability-requeue` prefix enters strict marker parsing. Prose
+that merely quotes either marker is not accounting evidence and is ignored.
+The reservation idempotency check and reservation counter use the same
+body-start selector, so one comment cannot be "already present" to the writer
+but absent from the budget. New reservation ordinals advance past the highest
+retained ordinal rather than deriving from the unique count, so a sparse
+timeline cannot repeatedly reuse one marker and evade the cap. Comment
+transport failure, malformed JSON/schema, or a body-start-recognized marker
+that fails its full grammar returns nonzero;
+`handle_completed_session_routing` propagates operational defer (`3`) without
+label mutation. Its same-HEAD caller preserves that code, and the direct Step
+4b caller handles it with `continue`, so neither entry point aborts the
+remaining project scan or adds the issue to `JUST_DISPATCHED`. Other nested
+nonzero errors retain their prior hard-error mapping.
+
+**GitLab interaction**: policy states such as `ci_still_running`,
+`ci_must_pass`, `not_approved`, and `discussions_not_resolved` remain normalized
+to `UNKNOWN`. That contract is valid because those states are not structural
+conflicts and have independent wrapper gates. The freshness requirement is on
+the later terminal consumer: once CI or another policy state changes without a
+new commit, the same HEAD can become `MERGEABLE` and must be allowed back into
+normal review. No normalization token is weakened, and no final CI,
+mergeability, approval, discussion, or merge requirement is bypassed.
+
+**Scope**: only the consumed-marker branch for
+`cause=mergeable-unknown` changes. Substantive verdicts,
+`dev-actionable=false`, confirmed-complete sessions, changed-HEAD routing,
+live-wrapper deferral, other non-substantive causes, and shared dev-new budgets
+retain their prior behavior.
+
+**Producer**:
+`lib-review-mergeable.sh::review_refresh_mergeability` (bounded poll with two
+state/HEAD snapshots);
+`lib-dispatch.sh::_same_head_verdict_aware_recovery` (terminal consumer).
+
+**Consumer**: dispatcher Step 4a.5 pending-dev convergence.
+
+**Status**: **ENFORCED** (closes #545).
+
+**Tests**:
+`tests/unit/test-issue-545-same-head-mergeability-freshness.sh` —
+TC-545-FRESH-001 (`UNKNOWN -> MERGEABLE` avoids stale stall),
+TC-545-FRESH-002 (`UNKNOWN -> CONFLICTING` re-enters the canonical preflight),
+TC-545-FRESH-003 (fresh persistent `UNKNOWN` stalls),
+TC-545-FRESH-004 (provider-read failure defers distinctly),
+TC-545-FRESH-005 (substantive budget behavior unchanged),
+TC-545-FRESH-006 (a changed initial HEAD requeues without reading mergeability),
+TC-545-FRESH-007 (a post-read HEAD change proves the second snapshot is
+load-bearing),
+TC-545-FRESH-008 (one `UNKNOWN` settles to `MERGEABLE` within the poll),
+TC-545-FRESH-009 (fresh-state requeues stop at `REVIEW_RETRY_LIMIT`), and
+TC-545-FRESH-010 (repeated label failure reserves attempts and converges without
+tick-aborting rc=2),
+TC-545-FRESH-011 (reservation-count read failure cannot fabricate zero), and
+TC-545-FRESH-012 (completion-marker failure cannot escape the cap),
+TC-545-FRESH-013 (duplicate reservation/completion posts count once),
+TC-545-FRESH-014 (later completed-session routing inherits freshness spend),
+TC-545-FRESH-015 (completed-session accounting read failure defers), and
+TC-545-FRESH-016 (malformed accounting fails nonzero),
+TC-545-FRESH-017 (the direct tick caller continues after defer),
+TC-545-FRESH-018 (prose-quoted markers are ignored without failing accounting),
+TC-545-FRESH-019 (a verbatim quoted reservation cannot suppress real
+reservations or escape the cap), TC-545-FRESH-020 (sparse retained ordinals
+still allocate a fresh marker and converge), plus
+TC-545-TRACE-001 (two initial `UNKNOWN` preflights followed by same-HEAD
+`MERGEABLE` reaches normal review with no manual label change or commit).
+`tests/unit/test-dispatcher-review-disposition-routing.sh::TC-E2E-REBASE-054`
+pins operational defer to no `JUST_DISPATCHED` entry and a repeated-tick
+INV-128 stall.
+`tests/unit/test-chp-gitlab-reads.sh::TC-P33-031` separately pins
+`ci_still_running -> UNKNOWN`; the review mergeability and CI-rollup suites pin
+the unchanged final gates.
+`tests/unit/test-liveness-watchdog.sh` TC-LIVENESS-099..102 pins each new
+producer body to a whole-body grammar so intent, completion, changed-HEAD, and
+retry-limit comments do not reset the watchdog's non-idempotent count.
+
+**Cross-references**:
+- [INV-125](#inv-125-a-resolved-dev-session-id-whose-completion-is_session_completed-cannot-confirm-a-non-terminal-stop-reason-such-as-api_error-a-non-claude-dev-cli-or-an-unreadable-log-with-no-live-wrapper-gets-the-same-bounded-verdict-aware-recovery-as-the-inv-111-self-heal-branch--and-every-marker-present-same-head-fall-through-escalates-to-mark_stalled-never-the-residual-park) — owns the shared retry marker and bounded recovery table; this invariant adds the mutable-provider-evidence freshness exception.
+- [INV-147](#inv-147-a-head-pinned-mergeability-preflight-routes-known-conflicts-before-e2e-and-produces-strict-durable-disposition-evidence) — owns the canonical normal-review outcomes after a fresh requeue.
+- [INV-128](#inv-128-any-non-terminal-issue-whose-observable-state-fingerprint-label-pr-head-non-idempotent-comment-count-marker-digest-stays-unchanged-for-liveness_notice_ticks-default-6-consecutive-dispatcher-ticks-gets-one-operator-visible-tier-1-escalation-and-after-liveness_stall_ticks-default-18-further-unchanged-ticks-is-unconditionally-transitioned-to-stalled-with-a-structured-reasonliveness-timeout-report--the-pipelines-first-global-liveness-invariant-every-non-terminal-issue-either-changes-observable-state-or-is-escalated-within-a-bounded-number-of-ticks) — bounds persistent provider-read failure without misclassifying it as current mergeability evidence.
+- [`docs/designs/issue-545-same-head-mergeability-freshness.md`](../designs/issue-545-same-head-mergeability-freshness.md) — decision record and failure-mode diagram.
 
 ---

@@ -17,11 +17,6 @@ source "$SCRIPT_DIR/lib-push.sh"
 input=$(read_hook_stdin)
 command=$(parse_command "$input")
 
-# Only check git push commands
-if ! is_git_command "push" "$command"; then
-  exit 0
-fi
-
 # Trunk protection guards THIS project's REMOTE trunk, so the question it must
 # ask is "where does this push land?" — not "which local checkout issued it"
 # ([INV-148]). A push whose destination is a different repository is not this
@@ -55,19 +50,116 @@ if [[ -z "$anchor_dir" || ! -d "$anchor_dir" ]]; then
   anchor_dir="$(pwd -P)"
 fi
 
-# Which repository issues the push. rc=2 means a push matched but its context is
-# unresolvable ([INV-146]) — that is UNKNOWN, not "the cwd": the cwd is a
-# different repository than the command's real target, so substituting it would
-# compare the wrong repo in both directions. Only rc=0 yields a usable target.
+# Trunk branch name (issue #478, [INV-131]): BASE_BRANCH (the wrapper
+# resolves+exports it once at startup) -> TRUNK_BRANCH (this hook's pre-#478
+# override, still honored standalone) -> "main" default.
+trunk="${BASE_BRANCH:-${TRUNK_BRANCH:-main}}"
+
+# Which repository issues the push. Only resolver rc=0 yields a usable target;
+# either non-zero result still receives the push parser's narrow executable-data
+# check below. Quoted text piped into a shell can be executable even when the
+# cwd resolver sees no direct invocation.
 push_dir=""
-if resolved_dir=$(resolve_git_command_cwd "push" "$command" "$(pwd -P)"); then
-  push_dir="$resolved_dir"
+if push_dir=$(resolve_git_command_cwd "push" "$command" "$(pwd -P)"); then
+  resolve_rc=0
+else
+  resolve_rc=$?
+  push_dir=""
+fi
+
+large_static_trunk_push=0
+if (( resolve_rc == 2 && ${#command} >= 4096 )) &&
+  _large_static_shell_text_contains_git_operation \
+    "push" "$command" "$trunk"; then
+  large_static_trunk_push=1
+fi
+
+# Most resolver no-matches are ordinary git-free commands. Only pay for the
+# structured second opinion when a cheap conservative scan still sees literal
+# push-shaped text or data can flow into an executable consumer. Expansion-only
+# input reuses the resolver's substitution-aware negative result.
+if (( resolve_rc == 1 )) &&
+  ! _conservative_shell_text_contains_git_operation "push" "$command"; then
+  [[ "$command" == *'|'* ]] || exit 0
+  if ! _push_shell_text_may_contain_executable_push_data "$command" ||
+    (( _PUSH_EXECUTABLE_DATA_HAS_PIPELINE == 0 )); then
+    exit 0
+  fi
+fi
+
+# Apply the resolver's non-executable-region policy to destination parsing too.
+# Ambiguous input uses the resolver's bounded partial projection. The separate
+# substitution scan below keeps hidden pushes fail-closed without sending
+# masked prose through the destination parser.
+push_command="$command"
+substitution_scan_command="$command"
+if stripped_push_command=$(_strip_shell_non_executable_regions "$command"); then
+  push_command="$stripped_push_command"
+  substitution_scan_command="$stripped_push_command"
+else
+  strip_push_rc=$?
+  # For large ambiguous input, the linear scanner consumes the same bounded
+  # partial projection as resolve_git_command_cwd. Substitution bodies receive
+  # their own semantic scan below, so ref parsing must never reinterpret masked
+  # heredoc prose as a top-level push destination.
+  if (( strip_push_rc == 2 )); then
+    substitution_scan_command="$stripped_push_command"
+    push_command="$stripped_push_command"
+  fi
+fi
+
+# Parse destination refs before repository scoping. rc=1 positively means no
+# executable push exists; rc=2 remains unknown and therefore fail-closed after
+# scope evaluation. This second opinion is also what distinguishes quoted data
+# piped to a shell from inert documentation text when the resolver returns 1.
+parsed_refs=""
+if (( large_static_trunk_push == 1 )); then
+  parse_rc=2
+else
+  # Tokenize once in the parent shell. Both parser command substitutions
+  # inherit this immutable snapshot, avoiding repeated character scans.
+  _push_prepare_command_tokens "$push_command"
+  if parsed_refs=$(parse_push_target_refspec "$push_command"); then
+    parse_rc=0
+  else
+    parse_rc=$?
+  fi
+fi
+
+# A statically readable trunk ref already proves the command must block, so do
+# not spend the remaining hook budget recursively classifying unrelated
+# substitutions. Feature-only refs still need that second opinion because
+# push_command has executable substitution bodies masked out; one of those
+# bodies may contain a separate trunk push. Resolver rc=1 already includes the
+# same substitution-aware negative result and does not need a duplicate scan.
+parsed_trunk_ref=0
+if (( parse_rc == 0 )); then
+  while IFS= read -r ref; do
+    [[ -z "$ref" ]] && continue
+    if is_trunk_ref "$ref" "$trunk"; then
+      parsed_trunk_ref=1
+      break
+    fi
+  done <<<"$parsed_refs"
+fi
+if (( parse_rc != 2 && parsed_trunk_ref == 0 && resolve_rc != 1 )); then
+  case "$command" in
+    *'$('*|*'`'*|*'<('*|*'>('*)
+      if _shell_substitutions_contain_git_operation \
+        "push" "$substitution_scan_command"; then
+        parse_rc=2
+      fi
+      ;;
+  esac
+fi
+if (( parse_rc == 1 )); then
+  exit 0
 fi
 
 # Both destinations must be PROVEN before the push may be waved through. Each
 # of these can report "unknown", and any unknown leaves the trunk check armed.
 target_url=""
-if [[ -n "$push_dir" ]] && remote_operand=$(parse_push_remote_operand "$command"); then
+if [[ -n "$push_dir" ]] && remote_operand=$(parse_push_remote_operand "$push_command"); then
   target_url=$(push_destination_url "$push_dir" "$remote_operand") || target_url=""
 fi
 
@@ -105,22 +197,15 @@ if [[ -n "${PUSH_ALLOWED_REMOTE_URLS:-}" && -n "$target_url" ]]; then
   done
 fi
 
-# Trunk branch name (issue #478, [INV-131]): BASE_BRANCH (the wrapper
-# resolves+exports it once at startup) → TRUNK_BRANCH (this hook's pre-#478
-# override, still honored standalone e.g. for a manually-run hook outside the
-# wrapper) → "main" default. Byte-identical to today when neither is set.
-trunk="${BASE_BRANCH:-${TRUNK_BRANCH:-main}}"
-
 # Parse the destination ref(s) the push would write to. Block if any of
 # them target the trunk (covers --all/--mirror via __ALL__/__MIRROR__).
-should_block=0
-while IFS= read -r ref; do
-  [[ -z "$ref" ]] && continue
-  if is_trunk_ref "$ref" "$trunk"; then
-    should_block=1
-    break
-  fi
-done < <(parse_push_target_refspec "$command")
+should_block=$parsed_trunk_ref
+
+# Parser rc=2 means an executable push was found but its destination was
+# unreadable. rc=1 was handled above as a proven data-only resolver match.
+if (( parse_rc == 2 )); then
+  should_block=1
+fi
 
 if (( should_block == 1 )); then
   cat >&2 <<EOF
