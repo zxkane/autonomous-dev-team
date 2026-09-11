@@ -6867,7 +6867,9 @@ _Triage (issue #236): [machine-checked: tests/unit/test-lane-gc-p4-gc.sh, tests/
 
 **P8 acceptance boundary correction (#384):** rule 3.4 matches only the exact
 missing worktree or a slash-delimited descendant, preserving raw cwd bytes
-including newlines. Rule 3.1 reads NUL-delimited Linux argv once per candidate
+including newlines. A matched rule 3.4 candidate must also have a zero-link
+Linux cwd inode; failed path lookups alone cannot distinguish removal from
+permission denial. Unreadable inode evidence fails toward leak. Rule 3.1 reads NUL-delimited Linux argv once per candidate
 and requires one unambiguous, complete absolute `--user-data-dir` value equal
 to the lane hint. Neither sibling path prefixes nor profile text embedded in
 another argument proves lane ownership. Duplicate, malformed, unreadable, or

@@ -1206,7 +1206,7 @@ _gc_pass3_wedged_gh() {
 }
 
 _gc_pass3_e2e_servers() {
-  local lane_dir worktree pid pid_identity cwd pg pg_identity index matched_index
+  local lane_dir worktree pid pid_identity cwd cwd_links pg pg_identity index matched_index
   local -a lane_dirs=()
   local -a worktrees=()
 
@@ -1239,7 +1239,7 @@ _gc_pass3_e2e_servers() {
     for index in "${!worktrees[@]}"; do
       worktree="${worktrees[$index]}"
       if [[ "$cwd" == "$worktree" || "$cwd" == "${worktree}/"* \
-          || ( "$cwd" == "${worktree} (deleted)" && ! -e "$cwd" ) ]]; then
+          || "$cwd" == "${worktree} (deleted)" ]]; then
         matched_index="$index"
         break
       fi
@@ -1247,6 +1247,11 @@ _gc_pass3_e2e_servers() {
     (( matched_index >= 0 )) || continue
     lane_dir="${lane_dirs[$matched_index]}"
     worktree="${worktrees[$matched_index]}"
+    # A failed path lookup can mean permission denied, not removal. Require
+    # the Linux cwd inode itself to prove unlinking; live directories retain
+    # links even when their parents are inaccessible. Unknown evidence leaks.
+    cwd_links="$(stat -L -c '%h' "/proc/${pid}/cwd" 2>/dev/null)" || continue
+    [[ "$cwd_links" == 0 ]] || continue
     pg="$(proc_pgid "$pid" 2>/dev/null || echo "")"
     _gc_safe_kill_pgid "$pg" || continue
     pg_identity="$(proc_identity "$pg" 2>/dev/null)" || continue

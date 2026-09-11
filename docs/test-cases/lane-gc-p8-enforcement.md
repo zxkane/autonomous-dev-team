@@ -81,6 +81,7 @@ classification-only, and cleanup signals only fixture-owned groups.
 | TC-LGC8-B06 | Profile path contains whitespace or shell metacharacters | Only exact complete argument values match; nothing executes |
 | TC-LGC8-B07 | Separate-value, single-hyphen, duplicate, empty, missing, relative or whitespace-normalized profile options; option after `--`; newline injection | Fail toward leak without classification |
 | TC-LGC8-B08 | All boundary cases | Fixture survives dry-run and legacy counter remains zero |
+| TC-LGC8-B09 | Parent lacks search permission; live exact cwd or literal ` (deleted)` sibling; inode stat fails | Rule 3.4 requires a zero-link cwd inode and refuses live or unverifiable directories |
 
 Linux raw NUL-delimited argv is required for delayed rule 3.1 authority.
 Formatted or newline-delimited command text is never substituted when raw

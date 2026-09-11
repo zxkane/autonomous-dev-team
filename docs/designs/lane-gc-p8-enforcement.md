@@ -198,7 +198,11 @@ The enforcement acceptance audit found that PID identity does not establish
 lane ownership when cwd/profile matching accepts string prefixes. Rule 3.4
 must compare the exact worktree directory or a slash-delimited descendant,
 including the kernel's deleted-cwd suffix, and still exclude existing
-worktrees. Rule 3.1 reads Linux NUL-delimited argv once per PID, accepts one
+worktrees. A missing-path lookup can also mean permission denied, so matching
+rule 3.4 candidates additionally require the Linux cwd inode's link count to
+be zero. An unreadable inode or live directory, including a literal
+` (deleted)` sibling beneath an inaccessible parent, fails toward leak.
+Rule 3.1 reads Linux NUL-delimited argv once per PID, accepts one
 unambiguous absolute `--user-data-dir` value (canonical joined form only), and
 compares the whole value to the lane hint. Chromium's
 [`base/command_line.cc`](https://github.com/chromium/chromium/blob/main/base/command_line.cc)
