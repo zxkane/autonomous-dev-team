@@ -10082,6 +10082,8 @@ retry-limit comments do not reset the watchdog's non-idempotent count.
 
 ## INV-150: dev and review share one blocking policy without weakening mandatory verification
 
+_Triage (issue #236): [machine-checked: tests/unit/test-review-blocking-policy.sh]_
+
 **Rule**: `_review_blocking_severity` resolves `REVIEW_BLOCKING_SEVERITY` as fixed
 P1 (default), P2, P3, or the legacy `adaptive` floor. Invalid values warn and use
 P3. Dev new/resume/fallback prompts and review classification use this same
