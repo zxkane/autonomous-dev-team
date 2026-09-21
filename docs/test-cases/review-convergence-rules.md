@@ -7,6 +7,13 @@ E2E evidence-freshness pre-check (R3). Mirrors
 source-of-truth wiring greps against `autonomous-review.sh`, since the wrapper
 itself is too heavy to run end-to-end.
 
+The round-dependent cases below now run with
+`REVIEW_BLOCKING_SEVERITY=adaptive`, the explicit legacy policy. The default is
+P1 from round one. `tests/unit/test-review-blocking-policy.sh` covers the default,
+fixed P2/P3 policies, invalid values, untagged findings, artifact normalization,
+mixed maintainer/advisory routing, Codex corroboration at configured floors, and
+the round cap for fixed stricter policies.
+
 ## Files under test
 
 | File | Role |

@@ -16,6 +16,10 @@
 
 set -uo pipefail
 
+# This suite pins the opt-in legacy ratchet. The default policy is covered
+# independently by test-review-blocking-policy.sh.
+export REVIEW_BLOCKING_SEVERITY=adaptive
+
 PASS=0
 FAIL=0
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -572,8 +576,8 @@ done
 # failing", so `_AGGREGATE_SUBSTANTIVE_FAIL` alone remains correct there;
 # TC-048i's earlier pin confirms the marker gate region only, not this one).
 inv127_gate_block=$(awk '/^    if \[\[ "\$AGGREGATE" == "fail" \]\]/{f=1} f{print} f && /then$/{exit}' "$WRAPPER")
-assert_contains "TC-REVIEW-CONV-036h INV-127 cap gate ALSO consults _AGGREGATE_HAS_P0P1_FAIL" \
-  "$inv127_gate_block" '_AGGREGATE_HAS_P0P1_FAIL'
+assert_contains "TC-REVIEW-CONV-036h INV-127 cap gate consults policy terminal-floor failures" \
+  "$inv127_gate_block" '_AGGREGATE_HAS_CAP_FAIL'
 assert_eq "TC-REVIEW-CONV-036i the round-counter marker gate region does NOT reference _AGGREGATE_HAS_P0P1_FAIL (deliberately unchanged)" "" \
   "$(grep -o '_AGGREGATE_HAS_P0P1_FAIL' <<<"$round_marker_gate_region")"
 

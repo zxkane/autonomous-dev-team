@@ -536,9 +536,17 @@ _codex_review_classify_stdout() {
   if [[ "$_cls_has_turns" == true ]]; then
     local _cls_region
     _cls_region=$(_codex_review_full_response_region "$f") || _cls_region=""
-    if [[ -n "$_cls_region" ]] && grep -qE '\[P[01]\]' <<<"$_cls_region" 2>/dev/null; then
-      printf 'fail\n'
-      return 0
+    if [[ -n "$_cls_region" ]]; then
+      if declare -F _review_region_blocking_severity >/dev/null 2>&1; then
+        if [[ "$(_review_region_blocking_severity "$_cls_region" "${REVIEW_ROUND:-1}")" != none ]]; then
+          printf 'fail\n'
+          return 0
+        fi
+      elif grep -qE '\[P[0123]\]' <<<"$_cls_region" 2>/dev/null; then
+        # Standalone adapter users without the policy lib fail closed on tags.
+        printf 'fail\n'
+        return 0
+      fi
     fi
   fi
   printf 'pass\n'

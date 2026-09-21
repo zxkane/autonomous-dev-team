@@ -77,7 +77,10 @@ On resume (or new session for a previously started issue), perform these checks 
    gh api repos/<REPO>/pulls/$PR_NUM/comments \
      --jq '.[] | "\(.path):\(.line // .original_line) — \(.body)"'
    ```
-7. **Address ALL feedback** from both issue comments and PR inline comments
+7. **Triage all feedback** from issue comments and PR inline comments under
+   `REVIEW_BLOCKING_SEVERITY` (default P1). Fix blocking findings; document lower
+   severities as advisory. Do not repeat a fix or review for an unchanged,
+   resolved finding without new evidence.
 8. **Reply to and resolve** each PR review thread after fixing:
    ```bash
    scripts/reply-to-comments.sh <owner> <repo> <pr> <comment_id> "Fixed in <commit>"

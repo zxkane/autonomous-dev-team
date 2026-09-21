@@ -7406,19 +7406,20 @@ numbering note):
 inaction on a frozen head) and [INV-122] (a fixed-point repetition of the
 E2E gate on an unchanged (head, rc) pair) — this invariant closes the THIRD
 non-convergence mode: the review agent(s) keep finding a genuine blocking
-P0/P1 finding, round after round, even though the dev agent DOES push new
+finding at the configured terminal floor, round after round, even though the dev agent DOES push new
 commits each round. The motivating case: a downstream consumer project's
 "clean up E2E fixture accumulation" bug fix grew two production DELETE
 routes during development, and the review loop ran **10 rounds over ~6
 hours** without converging — round themes escalated monotonically in
 exoticness while each finding stayed individually valid, and the loop was
-broken only by operator takeover. The severity-aware blocking ratchet
-(issue #449's R1 requirement — `shouldBlockFinding`, `lib-review-severity.sh`)
-loosens the blocking floor as rounds progress (P0-P3 all block at rounds 1-2;
-P0-P2 at 3-4; only P0/P1 at 5+), so if the review is STILL failing that
-late-round floor, the PR is not converging toward mergeability no matter how
-many more rounds run — this invariant halts the loop rather than burning
-rounds indefinitely.
+broken only by operator takeover. `REVIEW_BLOCKING_SEVERITY` now defaults to
+fixed P1 from round one. Fixed P2/P3 policies retain their selected floor at
+every round; only the opt-in `adaptive` policy uses the historical P3/P2/P1
+ratchet at rounds 1-2/3-4/5+. `_review_cap_has_blocking_fail` uses that policy's
+terminal floor: P1 for default/adaptive, P2/P3 for the corresponding fixed
+policy. A genuine failure at that floor counts toward the existing cap;
+timeouts and unavailable reviewers do not. This prevents strict configurations
+from looping indefinitely on P2/P3 findings. See INV-150 for policy resolution.
 
 **Where** (single insertion point): inside `autonomous-review.sh`'s existing
 substantive-FAIL sub-path (`$AGGREGATE == "fail"`, the branch that also
@@ -7576,8 +7577,12 @@ this, a run of transient per-agent timeouts on successive heads could
 advance the SAME head-agnostic counter this breaker uses and eventually
 stall a PR that no review agent ever actually found a live P0/P1 in.
 
-**A P2/P3-only substantive fail ALSO never reaches the trip logic ([P1] codex
-review round 7, fixed pre-merge)**: `_AGGREGATE_SUBSTANTIVE_FAIL == true`
+**Historical P0/P1-only cap rationale (retained for adaptive compatibility)**:
+The following describes the pre-configurable implementation. Production now
+uses `_review_cap_has_blocking_fail` and `_AGGREGATE_HAS_CAP_FAIL`; the legacy
+`_aggregate_has_p0p1_fail` helper remains for compatibility tests, not as the
+production gate. Fixed P2/P3 findings count toward the cap. Historically,
+`_AGGREGATE_SUBSTANTIVE_FAIL == true`
 confirms a REAL (non-timeout) fail survived the severity filter at the
 CURRENT round's floor — it does not say WHICH severity survived. This
 invariant's own fingerprint is narrower: the ratchet's TERMINAL floor
@@ -7816,7 +7821,11 @@ _Triage (issue #236): [machine-checked: tests/unit/test-review-convergence-rules
 
 **Rule**: the #449 R1 severity ratchet's `REVIEW_ROUND` counter
 (`lib-review-round.sh`) was originally scoped to `(issue, head)` and reset to
-1 on every push. In an ACTIVE dev↔review loop — a new fix commit every
+1 on every push. The historical heading's loosening behavior now applies only
+to `REVIEW_BLOCKING_SEVERITY=adaptive`; fixed P1 (the default), P2, and P3
+policies still use this counter but do not change their floor as it advances.
+The current cap gate is `_review_cap_has_blocking_fail` (INV-150), which also
+bounds failures under fixed stricter policies. In an ACTIVE dev↔review loop — a new fix commit every
 round, which is #449's own motivating scenario — that reset-on-push behavior
 meant the blocking floor never loosened past round 1-2, no matter how many
 rounds ran. Combined with [INV-127]'s deliberate `_aggregate_has_p0p1_fail`
@@ -8462,7 +8471,8 @@ _Triage (issue #236): [machine-checked: tests/unit/test-review-convergence-rules
 **Rule**: [INV-127]'s and [INV-129]'s severity ratchet (`_review_extract_highest_severity`, `lib-review-severity.sh`) scores whichever text the wrapper hands it at the call site in `autonomous-review.sh`, immediately before the pre-aggregation filter loop. That call site MUST branch on `AGENT_VERDICT_SOURCES[$_i]` — a real, per-agent array entry, set by the wrapper at the EXACT point a verdict is resolved, never inferred from agent name or body-emptiness:
 
 - `AGENT_VERDICT_SOURCES[$_i] == "codex-stdout-fallback"` (a NEW value, assigned at the call site where `_codex_review_classify_stdout` supplies the verdict, [INV-62]'s legacy stdout-classify route) → score the raw `AGENT_CODEX_LOGS[i]` capture, AFTER stripping the echoed prompt via `_codex_review_strip_prompt_echo` (`adapters/codex.sh`).
-- Every other value (`artifact`, `comment-fallback`, or a codex agent that self-posted through the ordinary poll loop) → score `AGENT_VERDICT_BODIES[i]`, identical to the non-codex path.
+- `artifact` → apply `_review_apply_artifact_policy` to the validated JSON before rendering or owner classification, then retain the normalized verdict and `_review_artifact_highest_severity` result. Never rescore the rendered prose: a quoted tag cannot supply a missing typed severity or override failed mandatory evidence (INV-150).
+- Other text resolution channels (`comment-fallback`, `claude-finaltext-fallback`, or a codex agent that self-posted through the ordinary poll loop) → score `AGENT_VERDICT_BODIES[i]`, identical to the non-codex text path.
 
 `_codex_review_classify_stdout` itself (the function that PRODUCES the `codex-stdout-fallback` verdict in the first place, and runs BEFORE this call site) is held to the same boundary discipline (review round 4, below): it must never score its raw pass/fail decision against text this rule's own boundary excludes — otherwise the classifier's `fail`/`pass` and the filter's severity extraction disagree about what text is "the review," and the filter cannot rescue a classifier decision made from the wrong text.
 
@@ -8475,7 +8485,10 @@ _Triage (issue #236): [machine-checked: tests/unit/test-review-convergence-rules
 **Fix — call-site input selection keyed on an explicit resolution-channel flag, not a scanner change, not body-emptiness**:
 
 ```bash
-if [[ "${AGENT_VERDICT_SOURCES[$_i]:-}" == "codex-stdout-fallback" && -n "${AGENT_CODEX_LOGS[$_i]:-}" && -f "${AGENT_CODEX_LOGS[$_i]}" ]]; then
+if [[ "${AGENT_VERDICT_SOURCES[$_i]:-}" == "artifact" ]]; then
+  AGENT_HIGHEST_SEVERITY[$_i]="${AGENT_ARTIFACT_SEVERITIES[$_i]:-none}"
+  continue
+elif [[ "${AGENT_VERDICT_SOURCES[$_i]:-}" == "codex-stdout-fallback" && -n "${AGENT_CODEX_LOGS[$_i]:-}" && -f "${AGENT_CODEX_LOGS[$_i]}" ]]; then
   _sev_text=$(_codex_review_strip_prompt_echo "${AGENT_CODEX_LOGS[$_i]}")
 else
   _sev_text="${AGENT_VERDICT_BODIES[$_i]:-}"
@@ -8529,11 +8542,31 @@ _Triage (issue #236): [machine-checked: tests/unit/test-review-convergence-rules
 - `S_tail` — the severity of the SAME narrow, LAST-turn-marker-bounded text [INV-132] already scores (`_codex_review_strip_prompt_echo`'s output), extracted via the ordinary `_review_extract_highest_severity` (its per-finding fail-safe is exactly right here — the tail IS a findings list).
 - `<region-text>` — the WIDER region from the **FIRST** codex-role turn marker to EOF — every codex-role turn (reasoning, tool-call, AND final-response turns alike), never just the final response (`_codex_review_full_response_region`, `adapters/codex.sh`).
 
-A `fail` whose `S_tail` alone would be demoted at the current round (per `shouldBlockFinding`) is demoted ONLY if `<region-text>` contains NO literal `[P0]`/`[P1]` tag (`_review_region_has_terminal_tag` — a bare substring scan, deliberately NOT `_review_extract_highest_severity` on the region; see the dedicated note below on why). If the region DOES contain a `[P0]`/`[P1]` tag, the demotion is REFUSED and the verdict stays `fail` for this round. Every other resolution channel (`artifact`, `comment-fallback`, a codex agent that self-posted through the ordinary poll loop, and every non-codex agent) is UNCHANGED — it has no region concept and continues to call the plain `_review_apply_severity_filter`.
+A `fail` whose `S_tail` would be demoted at the current floor is demoted ONLY
+if `<region-text>` contains no tag that blocks under that same policy and round.
+`_review_region_blocking_severity` performs this bare-tag scan, deliberately not
+the findings-list extractor. P0/P1 always block; configured P2/P3 and adaptive
+early-round floors are also protected. Empty region text refuses demotion.
+Other text channels use the plain filter; normalized artifacts bypass all prose
+filters and retain their typed verdict and severity (INV-132/INV-150).
 
 **Amendment (review round 1 on this PR itself): the classifier that PRODUCES the verdict must also corroborate, or the filter above never gets a chance to run.** `_review_apply_severity_filter_corroborated` only demotes an EXISTING `fail`; it is a no-op pass-through on any other verdict token. `_codex_review_classify_stdout` (`adapters/codex.sh`) — the tail-only-scan classifier that resolves `pass`/`fail`/`malformed` from the raw capture BEFORE the pre-aggregation filter ever runs — could itself settle on `pass` directly when the hijack discarded a genuine `[P0]`/`[P1]` finding AND the surviving tail carried no severity tag at all (not merely a masked `[P2]`/`[P3]`, which the pre-amendment classifier still correctly flagged `fail`). In that shape the corroborated filter never even sees the agent, because it was never handed a `fail` to evaluate — the exact false PASS this invariant exists to prevent, reachable through a gap one level upstream of the filter this invariant originally scoped. The fix: `_codex_review_classify_stdout` itself now corroborates against `_codex_review_full_response_region` (the identical bare `[P0]`/`[P1]` tag-presence scan, `_review_region_has_terminal_tag`'s own logic inlined) before settling on `pass`, scoped to the SAME genuine-turn-marker condition the tail-only scan already requires (a legacy free-form capture with no turn-marker structure at all has no region concept and keeps its byte-identical whole-capture-scan behavior). A region match at this stage only ever flips `pass`→`fail`; the round-aware demotion decision remains entirely `_review_apply_severity_filter_corroborated`'s job downstream, unchanged.
 
-**Companion helper — `_review_highest_severity_corroborated`**: `AGENT_HIGHEST_SEVERITY[i]` (the array [INV-127]'s `_aggregate_has_p0p1_fail` reads) MUST be populated by this dedicated function on the codex-stdout-fallback lane, never by a bare `_review_extract_highest_severity` call on either text alone (review-round-1 finding on this fix itself, below). It mirrors `_review_apply_severity_filter_corroborated`'s own branch structure: if `S_tail` already blocks at this round, echo `S_tail`; otherwise (a demotion was evaluated), echo the region's own literal tag (`_review_region_terminal_severity`, `P0` > `P1`) when `_review_region_has_terminal_tag` fired — the case that MUST report the region's severity, not the tail's, so `_aggregate_has_p0p1_fail` sees the correct terminal-floor evidence for a refused demotion — otherwise echo `S_tail` (the demotion was corroborated; `S_tail`'s own P2/P3 is the accurate description of what was actually found).
+**Current classifier contract (PR #553)**: the classifier-stage region scan uses
+`_review_region_blocking_severity` with `${REVIEW_ROUND:-1}` too. This is required
+even when the tail contains no tag, because the downstream filter cannot correct
+an already-classified PASS. A standalone adapter without the policy helper fails
+closed on any P0-P3 region tag. The preceding amendment describes the original
+P0/P1-only implementation, now generalized to the configured floor.
+
+**Companion helper — `_review_highest_severity_corroborated`**: populate
+`AGENT_HIGHEST_SEVERITY[i]` from this function on the stdout-fallback lane. If the
+tail already blocks, report its severity. Otherwise report the region's highest
+blocking tag from `_review_region_blocking_severity` when demotion is refused,
+or the tail severity when corroborated. The cap consumes these values through
+`_review_cap_has_blocking_fail`. `_review_region_has_terminal_tag` and
+`_review_region_terminal_severity` remain as legacy compatibility helpers with
+their original P0/P1 semantics; production policy decisions no longer call them.
 
 **Why (the bug this closes, issue #490)**: [INV-132]'s `_codex_review_strip_prompt_echo` locates the final-response boundary by searching for the **LAST** standalone `codex` turn-marker line (column-0, exact word, unfenced, blank-line-preceded — the round-3 hardening from the PR that closed #481). Final-response content that QUOTES tool or reviewed-file output can legitimately contain a line of exactly that shape. Such a quoted line wins the LAST-marker search, every finding BEFORE it is discarded, and the surviving tail alone is scored for severity. A genuine `[P1]` can thus be reduced to a `[P2]`-only tail and demoted to a false PASS at round 5+ by [INV-129]'s ratchet.
 
@@ -8542,7 +8575,10 @@ This is filed as a semantics change, not a fourth heuristic-narrowing round, bec
 **Fix — fail-closed corroboration between two independent scans, not another heuristic rung**: `_review_apply_severity_filter_corroborated` requires agreement between `S_tail` (unchanged — the existing narrow scan) and `S_region` (new — the wide scan from the FIRST marker) before ever trusting a demotion. The wide region is structurally guaranteed to contain any genuine finding on this lane: the region starts immediately after the echoed prompt (the FIRST codex-role turn), and the codex-stdout-fallback lane's raw capture has NOTHING before that point except the echoed `user`-turn prompt — never the agent's own findings. So a quoted marker anywhere DEEPER in the transcript can only ever EXCLUDE a real finding from the narrower tail; it can never make a real finding disappear from the wider region too.
 
 ```bash
-if [[ "${AGENT_VERDICT_SOURCES[$_i]:-}" == "codex-stdout-fallback" && ... ]]; then
+if [[ "${AGENT_VERDICT_SOURCES[$_i]:-}" == "artifact" ]]; then
+  AGENT_HIGHEST_SEVERITY[$_i]="${AGENT_ARTIFACT_SEVERITIES[$_i]:-none}"
+  continue
+elif [[ "${AGENT_VERDICT_SOURCES[$_i]:-}" == "codex-stdout-fallback" && ... ]]; then
   _sev_text=$(_codex_review_strip_prompt_echo "${AGENT_CODEX_LOGS[$_i]}")
   _sev_region_text=$(_codex_review_full_response_region "${AGENT_CODEX_LOGS[$_i]}")
   ...
@@ -10043,3 +10079,42 @@ retry-limit comments do not reset the watchdog's non-idempotent count.
 - [`docs/designs/issue-545-same-head-mergeability-freshness.md`](../designs/issue-545-same-head-mergeability-freshness.md) — decision record and failure-mode diagram.
 
 ---
+
+## INV-150: dev and review share one blocking policy without weakening mandatory verification
+
+_Triage (issue #236): [machine-checked: tests/unit/test-review-blocking-policy.sh]_
+
+**Rule**: `_review_blocking_severity` resolves `REVIEW_BLOCKING_SEVERITY` as fixed
+P1 (default), P2, P3, or the legacy `adaptive` floor. Invalid values warn and use
+P3. Dev new/resume/fallback prompts and review classification use this same
+resolver. Findings below the floor remain visible as advisories; P0/P1 and
+unclassified findings remain blocking. Required acceptance, security, CI/E2E,
+and merge gates are independent of the severity setting.
+
+`_review_apply_artifact_policy` operates only on validated, identity-bound JSON
+and never rewrites the immutable source artifact. It moves sub-floor findings
+to `nonBlockingFindings` before owner routing. A failed typed acceptance
+criterion or E2E report vetoes PASS independently. If all reported findings are
+below the floor while mandatory evidence fails, preserve the blocking context;
+if no blocking context exists, synthesize a P1 mandatory-verification finding.
+Remaining typed blockers and `_review_artifact_highest_severity` stay authoritative:
+quoted tags in titles/details must never influence their severity or verdict.
+
+On the Codex stdout-fallback channel, both `_codex_review_classify_stdout` and
+the later corroborated filter use `_review_region_blocking_severity` at the
+configured floor and current round. A quoted turn marker hiding all tags from
+the tail must not allow a configured P2/P3 blocker to become PASS upstream of
+the filter. `_review_cap_has_blocking_fail` applies the policy's terminal floor
+to the existing convergence cap, including fixed P2/P3 policies.
+
+**Motivation**: PR #553 reduces repeated P2/P3 cleanup loops while preserving
+mandatory gates. Its independent review found an upstream P0/P1-only classifier
+that could bypass configured stricter floors despite correct downstream filtering.
+
+**Producer**: dev prompt builder; review artifact normalization and Codex classifier.
+**Consumer**: verdict aggregation, owner routing, and the convergence cap.
+**Status**: **ENFORCED** by `lib-review-severity.sh`, `adapters/codex.sh`, and both wrappers.
+**Tests**: `tests/unit/test-review-blocking-policy.sh` covers policy matrices,
+typed evidence vetoes, mixed-owner routing, artifact-prose isolation, fixed-policy
+caps, and the classifier-to-filter no-tag-tail regression for P1/P2/P3 and adaptive.
+`tests/unit/test-review-convergence-rules.sh` retains the legacy adaptive checks.

@@ -231,6 +231,16 @@ AGENT_CMD="claude"
 # AGENT_CMD=opencode).
 AGENT_DEV_MODEL=""
 AGENT_REVIEW_MODEL="sonnet"
+
+# Shared dev/review blocking floor. P0/P1 always block; unclassified findings
+# fail closed. P2/P3 remain visible without requiring fixes by default.
+# P1 (default): block P0/P1 from round 1.
+# P2 or P3: fixed stricter floor for every round.
+# adaptive: legacy ratchet (P3 rounds 1-2, P2 rounds 3-4, P1 round 5+).
+# Invalid values warn and use P3. Required CI/E2E, acceptance criteria,
+# security controls, and merge gates are never relaxed by this setting.
+REVIEW_BLOCKING_SEVERITY="P1"
+
 # Claude permission-mode matrix (verified with Claude Code 2.1.216):
 #   auto              Recommended on shared hosts. For CLAUDE REVIEW members
 #                     only, the wrapper appends --add-dir for the per-run

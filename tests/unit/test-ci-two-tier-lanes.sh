@@ -96,6 +96,11 @@ else:
 '
 
 echo "=== TC-CI-TIERS-012: hermetic jobs reference no credentials ==="
+assert_py "hermetic unit job uses the complete bounded parallel runner" '
+steps = jobs["hermetic-unit"].get("steps", [])
+runs = [s.get("run", "").strip() for s in steps if s.get("name") == "Run all unit tests"]
+print("OK" if runs == ["bash tests/run-unit-tests.sh"] else "FAIL:unit-runner-missing-or-overridden")
+'
 assert_py "TC-CI-TIERS-012 hermetic-* jobs are credential-free" '
 herm = {k: v for k, v in jobs.items() if str(k).startswith("hermetic")}
 secret_re = re.compile(r"secrets\.|AWS_ACCESS|AWS_SECRET|BEDROCK|ANTHROPIC_API_KEY|GH_APP_PRIVATE_KEY|RUNNER_TOKEN")

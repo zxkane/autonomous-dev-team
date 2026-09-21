@@ -6,6 +6,18 @@ This file enumerates each handoff, the data carriers (label, comment, PID file, 
 
 ## The five handoffs
 
+Dev and review share `REVIEW_BLOCKING_SEVERITY` (default P1). A P2/P3 advisory
+alone does not require a code change or a send-back under the default policy.
+Structured review artifacts apply the floor before owner classification, so
+advisory dev work cannot mask a blocker that requires a maintainer. Failed
+acceptance/E2E evidence still blocks independently of the severity floor.
+
+At dev-to-review handoff, feasible local checks and required CI must have passed;
+configured wrapper-owned final E2E may remain explicitly pending. The wrapper
+runs that final lane once and reviewers consume evidence only for the matching
+HEAD, environment, and required scenarios. Pending verification is never
+reported as passed.
+
 ```mermaid
 flowchart LR
     M([Maintainer]) -. label autonomous .-> Dis[Dispatcher]

@@ -378,15 +378,11 @@ _verdict_body_from_artifact_json() {
     _body="Review PASSED - verdict from artifact (INV-78); all blocking checks clear."
     if command -v jq >/dev/null 2>&1; then
       # Append a compact AC-coverage line + any non-blocking advisories (best-effort).
-      local _ac _nb
+      local _ac
       _ac="$(jq -r '
         (.evidence.acCoverage // {}) | to_entries
         | map("- \(.key): \(.value)") | .[]' <<<"$_json" 2>/dev/null || true)"
       [[ -n "$_ac" ]] && _body="${_body}"$'\n\n'"Acceptance criteria coverage:"$'\n'"${_ac}"
-      _nb="$(jq -r '
-        (.nonBlockingFindings // [])
-        | map("- " + .title + (if .file then " (" + .file + (if .line then ":" + (.line|tostring) else "" end) + ")" else "" end)) | .[]' <<<"$_json" 2>/dev/null || true)"
-      [[ -n "$_nb" ]] && _body="${_body}"$'\n\n'"Non-blocking advisories:"$'\n'"${_nb}"
     fi
   elif [[ "$_verdict" == "FAIL" ]]; then
     local _findings="" _n=0
@@ -422,6 +418,25 @@ _verdict_body_from_artifact_json() {
   else
     # Unmappable verdict — never silently approve; emit a classifiable FAIL stub.
     _body="Review findings:"$'\n\n'"Findings->Decision Gate: review FAILED (artifact verdict unmappable)."
+  fi
+
+  if [[ "$_verdict" == PASS || "$_verdict" == FAIL ]] && command -v jq >/dev/null 2>&1; then
+    if [[ "$_verdict" == FAIL ]]; then
+      local _failed_evidence
+      _failed_evidence="$(jq -r '
+        [((.evidence.acCoverage // {}) | to_entries[] | select(.value == "fail") | .key),
+          (if .evidence.e2eReport.gate == "fail" then "E2E" else empty end)]
+        | join(", ")' <<<"$_json" 2>/dev/null || true)" # Display-only fallback; the typed FAIL remains authoritative.
+      [[ -n "$_failed_evidence" ]] && _body="${_body}"$'\n\n'"Mandatory verification failed: ${_failed_evidence}"
+    fi
+    local _nb
+    _nb="$(jq -r '
+      (.nonBlockingFindings // [])
+      | map("- " + (if .severity then "[" + .severity + "] " else "" end)
+          + .title + (if .detail then " -- " + .detail else "" end)
+          + (if .file then " (" + .file + (if .line then ":" + (.line|tostring) else "" end) + ")" else "" end))
+      | .[]' <<<"$_json" 2>/dev/null || true)"
+    [[ -n "$_nb" ]] && _body="${_body}"$'\n\n'"Non-blocking advisories:"$'\n'"${_nb}"
   fi
 
   # Single trailing newline normalization; strip stray CRs (the body is posted as

@@ -915,7 +915,10 @@ S="$(fresh_scratch glabneg)"
 # Verify NO regression on the clean scratch copy (Check 6 emits its "no /api/v4
 # curl found" line and rc 0). This asserts that the shape-exclusion holds
 # without any allowlist widening.
-if bash "$CHECK" --scripts-dir "$S" --baseline "$BASELINE" 2>&1 | grep -q "no '/api/v4' curl (same-line or split-across-lines) found outside providers/lib-gitlab-transport.sh"; then
+# Capture to completion: grep -q can close the pipe before the final summary,
+# giving a successful checker SIGPIPE under pipefail when scheduling changes.
+out="$(bash "$CHECK" --scripts-dir "$S" --baseline "$BASELINE" 2>&1)"; rc=$?
+if [[ "$rc" -eq 0 ]] && grep -q "no '/api/v4' curl (same-line or split-across-lines) found outside providers/lib-gitlab-transport.sh" <<<"$out"; then
   ok "TC-CUTOVER-GLAB-NEG: shape-exclusion — 5 gh-app-token.sh curl sites PASS (api.github.com != /api/v4)"
 else
   bad "TC-CUTOVER-GLAB-NEG: Check 6 unexpected FAIL on clean scratch"
@@ -930,7 +933,8 @@ S="$(fresh_scratch glabnegcurl)"
 printf '\ntest_gh_style_curl() {\n  curl -s -H "Authorization: bearer $tok" -H "Accept: application/vnd.github+json" "https://api.github.com/orgs/foo/repos"\n}\n' >> "$S/autonomous-dev.sh"
 # gh_lines_in will not fire because there is no `gh ` token here (only `curl`).
 # But the /api/v4 detector must not either.
-if bash "$CHECK" --scripts-dir "$S" --baseline "$BASELINE" 2>&1 | grep -q "no '/api/v4' curl (same-line or split-across-lines) found outside providers/lib-gitlab-transport.sh"; then
+out="$(bash "$CHECK" --scripts-dir "$S" --baseline "$BASELINE" 2>&1)"; rc=$?
+if [[ "$rc" -eq 0 ]] && grep -q "no '/api/v4' curl (same-line or split-across-lines) found outside providers/lib-gitlab-transport.sh" <<<"$out"; then
   ok "TC-CUTOVER-GLAB-NEG-CURL: api.github.com curl argv passes /api/v4 detector cleanly"
 else
   bad "TC-CUTOVER-GLAB-NEG-CURL: api.github.com curl argv tripped the /api/v4 detector (shape-exclusion broken)"

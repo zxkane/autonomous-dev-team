@@ -16,18 +16,24 @@ After completing steps 1-11, all findings across checklist categories will have 
    - Acceptance criteria that could not be verified
    - **Requirement drift** (issue comments show requirement changes not reflected in PR code)
 
-2. **Classify each finding** as BLOCKING or NON-BLOCKING:
+2. **Classify each finding** as BLOCKING or NON-BLOCKING. Code findings use
+   `REVIEW_BLOCKING_SEVERITY` (default P1). P0/P1 always block; lower severities
+   are advisory unless the project selected a stricter floor. The wrapper's
+   effective floor applies to every reviewer, including simplification and bots.
+   Report impact and evidence for the severity; do not promote style or cleanup
+   preferences. Untagged correctness findings remain blocking until classified.
+   The mandatory gates below are independent of the code-finding threshold:
    | Category | Blocking? | Examples |
    |----------|-----------|--------|
-   | Missing design doc | BLOCKING | No `docs/plans/` or `docs/designs/` file |
-   | Missing test case doc | BLOCKING | No `docs/test-cases/` file |
+   | Missing required design doc | BLOCKING when required | Architecture/UI change or explicit repository requirement; trivial fixes may be N/A |
+   | Missing required test case doc | BLOCKING when required | Explicit repository/issue requirement; small fixes may use existing regression tests |
    | Missing unit tests for new code | BLOCKING | New hook/component with 0 tests |
    | CI check not passing (including pending) | BLOCKING | Deploy Preview still pending |
    | E2E test failure | BLOCKING | Any happy path or feature test fails |
    | Acceptance criteria not verified | BLOCKING | Any AC checkbox left unchecked |
    | Security vulnerability | BLOCKING | Credentials, injection, etc. |
    | Merge conflict with base | BLOCKING | PR `mergeable` is `CONFLICTING` — also wrapper-enforced ([INV-44](../../../docs/pipeline/invariants.md)) |
-   | PR checklist item unchecked | BLOCKING | Required items not marked |
+   | Required PR checklist item not satisfied | BLOCKING | Verify evidence, update stale checkboxes; optional/N/A items do not create code findings |
    | Requirement drift | BLOCKING | Issue comments show requirement changes (e.g. scope reduction, feature removal, new constraints) not reflected in PR code |
    | Minor style suggestion | NON-BLOCKING | Naming preference, optional refactor |
    | Bot review missing (after timeout) | NON-BLOCKING | Best-effort per existing policy |
@@ -39,7 +45,7 @@ After completing steps 1-11, all findings across checklist categories will have 
    - **You post a verdict COMMENT only — never a GitHub PR review or merge.** The wrapper owns the GitHub-native action (`--approve` / `--request-changes` / `gh pr merge`) — see [Who submits the GitHub-native PR action](#who-submits-the-github-native-pr-action-inv-52) below.
 
 4. **Self-check questions** — answer each before proceeding:
-   - "Did I list any missing documents, tests, or CI failures above?" -> If YES -> FAIL
+   - "Did I list missing required documents, tests, or failing checks above?" -> If YES -> FAIL
    - "Are all CI checks in 'pass' state (not 'pending', not 'fail')?" -> If NO -> FAIL
    - "Is the PR `mergeable`? (`gh pr view <PR> --json mergeable -q .mergeable`)" -> If `CONFLICTING` -> that is a blocking finding -> FAIL (and the wrapper enforces this independently — INV-44 — so approving a CONFLICTING PR is impossible regardless)
    - "Did I successfully mark ALL Acceptance Criteria checkboxes?" -> If NO -> FAIL
@@ -83,6 +89,12 @@ When the project runs more than one verdict-reaching review agent against the sa
 - **All Acceptance Criteria checkboxes marked as checked in the issue body**
 - **No requirement drift detected** (issue comments don't contain unaddressed requirement changes)
 - **The Findings->Decision Gate produced ZERO blocking findings**
+
+A PASS may include P2/P3 advisories under the default P1 floor. In a verdict
+artifact, place them in `nonBlockingFindings`; leave `blockingFindings` empty.
+Record a deferred thread's severity and rationale, without claiming it was fixed.
+Do not require another commit, full-diff review, or bot trigger solely for an
+advisory. Required thread-resolution rules still apply.
 
 ### FAIL (post "Review findings:" — the WRAPPER then submits REQUEST_CHANGES)
 

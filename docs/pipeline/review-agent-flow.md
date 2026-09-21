@@ -702,6 +702,27 @@ authenticity remains unchanged.
 
 ### Pre-aggregation severity filter (issue #449, R1)
 
+**Current policy:** `REVIEW_BLOCKING_SEVERITY=P1` is the default from the first
+round, including when the key is absent. P2/P3 select fixed stricter floors;
+`adaptive` opts into the legacy round-dependent matrix described below. Invalid
+values warn and use P3. Unknown severity always blocks. Dev new/resume/fallback
+prompts use the same resolver; adaptive dev resumes use the completed review
+round's floor when handling its findings.
+
+Validated artifacts first pass through `_review_apply_artifact_policy` before
+rendering and owner classification. Lower-severity blocking entries move to
+`nonBlockingFindings` in an in-memory copy; the immutable original remains intact.
+This prevents a dev-actionable advisory from routing a maintainer-only blocker
+back to dev. Advisories remain visible on PASS and FAIL. Text fallback uses the
+filter below; normalized artifacts retain their typed severity and verdict and
+are never rescored from rendered prose. A failed typed acceptance criterion or
+E2E report independently vetoes demotion, including an inconsistent PASS artifact.
+Codex corroboration protects all tags that block under the selected
+floor, including P2 when explicitly configured. The round-cap gate uses
+`_review_cap_has_blocking_fail`: adaptive retains its terminal P1 floor, while
+fixed P2/P3 failures also count toward the existing cap. CI/E2E, acceptance,
+security, and merge gates remain independent and mandatory.
+
 Runs AFTER the terminal no-verdict sweep (which resolves `unavailable`/`timed-out` for any agent still without a verdict) and BEFORE `_aggregate_review_verdicts` below — the exact hook point the issue specifies. For each agent classified `fail`, `lib-review-severity.sh::_review_apply_severity_filter` extracts the highest severity tag from its findings text and demotes to `pass` — non-blocking for THIS round only — when `shouldBlockFinding "$REVIEW_ROUND" "$sev"` says the round's floor doesn't reach it. `unavailable`/`timed-out` agents pass through unchanged (no findings text to score).
 
 **Scored-text source, per resolution path ([INV-132], issue #481)**: the call site branches on `AGENT_VERDICT_SOURCES[i]` — a real, per-agent flag, not agent identity and not body-emptiness. `AGENT_VERDICT_SOURCES[i] == "codex-stdout-fallback"` (a value the wrapper assigns at the exact call site where [INV-62]'s legacy `_codex_review_classify_stdout` route supplies the verdict) is the ONLY branch that scores the raw `AGENT_CODEX_LOGS[i]` capture — and even then, only after stripping the echoed prompt (`_codex_review_strip_prompt_echo`, `adapters/codex.sh`). Every other value (`artifact`, `comment-fallback`, `claude-finaltext-fallback`, or a codex agent resolved through the ordinary self-post poll loop) scores `AGENT_VERDICT_BODIES[i]`, identical to the non-codex path. Pre-#481, the codex branch was selected unconditionally by agent name, so an artifact-resolved codex verdict was ALWAYS scored from its raw stdout — which always echoes the prompt's own numbered checklist ahead of the agent's real output — collapsing the per-finding fail-safe scan (below) to `none` regardless of the agent's actual findings, which in turn falsely advanced [INV-127]'s round-cap counter on P2-only rounds.

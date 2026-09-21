@@ -290,6 +290,22 @@ The `AUTONOMOUS_CONF` env var bypass takes precedence over filesystem detection 
 
 ## Mode = new
 
+New, resumed, and resume-fallback sessions receive the shared delivery-policy
+prompt from `lib-review-severity.sh::_dev_delivery_policy_prompt_block`.
+`REVIEW_BLOCKING_SEVERITY` defaults to P1, so P0/P1 require fixes and P2/P3
+remain visible as advisories. Fixed P2/P3 floors and the legacy `adaptive`
+policy are supported; adaptive resumes use the completed review round's floor.
+Untagged correctness findings must be classified before deferral. Mandatory
+acceptance, security, required tests, and merge gates remain blocking.
+
+Dev verifies feasible local checks and completes independent review before
+pushing a batch of fixes. Later passes focus on affected code and contracts.
+Deferred advisory findings receive a documented disposition, not repeated
+fix/review cycles. When configured final E2E belongs to the review wrapper, dev
+hands off with that check explicitly pending and never marks unrun E2E complete.
+See [review-agent-flow.md](review-agent-flow.md#pre-aggregation-severity-filter-issue-449-r1)
+for the corresponding deterministic review-side policy.
+
 1. `SESSION_ID = uuidgen` (so the wrapper trap's Session Report has a stable session-id even if `claude` never echoes one back).
 2. Construct prompt:
    - Wraps the issue body inside `<user-issue-content>` injection-defense tags.
