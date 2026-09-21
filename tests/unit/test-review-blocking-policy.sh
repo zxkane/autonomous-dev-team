@@ -111,6 +111,31 @@ REVIEW_BLOCKING_SEVERITY=P2
 assert_eq fail "$(_review_apply_severity_filter_corroborated fail '[P3] gap' '[P2] blocker' 20)" 'codex hidden configured P2'
 assert_eq P2 "$(_review_highest_severity_corroborated '[P3] gap' '[P2] blocker' 20)" 'codex reports blocking P2'
 
+# Exercise classification before filtering: a quoted turn marker can hide
+# every tag from the tail, so the filter must first receive a FAIL verdict.
+CASE_DIR="$(mktemp -d)"
+trap 'rm -rf "$CASE_DIR"' EXIT
+for severity in P1 P2 P3; do
+  sed "s/\[P1\]/[$severity]/g" "$ROOT/tests/unit/fixtures/codex-review-stdout-turns-blankline-hijack-notag.txt" > "$CASE_DIR/$severity.txt"
+  REVIEW_BLOCKING_SEVERITY="$severity"
+  classified="$(_codex_review_classify_stdout "$CASE_DIR/$severity.txt")"
+  assert_eq fail "$classified" "$severity configured blocker survives no-tag tail classification"
+  tail_text="$(_codex_review_strip_prompt_echo "$CASE_DIR/$severity.txt")"
+  region="$(_codex_review_full_response_region "$CASE_DIR/$severity.txt")"
+  assert_eq fail "$(_review_apply_severity_filter_corroborated "$classified" "$tail_text" "$region" 1)" "$severity classifier/filter cannot approve hidden blocker"
+done
+REVIEW_BLOCKING_SEVERITY=P1
+assert_eq pass "$(_codex_review_classify_stdout "$CASE_DIR/P2.txt")" 'P2-only region is advisory under P1'
+REVIEW_BLOCKING_SEVERITY=adaptive
+REVIEW_ROUND=1
+assert_eq fail "$(_codex_review_classify_stdout "$CASE_DIR/P2.txt")" 'adaptive early classifier floor'
+REVIEW_ROUND=5
+assert_eq pass "$(_codex_review_classify_stdout "$CASE_DIR/P2.txt")" 'adaptive late classifier floor'
+assert_eq fail "$(
+  unset -f _review_region_blocking_severity
+  _codex_review_classify_stdout "$CASE_DIR/P2.txt"
+)" 'standalone adapter without policy helper fails closed'
+
 unset REVIEW_BLOCKING_SEVERITY
 prompt="$(_review_severity_prompt_block 1)"
 [[ "$prompt" == *'Only P0 and P1 block'* ]]
