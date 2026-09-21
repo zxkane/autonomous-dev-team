@@ -123,7 +123,7 @@ Step 7:  COMMIT AND CREATE PR          -- MANDATORY
 Step 8:  PR REVIEW AGENT               -- MANDATORY
 Step 9:  WAIT FOR ALL CI CHECKS        -- MANDATORY
 Step 10: ADDRESS REVIEWER BOT FINDINGS -- MANDATORY
-Step 11: ITERATE UNTIL NO FINDINGS
+Step 11: ITERATE UNTIL NO BLOCKING FINDINGS
 Step 12: E2E TESTS & READY FOR MERGE   -- MANDATORY
 Step 13: CLEANUP WORKTREE
 ```
@@ -224,13 +224,28 @@ Before writing any implementation code:
 
 ## Step 5: Local Verification
 
-Execute in your terminal:
+Run feasible checks locally **before the first push and after blocking fixes**.
+Read the repository's test commands and CI configuration. Start with focused
+regression tests, then run relevant lint, typecheck, build, and integration checks.
+Run the broader suite when shared behavior changes or repository policy requires
+it. CI confirms the candidate; it must not be the first attempt at a check that
+can run locally. For documentation-only changes, use relevant documentation and
+workflow checks rather than unrelated application builds.
+
+Record commands, exit status, tested revision/tree, and coverage in the PR test
+plan. If credentials, services, or tools prevent a local check, record the exact
+limitation and leave that check pending for CI. Never report an unrun check as
+passed. Reuse successful evidence only for unchanged inputs and environment;
+after a fix, rerun affected checks and expand only if the impact requires it.
+
+Example for a Node project (use the project's actual commands):
 
 ```bash
 timeout 1800 bash -lc 'npm run build && npm run test' > /tmp/verify.log 2>&1; rc=$?; [ $rc -ne 0 ] && tail -100 /tmp/verify.log; exit $rc
 ```
 
-Fix any failures before proceeding. Deploy and verify locally if applicable.
+Fix local failures before proceeding. Run local feature/E2E checks when feasible;
+perform deployments only when the project requires and authorizes them.
 
 ### How to run long verification
 
@@ -254,8 +269,13 @@ Run your project's build/test suite as **one synchronous command with a generous
    - **Codex CLI**: ask Codex to spawn a native reviewer subagent focused on unnecessary complexity, duplication, and repository conventions. Keep the subagent advisory; the main session applies any changes.
    - **Claude Code**: use `code-simplifier:code-simplifier` when the plugin is installed.
    - **Other clients**: use an available review subagent or perform the same review manually.
-2. Address simplification suggestions.
-3. Mark complete (if hooks are installed):
+2. Triage suggestions under the blocking policy below. Naming, style, and optional
+   refactoring are advisory; apply them only when useful within the current scope.
+   Do not start another review cycle solely to eliminate advisory notes.
+3. The same independent reviewer may cover simplification and Step 8's correctness
+   review in one pass. Record both results; a second full-diff pass on identical
+   code is unnecessary. After edits, review the fixes and affected contracts.
+4. Mark complete (if hooks are installed):
    ```bash
    hooks/state-manager.sh mark code-simplifier
    ```
@@ -263,6 +283,10 @@ Run your project's build/test suite as **one synchronous command with a generous
 ---
 
 ## Step 7: Commit and Create PR (MANDATORY)
+
+Complete Step 8's independent review before the first push. Batch related blocking
+fixes, finish local verification, and push the verified candidate once. A review
+performed on the final uncommitted tree remains valid for its unchanged commit.
 
 ### Commit
 
@@ -294,7 +318,7 @@ gh pr create --title "type(scope): description" --body "$(cat <<'EOF'
 - [ ] CI checks pass
 - [ ] Code simplification review passed
 - [ ] PR review agent review passed
-- [ ] Reviewer bot findings addressed (no new findings)
+- [ ] Blocking bot findings resolved; advisory findings recorded
 - [ ] E2E tests pass
 
 ## Checklist
@@ -325,15 +349,23 @@ glab mr update {mr_number} --description "$(cat /tmp/pr_body.md)"
 
 ## Step 8: PR Review Agent (MANDATORY)
 
+Perform this review before Step 7's first push. If Step 6 already included an
+independent correctness review of the same tree, reuse that result. Later passes
+verify fixes and affected behavior; repeat the full diff only when changes or new
+evidence warrant it.
+
 1. Run an independent dev-side review:
    - **Codex CLI**: use a native reviewer subagent, or run `codex review --uncommitted` before the first commit and `codex review --base <base-branch>` for the committed branch diff.
    - **Claude Code**: use `/pr-review-toolkit:review-pr` when the plugin is installed.
    - **Other clients**: use an available review agent or review the complete diff manually.
-2. Address findings by severity:
-   - Critical/Severe: Must fix
-   - High: Must fix
-   - Medium: Should fix
-   - Low: Optional
+2. Apply the project's `REVIEW_BLOCKING_SEVERITY` from `autonomous.conf` or the
+   wrapper's delivery policy. Default `P1` requires fixing P0/P1 from round one.
+   `P2` and `P3` select fixed stricter floors; `adaptive` preserves the legacy
+   P3/P2/P1 floor at rounds 1-2/3-4/5+. Invalid values use strict P3 with a warning.
+   Classify untagged correctness findings before deferring them. P0/P1, mandatory
+   acceptance criteria, security controls, failed required checks, and merge gates
+   always block. Severity reflects demonstrated impact, not cleanup preferences.
+   Record lower-severity findings as advisory notes without requiring a code edit.
 3. Mark complete (if hooks are installed):
    ```bash
    hooks/state-manager.sh mark pr-review
@@ -355,6 +387,11 @@ glab ci status {mr_number}   # add `--live` on newer glab for continuous updates
 
 ALL checks must pass: Lint, Unit Tests, Build, Deploy Preview, E2E Tests.
 
+While CI runs, inspect existing review feedback and update verification evidence
+when these activities are independent. Use the provider's watch command rather
+than repeatedly issuing status reads. Avoid empty commits or pushes just to
+retrigger reviews; retrigger only a failed job when supported and appropriate.
+
 If ANY check fails: analyze logs, fix, push, re-watch. DO NOT proceed until every check shows "pass."
 
 ### Checks to Monitor
@@ -370,7 +407,7 @@ If ANY check fails: analyze logs, fix, push, re-watch. DO NOT proceed until ever
 
 ## Step 10: Address Reviewer Bot Findings (MANDATORY when `REVIEW_BOTS` is non-empty)
 
-If the project's `autonomous.conf` declares `REVIEW_BOTS` (space-separated short names like `q codex claude`), each configured bot's findings are mandatory: either fix the code, or reply explaining the design decision (false positive). Then reply to the thread, resolve it, and retrigger the bot.
+If the project's `autonomous.conf` declares `REVIEW_BOTS` (space-separated short names like `q codex claude`), triage each configured bot's findings using Step 8's blocking policy. Fix blocking issues; reply once to false positives or advisory findings with the reason and severity. Resolve a deferred advisory thread only after recording its disposition and when repository policy permits. Do not describe deferred findings as fixed. Retrigger only after relevant code changes or a missing required review.
 
 If `REVIEW_BOTS=""` (or the variable is unset), this step is **skipped entirely** — the project doesn't enforce any external bot review.
 
@@ -388,29 +425,35 @@ For the full retrigger commands, reply patterns, and thread resolution semantics
 
 ---
 
-## Step 11: Iterate Until No Findings
+## Step 11: Iterate Until No Blocking Findings
 
-**Repeat until review bots find no more issues:**
+**Repeat only while blocking findings remain:**
 
-1. Address findings (fix code or explain design)
-2. Reply to each comment thread
-3. Resolve all threads
-4. Trigger review command (`/q review`, `/codex review`, etc.)
-5. Wait 60-90 seconds
-6. Check for new findings
-7. **If new findings: repeat from step 1**
-8. **Only proceed when no new positive findings appear**
+1. Confirm findings are still present; group duplicates and batch related fixes.
+2. Run affected local tests and review the changed behavior before pushing.
+3. Reply to each actionable thread and resolve after its disposition is recorded.
+4. Retrigger affected configured reviewers once for the new candidate, when needed.
+5. Wait for review completion using available status signals and bounded polling.
+6. Triage new findings by the same threshold. Keep advisory notes visible, but do
+   not edit code or restart review solely because new non-blocking notes appear.
+7. Proceed when no blocking findings remain and required checks are satisfied.
 
 ---
 
 ## Step 12: E2E Tests & Ready for Merge (MANDATORY -- DO NOT SKIP)
 
-1. Run E2E tests against the deployed preview environment (all tests must pass; skipped agent-dependent tests are acceptable)
-2. Mark complete (if hooks are installed):
+1. Run required E2E tests against the deployed preview environment. In autonomous
+   mode, when the review wrapper owns configured E2E, hand off after local feature
+   verification and required CI; the wrapper runs final E2E once and fan-out
+   reviewers consume its evidence. Reuse existing E2E evidence only when the HEAD,
+   target environment, and required scenario coverage match. Keep unrun final E2E
+   pending rather than marking it complete.
+2. Only after E2E has actually passed on the current candidate, mark complete
+   (if hooks are installed). Leave this state unset while wrapper-owned E2E is pending:
    ```bash
    hooks/state-manager.sh mark e2e-tests
    ```
-3. Update PR checklist to show all items complete
+3. Update PR checklist to reflect completed checks and any pending wrapper-owned E2E
 4. **STOP HERE**: report status to the user (interactive mode) or post a summary comment on the issue (autonomous mode). In autonomous mode, post via the project-vendored wrapper so the comment is attributed to the configured identity (bot in app mode, host user in token mode):
    ```bash
    # GitHub lane (CODE_HOST=github):

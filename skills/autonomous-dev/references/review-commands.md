@@ -234,7 +234,9 @@ gh api repos/{owner}/{repo}/pulls/{pr}/comments \
   --jq 'sort_by(.created_at) | .[-10:] | .[] | {id: .id, body: .body[:100]}'
 ```
 
-2. **Reply to each comment**:
+2. **Triage and reply to each comment** using `REVIEW_BLOCKING_SEVERITY` (default
+   P1). Fix blockers; for an advisory, state the severity and why it is deferred.
+   The following reply is for a finding actually fixed:
 ```bash
 gh api repos/{owner}/{repo}/pulls/{pr}/comments \
   -X POST \
@@ -242,12 +244,12 @@ gh api repos/{owner}/{repo}/pulls/{pr}/comments \
   -F in_reply_to=<comment_id>
 ```
 
-3. **Resolve all threads**:
+3. **Resolve threads after recording their disposition**, subject to repository policy:
 ```bash
 # Use the batch resolve script or loop above
 ```
 
-4. **Trigger new review for each bot in `REVIEW_BOTS`** (use `gh-as-user.sh` so bots don't ignore the trigger):
+4. **Trigger affected bots in `REVIEW_BOTS` after relevant code changes or a missing required review** (use `gh-as-user.sh` so bots don't ignore the trigger). Do not retrigger solely for deferred advisory notes:
 ```bash
 # When q ∈ REVIEW_BOTS:
 bash scripts/gh-as-user.sh pr comment {pr} --body "/q review"

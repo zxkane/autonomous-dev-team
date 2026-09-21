@@ -110,6 +110,42 @@ Multi-agent review (`AGENT_REVIEW_AGENTS`), external review bots
 (`REVIEW_BOTS`), and per-CLI configuration are covered in
 [docs/agent-clis.md](docs/agent-clis.md).
 
+### Review Blocking Policy
+
+Set the shared dev/review policy in the project's `scripts/autonomous.conf`:
+
+```bash
+REVIEW_BLOCKING_SEVERITY="P1"
+```
+
+| Value | Findings requiring fixes |
+|---|---|
+| `P1` (default, including existing configs without the key) | P0/P1 from the first round |
+| `P2` | P0/P1/P2 at every round |
+| `P3` | P0/P1/P2/P3 at every round |
+| `adaptive` | Legacy policy: P3 through round 2, P2 through round 4, P1 thereafter |
+
+Lower-severity findings remain visible as advisories. Dev fixes blockers and
+records advisory dispositions; advisory notes alone do not restart the review
+loop. Unknown finding severity blocks until classified. Invalid configuration
+warns and uses P3. Required acceptance criteria, security checks, CI/E2E, and
+merge gates remain mandatory. Structured artifacts are filtered per finding
+before determining whether remaining blockers need dev or a maintainer.
+
+Dev runs feasible local tests and relevant lint/typecheck/build before pushing,
+records commands and results in the PR, and documents checks that require CI.
+Independent simplification and correctness review may share one pass on the
+same tree before push. Fixes are batched, affected checks rerun, and subsequent
+reviews focus on changes and affected contracts. Final E2E runs once in the
+review wrapper when configured; reviewers reuse evidence only for the same
+HEAD, environment, and scenario coverage. Required verification is never marked
+complete based on a skipped or unavailable check.
+
+For this repository, run `bash tests/run-unit-tests.sh` locally and in CI. Its
+bounded parallel pool preserves the full unit suite and reports failing logs.
+Set `UNIT_TEST_JOBS` to tune concurrency for the host. This removes the former
+serial CI loop without changing test coverage or runner selection.
+
 ## GitLab Support
 
 Both provider seams accept `gitlab`: issues and merge requests on gitlab.com

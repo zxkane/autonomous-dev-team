@@ -52,10 +52,23 @@ each step manually.
 
 Verify ALL of the following:
 
+Use `REVIEW_BLOCKING_SEVERITY` from the project configuration or wrapper prompt
+for code findings: default P1 blocks only P0/P1 from the first round. P2/P3 notes
+remain visible without requiring fixes. P2/P3 select fixed stricter floors;
+`adaptive` selects the legacy round-dependent floor. Required acceptance criteria,
+security controls, tests, CI, and merge gates still block. Classify untagged
+correctness findings before deferring them. Do not promote style preferences to
+P1 to force cleanup. A documented advisory disposition counts as addressed.
+
+On follow-up rounds, verify existing blockers and the changed code plus affected
+contracts. Reopen a resolved finding only with new evidence; broaden review when
+the changes warrant it. Reuse valid same-HEAD verification evidence. If the wrapper
+has already run E2E, read its results and coverage rather than running it again.
+
 ### 1. Process Compliance
-- [ ] Design canvas exists in `docs/designs/` or `docs/plans/`
+- [ ] Design canvas exists when required by the change or repository policy
 - [ ] Branch follows naming convention (`feat/`, `fix/`, `refactor/`, etc.)
-- [ ] Test cases documented in `docs/test-cases/`
+- [ ] Test cases documented when required; existing regression tests may document a small fix
 - [ ] PR description follows template (Summary, Design, Test Plan, Checklist sections)
 - [ ] PR references the issue (`Closes #N` or `Fixes #N`)
 

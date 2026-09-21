@@ -49,19 +49,7 @@ jobs:
         run: python3 -m pip install --quiet jsonschema || pip3 install --quiet jsonschema || true
 
       - name: Run all unit tests
-        run: |
-          failed=0
-          for test in tests/unit/test-*.sh; do
-            echo "::group::Running $test"
-            if bash "$test"; then
-              echo "::endgroup::"
-            else
-              echo "::endgroup::"
-              echo "::error::$test failed"
-              failed=1
-            fi
-          done
-          exit $failed
+        run: bash tests/run-unit-tests.sh
 
       # agent-smoke harness E2E self-test (INV-63, #222): run the FULL matrix
       # harness against stub CLIs so CI exercises it end-to-end without real

@@ -1636,7 +1636,8 @@ $(_review_severity_prompt_block "$REVIEW_ROUND")
 After your analysis, post your verdict via \`bash scripts/post-verdict.sh\`
 (the helper described in the Decision section
 $(provider_prompt_fragment review.codex_do_not_hand_roll)
-you raised any \`[P0]\`-\`[P3]\` finding, a PASS otherwise.
+you raised a finding at or above the configured blocking floor, a PASS otherwise.
+Keep lower-severity findings visible as non-blocking notes.
 CODEX_REVIEW_NOTE
 fi)
 
@@ -1686,9 +1687,9 @@ Look for:
 ## Review Checklist
 Verify ALL of the following were completed:
 
-1. [ ] Design canvas created (docs/designs/ or docs/plans/)
+1. [ ] Design canvas created when required by change scope or repository policy
 2. [ ] Git worktree used (branch name starts with feat/, fix/, etc.)
-3. [ ] Test cases documented (docs/test-cases/)
+3. [ ] Required test cases documented; existing regression tests may cover a small fix
 4. [ ] Unit tests written and passing
 5. [ ] E2E tests written/updated if UI changes
 6. [ ] CI checks all passing
@@ -1848,11 +1849,12 @@ issue, NOT silently ignored):
 
 **Severity tagging (issue #449, R1) — set \`severity\` on EVERY blocking finding**:
 use exactly one of \`"P0"\`, \`"P1"\`, \`"P2"\`, or \`"P3"\` (the vocabulary defined
-above) so the wrapper's convergence ratchet can score this finding correctly. A
+above) so the wrapper's configured blocking policy can score this finding correctly. A
 finding with \`severity\` OMITTED is treated as UNSCOREABLE and ALWAYS blocks —
 so omitting it is never a way to make a low-severity finding non-blocking; only
-an HONEST \`"P2"\`/\`"P3"\` tag can do that, and only once enough review rounds
-have run.
+an HONEST \`"P2"\`/\`"P3"\` tag can do that when below the configured floor.
+Put advisory findings in \`nonBlockingFindings\`; a review with only advisory
+findings is PASS, with an empty \`blockingFindings\` array.
 
 **Per-finding actionability classification ([INV-92], #298)** — for EACH blocking
 finding, classify WHO can fix it so the dispatcher does not re-dispatch the dev
@@ -3376,6 +3378,7 @@ declare -a AGENT_VERDICT_SOURCES=()
 # finding is dev-actionable; "false" only when EVERY blocking finding is
 # non-actionable.
 declare -a AGENT_DEV_ACTIONABLE=()
+declare -a AGENT_ARTIFACT_SEVERITIES=()
 # INV-136 (#488) D4: per-agent sorted/unique REVIEW_PROTECTED_PATHS pattern(s)
 # matched by this agent's blocking findings — a sibling of AGENT_DEV_ACTIONABLE,
 # computed from the SAME live `_art_json` for the SAME reason (the per-run
@@ -3435,10 +3438,12 @@ for _i in "${!AGENT_NAMES[@]}"; do
   case "$_art_state" in
     valid)
       _art_json="${_art_out#*$'\n'}"
+      _art_json=$(_review_apply_artifact_policy "$_art_json" "$REVIEW_ROUND")
       _art_verdict=$(_verdict_from_artifact_json "$_art_json")
       if [[ "$_art_verdict" == "pass" || "$_art_verdict" == "fail" ]]; then
         AGENT_VERDICTS[$_i]="$_art_verdict"
         AGENT_VERDICT_SOURCES[$_i]="artifact"
+        AGENT_ARTIFACT_SEVERITIES[$_i]=$(_review_artifact_highest_severity "$_art_json")
         # [P1] #1 (#233 review round-4): derive the HUMAN-FACING verdict body from
         # the artifact so the wrapper's own rendering paths work when the artifact
         # is the ONLY successful channel (the agent's post-verdict.sh comment
@@ -3911,6 +3916,12 @@ declare -a AGENT_HIGHEST_SEVERITY=()
 # internally-demoted PASS as still having outstanding blocking feedback.
 _any_severity_demotion=false
 for _i in "${!AGENT_NAMES[@]}"; do
+  # Artifacts have already been normalized from typed fields. Rescanning their
+  # prose would allow a quoted [P3] to mask an untagged or mandatory blocker.
+  if [[ "${AGENT_VERDICT_SOURCES[$_i]:-}" == artifact ]]; then
+    AGENT_HIGHEST_SEVERITY[$_i]="${AGENT_ARTIFACT_SEVERITIES[$_i]:-none}"
+    continue
+  fi
   _sev_text=""
   _sev_region_text=""
   _is_codex_stdout_fallback=false
@@ -4058,7 +4069,9 @@ _AGGREGATE_VERDICT_SEVERITY_PAIRS=()
 for _i in "${!AGENT_NAMES[@]}"; do
   _AGGREGATE_VERDICT_SEVERITY_PAIRS+=("${AGENT_VERDICTS[$_i]}" "${AGENT_HIGHEST_SEVERITY[$_i]:-none}")
 done
-_AGGREGATE_HAS_P0P1_FAIL=$(_aggregate_has_p0p1_fail "${_AGGREGATE_VERDICT_SEVERITY_PAIRS[@]}")
+# Fixed P2/P3 policies extend the cap to their selected floor; adaptive keeps
+# the legacy P0/P1 terminal-floor behavior described above.
+_AGGREGATE_HAS_CAP_FAIL=$(_review_cap_has_blocking_fail "${_AGGREGATE_VERDICT_SEVERITY_PAIRS[@]}")
 
 # [P1] #2 (#449 review): post the review-round-counter marker HERE — only
 # once a genuine verdict has landed (AGGREGATE is a DECIDED pass/fail, per
@@ -5540,7 +5553,7 @@ else
     # now, not the load-bearing fix it originally was; see the R5 comment
     # above `_AGGREGATE_HAS_P0P1_FAIL`'s computation for the full account.
     if [[ "$AGGREGATE" == "fail" ]] && [[ "$_AGGREGATE_SUBSTANTIVE_FAIL" == "true" ]] \
-       && [[ "$_AGGREGATE_HAS_P0P1_FAIL" == "true" ]]; then
+       && [[ "$_AGGREGATE_HAS_CAP_FAIL" == "true" ]]; then
       _rc_already_stalled=$(itp_read_task "$ISSUE_NUMBER" labels \
         | jq -r '.labels | any(. == "stalled")' 2>/dev/null || echo "false")
 
@@ -5606,7 +5619,7 @@ ${_rc_marker}
 
 This PR has reached **${_rc_next_count}** consecutive \`failed-substantive\`
 review rounds (>= threshold ${_rc_threshold}) and the review still finds a
-P0/P1 blocking finding — the severity ratchet's own floor, which always
+blocking finding at the configured terminal floor ($(_review_blocking_severity 5)), which always
 blocks at any round. Every fix so far has legitimately created the surface
 for the next finding without the review converging.
 

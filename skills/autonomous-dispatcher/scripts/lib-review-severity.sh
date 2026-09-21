@@ -24,7 +24,8 @@
 #   P3 — low-severity residual risk or test gap tightly related to the change
 #   none — no severity tag found (untagged prose, or a legacy-format body)
 #
-# Default blocking-floor matrix (round buckets):
+# Default: P0/P1 block from the first round. REVIEW_BLOCKING_SEVERITY can
+# select a fixed P1/P2/P3 floor or the opt-in legacy adaptive matrix:
 #   round 1-2 → P0, P1, P2, P3 all block
 #   round 3-4 → P0, P1, P2 block; P3 does not
 #   round 5+  → P0, P1 block; P2, P3 do not
@@ -34,6 +35,28 @@
 #   ratchet by omitting the tag. Only a POSITIVELY identified low-severity
 #   tag can ever be demoted.
 
+# _review_blocking_severity <round> -- shared policy for prompts and decisions.
+_review_blocking_severity() {
+  local round="${1:-1}" policy="${REVIEW_BLOCKING_SEVERITY:-P1}"
+  case "$policy" in
+    P1|P2|P3) printf '%s\n' "$policy" ;;
+    adaptive)
+      [[ "$round" =~ ^[0-9]+$ ]] || round=1
+      if [[ "$round" -le 2 ]]; then
+        printf 'P3\n'
+      elif [[ "$round" -le 4 ]]; then
+        printf 'P2\n'
+      else
+        printf 'P1\n'
+      fi
+      ;;
+    *)
+      echo 'WARNING: REVIEW_BLOCKING_SEVERITY must be P1, P2, P3, or adaptive; using P3 (strict).' >&2
+      printf 'P3\n'
+      ;;
+  esac
+}
+
 # shouldBlockFinding <round> <severity>
 #
 # Pure decision function. rc-boolean contract (mirrors ci_is_green): rc 0 =
@@ -41,20 +64,16 @@
 # non-numeric/empty round defaults to 1 (the strictest floor — never silently
 # widen the blocking floor on a malformed round value).
 shouldBlockFinding() {
-  local round="${1:-}" severity="${2:-}"
-  [[ "$round" =~ ^[0-9]+$ ]] || round=1
+  local round="${1:-}" severity="${2:-}" threshold
+  threshold=$(_review_blocking_severity "$round")
 
   case "$severity" in
     P0|P1)
       return 0
       ;;
-    P2)
-      [[ "$round" -le 4 ]] && return 0
-      return 1
-      ;;
-    P3)
-      [[ "$round" -le 2 ]] && return 0
-      return 1
+    P2|P3)
+      [[ "${severity#P}" -le "${threshold#P}" ]]
+      return $?
       ;;
     *)
       # "none" or any unrecognized token — fail-safe, always blocks.
@@ -148,6 +167,61 @@ _review_apply_severity_filter() {
   return 0
 }
 
+# Apply the floor to a validated artifact before deriving routing or rendering.
+# A low-severity dev-actionable note must not send a human-only blocker to dev.
+# The immutable source artifact stays intact; only this in-memory copy changes.
+_review_apply_artifact_policy() {
+  local json="$1" threshold
+  threshold=$(_review_blocking_severity "${2:-1}")
+  jq -c --argjson floor "${threshold#P}" '
+    def blocks:
+      (.severity // "") as $severity
+      | (["P0", "P1", "P2", "P3"] | index($severity)) as $rank
+      | $rank == null or $rank <= $floor;
+    if (((.evidence.acCoverage // {} | any(. == "fail"))
+        or .evidence.e2eReport.gate == "fail")
+        and all((.blockingFindings // [])[]; blocks | not)) then
+      .verdict = "FAIL"
+      | if (.blockingFindings // [] | length) == 0 then
+          .blockingFindings = [{title: "Mandatory verification failed", severity: "P1",
+            detail: "Resolve the failed acceptance criteria or E2E evidence before merge."}]
+        else . end
+    elif .verdict == "FAIL" then
+      (.blockingFindings // []) as $findings
+      | .blockingFindings = [$findings[] | select(blocks)]
+      | .nonBlockingFindings = ((.nonBlockingFindings // [])
+          + [$findings[] | select(blocks | not) | .blocking_for_merge = false])
+      | .verdict = (if (.blockingFindings | length) == 0 then "PASS" else "FAIL" end)
+    else . end
+  ' <<<"$json"
+}
+
+_review_artifact_highest_severity() {
+  jq -r '
+    if any((.blockingFindings // [])[]; .severity == "P0") then "P0"
+    elif ((.evidence.acCoverage // {} | any(. == "fail"))
+        or .evidence.e2eReport.gate == "fail") then "P1"
+    elif any((.blockingFindings // [])[]; .severity == null) then "none"
+    else [(.blockingFindings // [])[].severity] | sort | first // "none" end
+  ' <<<"$1"
+}
+
+# The cap tracks the policy's terminal floor. Fixed P2/P3 policies must also
+# stop an endless series of lower-severity failures; adaptive ends at P1.
+_review_cap_has_blocking_fail() {
+  local verdict severity threshold
+  threshold=$(_review_blocking_severity 5)
+  while [[ "$#" -ge 2 ]]; do
+    verdict="$1" severity="$2"
+    shift 2
+    if [[ "$verdict" == fail ]] && REVIEW_BLOCKING_SEVERITY="$threshold" shouldBlockFinding 5 "$severity"; then
+      printf 'true\n'
+      return 0
+    fi
+  done
+  printf 'false\n'
+}
+
 # _review_region_has_terminal_tag <region-text>
 #
 # rc-boolean (rc 0 = a `[P0]` or `[P1]` literal tag is present somewhere in
@@ -204,6 +278,19 @@ _review_region_terminal_severity() {
     printf 'none\n'
   fi
   return 0
+}
+
+# Corroboration must protect every severity selected by the policy, including
+# P2/P3 in strict configurations, when a quoted turn marker hides a finding.
+_review_region_blocking_severity() {
+  local text="${1:-}" round="${2:-1}" severity
+  for severity in P0 P1 P2 P3; do
+    if shouldBlockFinding "$round" "$severity" && grep -qF "[$severity]" <<<"$text"; then
+      printf '%s\n' "$severity"
+      return 0
+    fi
+  done
+  printf 'none\n'
 }
 
 # _review_apply_severity_filter_corroborated <verdict> <tail-text> <region-text> <round>
@@ -271,7 +358,7 @@ _review_apply_severity_filter_corroborated() {
   # practice always P2/P3, since P0/P1/"none" always block via
   # shouldBlockFinding's own case arms and would have returned above).
   # Corroborate against the wider region before trusting it.
-  if _review_region_has_terminal_tag "$region_text"; then
+  if [[ -z "$region_text" ]] || [[ "$(_review_region_blocking_severity "$region_text" "$round")" != none ]]; then
     printf 'fail\n'
   else
     printf 'pass\n'
@@ -319,8 +406,10 @@ _review_highest_severity_corroborated() {
     printf '%s\n' "$sev_tail"
     return 0
   fi
-  if _review_region_has_terminal_tag "$region_text"; then
-    _review_region_terminal_severity "$region_text"
+  local region_severity
+  region_severity=$(_review_region_blocking_severity "$region_text" "$round")
+  if [[ -z "$region_text" || "$region_severity" != none ]]; then
+    printf '%s\n' "$region_severity"
   else
     printf '%s\n' "$sev_tail"
   fi
@@ -343,10 +432,11 @@ _review_severity_prompt_block() {
   local round="${1:-1}"
   [[ "$round" =~ ^[0-9]+$ ]] || round=1
 
-  local floor_desc
-  if [[ "$round" -le 2 ]]; then
+  local floor_desc threshold
+  threshold=$(_review_blocking_severity "$round")
+  if [[ "$threshold" == P3 ]]; then
     floor_desc="P0, P1, P2, and P3 all block this round."
-  elif [[ "$round" -le 4 ]]; then
+  elif [[ "$threshold" == P2 ]]; then
     floor_desc="P0, P1, and P2 block this round; a P3 finding is reported as a non-blocking note (still visible to the operator) but does NOT fail the review."
   else
     floor_desc="Only P0 and P1 block this round; a P2 or P3 finding is reported as a non-blocking note (still visible to the operator) but does NOT fail the review."
@@ -364,21 +454,70 @@ markers (this is review round ${round}):
 Style/doc/general suggestions are never tagged and never block.
 
 This round's blocking floor: ${floor_desc}
+Configured policy: REVIEW_BLOCKING_SEVERITY=${REVIEW_BLOCKING_SEVERITY:-P1}.
+
+Use the floor for dev-side review, simplification, and external bot findings too.
+Put findings below the floor in nonBlockingFindings, with a PASS verdict when
+there are no blocking findings. Do not request another code change or review
+round solely for those notes. An untagged correctness finding remains blocking
+until classified; do not disguise it as a style suggestion. Severity must reflect
+demonstrable impact, not a preference for cleaner code. Mandatory acceptance
+criteria, security controls, failing required tests, and merge gates still apply.
 
 $(if [[ "$round" -le 1 ]]; then
 cat <<'ROUND1'
-Enumerate findings EXHAUSTIVELY this round — do not stop at the first few or
-rank by only the top-N; this is the first pass and later rounds will assume
-you already covered the surface thoroughly.
+Review the complete changeset for correctness, security, and acceptance criteria.
+Report all blocking findings you identify in this pass. Group duplicate advisory
+observations; do not spend additional rounds generating speculative cleanup work.
 ROUND1
 else
 cat <<'ROUNDN'
 Re-verify each EXISTING blocking finding first — confirm it is still present
-before re-reporting it. Still look for NEW problems: if you find one below
+before re-reporting it. Focus subsequent review on the fixes and affected callers,
+contracts, and regressions; expand to the full diff when their impact warrants it.
+Do not reopen an unchanged, resolved finding without new evidence. Still look for NEW problems: if you find one below
 this round's blocking floor (e.g. a P3 at round 5), REPORT it as a
 non-blocking note — do NOT omit it just because it will not block this
 round.
 ROUNDN
 fi)
 SEVERITY_BLOCK
+}
+
+_dev_delivery_policy_prompt_block() {
+  local threshold
+  threshold=$(_review_blocking_severity "${1:-1}")
+  cat <<POLICY
+## Delivery policy
+
+REVIEW_BLOCKING_SEVERITY=${REVIEW_BLOCKING_SEVERITY:-P1}; effective blocking floor: ${threshold}.
+P0 and P1 always block. Fix findings at or above the effective floor; record
+lower-severity findings as non-blocking notes. Apply this to issue feedback,
+inline comments, simplification, and dev-side review. Classify untagged findings
+before deferring them. Mandatory acceptance criteria, security controls, failed
+required tests, and merge gates remain blocking. Do not relabel a blocker to defer it.
+
+Recheck whether each finding still exists on the current code. Batch related
+blocking fixes. Reply once to deferred inline findings with the severity and
+reason; resolve an advisory thread only after recording that disposition and
+when repository policy permits it. Do not claim deferred findings were fixed.
+Do not retrigger a bot or repeat a full-diff review solely for non-blocking notes.
+For the same HEAD, reuse completed review evidence; after changes review the
+changed code and affected contracts, widening only when the impact warrants it.
+
+Run feasible local verification before pushing: focused regression tests first,
+then relevant lint/typecheck/build and the broader suite required by the impact
+or repository policy. Fix local failures before push. Record commands, results,
+tested revision/tree, and any unavailable dependency in the PR. If a check cannot
+run locally, state why and leave it pending for CI; never call it passed. CI is
+the final confirmation, not the first attempt at a locally runnable check.
+After a fix, rerun affected checks; do not repeat an unchanged successful full
+suite without new evidence. Complete independent dev-side review before pushing,
+then push the verified batch. When independent, overlap CI waiting with reading
+review feedback. Required CI must still pass before handoff/merge.
+
+When the review wrapper owns E2E, it runs the configured final E2E lane once.
+Dev runs feasible local feature checks and supplies evidence; fan-out reviewers
+consume the wrapper's same-HEAD, same-environment evidence without rerunning it.
+POLICY
 }

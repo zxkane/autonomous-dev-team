@@ -79,7 +79,11 @@ run_scenario() {
   fi
 
   local outlog="$TMP/dispatch-out-${label}.log"
+  # Keep opportunistic GC and admission checks independent of live host lanes.
   setsid env AUTONOMOUS_PID_DIR="$piddir" PROJECT_ID="e2e-lgc3-${label}" \
+    ADT_STATE_ROOT="$TMP/state-${label}" \
+    _GATE_LOAD1_PER_CORE_OVERRIDE=0 _GATE_MEM_AVAILABLE_MB_OVERRIDE=999999 \
+    _GATE_SWAP_PCT_OVERRIDE=0 _GATE_LIVE_LANE_COUNT_OVERRIDE=0 \
     PROJECT_DIR="$projdir" KILL_STALE_PGREP_FALLBACK="$pgrep_fallback" \
     bash "$DISPATCH_LOCAL" dev-new "$issue" >"$outlog" 2>&1 &
   local dispatch_sid=$!

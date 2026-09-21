@@ -2,8 +2,8 @@
 
 Every `test-*.sh` file in this directory can run **concurrently** with any other
 file here, via `tests/run-unit-tests.sh` (bounded `xargs -P` worker pool; see that
-script's header for `UNIT_TEST_DIR`/`UNIT_TEST_JOBS`). Legacy serial for-loops
-(current CI) also still work — the runner is a strict superset of that semantics.
+script's header for `UNIT_TEST_DIR`/`UNIT_TEST_JOBS`). Both CI and local full-suite
+verification use this runner. Legacy serial for-loops also still work.
 
 ## Rules for new tests
 
