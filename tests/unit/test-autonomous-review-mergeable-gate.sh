@@ -137,8 +137,10 @@ echo "=== TC-MG-SRC-12: wrapper trailer sites after canonical conflict extractio
 # Pre-gate the wrapper had 6 emit_verdict_trailer call sites (crash trap, no-pr,
 # pass, auto-merge-fail, fail-substantive, fail-non-substantive). The INV-44 gate
 # adds two (CONFLICTING substantive + UNKNOWN non-substantive); the INV-46 E2E
-# gate (#182) adds two more (E2E-fail substantive + E2E-evidence-missing
-# non-substantive); the INV-64 Phase-A.5 smoke gate (#224) adds one (smoke-FAIL
+# gate (#182) originally added two direct wrapper sites; the substantive
+# E2E-fail route is now extracted into the canonical required-status helper in
+# lib-review-mergeable.sh, leaving only E2E-evidence-missing direct here. The
+# INV-64 Phase-A.5 smoke gate (#224) adds one (smoke-FAIL
 # abort); the INV-79 mandatory-bot-review gate (#234) adds two (awaiting-bot-review
 # wait + the max-waits substantive FAIL) → 13; the INV-134 CI-rollup gate
 # (issue #489) adds four (head-changed non-substantive + failed-check
@@ -155,8 +157,8 @@ echo "=== TC-MG-SRC-12: wrapper trailer sites after canonical conflict extractio
 # the regex tolerates an optional `_teardown_call ` prefix so the call-SITE
 # count stays semantic even though one site's literal text changed.
 EMIT_COUNT=$(grep -cE '^\s*(if ! )?(_teardown_call )?emit_verdict_trailer ' "$WRAPPER")
-assert_eq "TC-MG-SRC-12 emit_verdict_trailer call count remains 20 after conflict extraction + retry cleanup" \
-  "20" "$EMIT_COUNT"
+assert_eq "TC-MG-SRC-12 direct emit_verdict_trailer wrapper call count is 19 after E2E required-route extraction" \
+  "19" "$EMIT_COUNT"
 assert_grep "TC-MG-SRC-12b canonical route uses the required-status verdict writer" \
   'emit_verdict_trailer_required' "$MG_LIB"
 

@@ -199,6 +199,26 @@ assert_not_contains "TC-E2E-REBASE-027 conflict disposition avoids first-review 
   "transition:pending-dev>pending-review" "$TRACE"
 
 _reset
+_set_disposition "$HEAD_A" "e2e-failed"
+DEV_ACTIONABLE="false"
+handle_pending_dev_pr_exists 540
+assert_contains "TC-E2E-ACT-003 non-actionable E2E reaches INV-92 stall" \
+  "stalled:540" "$TRACE"
+assert_not_contains "TC-E2E-ACT-003 non-actionable E2E dispatches no DEV" \
+  "dispatch:" "$TRACE"
+assert_not_contains "TC-E2E-ACT-003 non-actionable E2E never bounces pending-review" \
+  "transition:pending-dev>pending-review" "$TRACE"
+
+_reset
+_set_disposition "$HEAD_A" "e2e-failed"
+DEV_ACTIONABLE="true"
+handle_pending_dev_pr_exists 540
+assert_contains "TC-E2E-ACT-004 actionable E2E reaches bounded correction" \
+  "dispatch:dev-new:540" "$TRACE"
+assert_not_contains "TC-E2E-ACT-004 actionable E2E avoids pending-review bounce" \
+  "transition:pending-dev>pending-review" "$TRACE"
+
+_reset
 _set_disposition "$HEAD_A" "mergeable-unknown"
 VERDICT="failed-non-substantive"
 CAUSE="mergeable-unknown"
