@@ -406,7 +406,7 @@ setup_agent_token() {
        && ln -sf "${_LIB_AUTH_DIR}/gh-with-token-refresh.sh" "${AGENT_GH_SHIM_DIR}/gh" 2>/dev/null; then
       :
     else
-      echo "ERROR: could not create the scoped agent gh shim" >&2
+    echo "ERROR: could not create the scoped agent GitHub CLI shim" >&2
       cleanup_github_auth
       return 1
     fi
