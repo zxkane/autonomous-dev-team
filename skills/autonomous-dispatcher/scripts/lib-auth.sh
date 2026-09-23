@@ -65,9 +65,9 @@ GH_WRAPPER_DIR=""
 
 # [INV-79] Two-token split. The wrapper keeps GH_TOKEN_FILE (full-write); the
 # AGENT process gets a SECOND, narrower installation token written here by
-# setup_agent_token (app mode only). Empty in PAT mode / app-mode-mint-failure —
-# build_agent_env_argv then emits NO scrub prefix (agent inherits the unchanged
-# wrapper env, the documented degraded behavior). AGENT_TOKEN_DAEMON_PID tracks
+# setup_agent_token (app mode only). Empty in PAT mode; an app-mode failure
+# aborts before agent launch rather than inheriting broker credentials.
+# AGENT_TOKEN_DAEMON_PID tracks
 # the second refresh daemon so cleanup_github_auth reaps it alongside the
 # wrapper's daemon.
 AGENT_GH_TOKEN_FILE=""
@@ -87,7 +87,9 @@ AGENT_GH_SHIM_DIR=""
 # deterministic 403 on either — the wrapper (full-write) is the sole approve/
 # merge path (INV-44/52). issues:write covers progress comments, checkbox ticks,
 # and the E2E report fallback. Operator-overridable but documented as the default.
-AGENT_TOKEN_PERMISSIONS="${AGENT_TOKEN_PERMISSIONS:-{\"contents\":\"write\",\"issues\":\"write\",\"pull_requests\":\"read\"}}"
+if [[ -z "${AGENT_TOKEN_PERMISSIONS:-}" ]]; then
+  AGENT_TOKEN_PERMISSIONS='{"contents":"write","issues":"write","pull_requests":"read"}'
+fi
 # One-time PAT-mode WARN latch (INV-79): the degraded-enforcement warning is
 # logged at most once per process, even across repeated setup_agent_token calls.
 _AGENT_TOKEN_PAT_WARNED=""
@@ -149,6 +151,17 @@ _ensure_gh_wrapper_dir() {
   fi
 }
 
+_validate_agent_token_permissions() {
+  if ! printf '%s' "$AGENT_TOKEN_PERMISSIONS" | jq -e '
+    type == "object" and length > 0
+    and all(.[]; . == "read" or . == "write" or . == "admin")
+    and (.pull_requests // "read") == "read"
+  ' >/dev/null 2>&1; then
+    echo "ERROR: scoped agent permissions must be valid JSON without PR write access" >&2
+    return 1
+  fi
+}
+
 # [Lane-GC PR-1] Background-spawn gh-token-refresh-daemon.sh with GH token
 # VALUES scrubbed from its env (it only needs GH_TOKEN_FILE paths, passed as
 # argv below) — shared by both the wrapper-token and agent-scoped-token spawn
@@ -200,6 +213,8 @@ setup_github_auth() {
       echo "ERROR: GH_AUTH_MODE=app requires app_id and app_pem arguments" >&2
       return 1
     fi
+
+    _validate_agent_token_permissions || return 1
 
     # [INV-65] sibling lib sourced from the REAL skill tree (no project symlink
     # needed); the `gh` wrapper symlinks below stay on the project-side
@@ -307,9 +322,7 @@ refresh_token_env() {
 # keeps the shared PAT (byte-identical to pre-INV-79 behavior).
 #
 # Args (app mode): $1=app_id, $2=app_pem. Ignored in PAT mode.
-# Returns 0 even on a scoped-mint failure (availability over the defense-in-depth
-# bonus): a WARN is logged and AGENT_GH_TOKEN_FILE stays empty → no scrub → the
-# agent falls back to the full-write env rather than losing GitHub access mid-run.
+# App-mode setup failures clean up authentication and return non-zero.
 setup_agent_token() {
   local app_id="${1:-}"
   local app_pem="${2:-}"
@@ -343,8 +356,14 @@ setup_agent_token() {
   fi
 
   if [[ -z "$app_id" || -z "$app_pem" ]]; then
-    echo "WARN: [INV-79] setup_agent_token called in app mode without app_id/app_pem — skipping scoped token; the agent will inherit the full-write credential (no env scrub this run)." >&2
-    return 0
+    echo "ERROR: app-mode agent authentication requires app_id and app_pem" >&2
+    cleanup_github_auth
+    return 1
+  fi
+
+  if ! _validate_agent_token_permissions; then
+    cleanup_github_auth
+    return 1
   fi
 
   # gh-app-token.sh is sourced by setup_github_auth's app branch; source again
@@ -370,21 +389,16 @@ setup_agent_token() {
   done
 
   if [[ ! -s "$AGENT_GH_TOKEN_FILE" ]]; then
-    echo "WARN: [INV-79] scoped agent-token daemon failed to write an initial token after ${_wait_max}s — the agent will inherit the full-write credential (no env scrub this run)." >&2
-    kill "$AGENT_TOKEN_DAEMON_PID" 2>/dev/null || true
-    wait "$AGENT_TOKEN_DAEMON_PID" 2>/dev/null || true
-    AGENT_TOKEN_DAEMON_PID=""
-    AGENT_GH_TOKEN_FILE=""
-    return 0
+    echo "ERROR: scoped agent token was not created; refusing full-write fallback" >&2
+    cleanup_github_auth
+    return 1
   fi
 
   # [INV-79] Create the AGENT's OWN `gh` shim dir (mode 700) holding a `gh` symlink
   # to the same gh-with-token-refresh.sh the wrapper uses. build_agent_env_argv
   # swaps this in for the wrapper's GH_WRAPPER_DIR on the agent PATH, so the agent's
   # bare `gh` resolves WITHOUT the wrapper shim dir being exposed (issue #234 AC #1).
-  # Best-effort: a mkdir/symlink failure leaves AGENT_GH_SHIM_DIR empty, and
-  # build_agent_env_argv then keeps the wrapper dir on PATH (availability over the
-  # AC nicety — bare `gh` must still resolve) and logs the degraded state.
+  # The agent-owned shim is required; failure cannot retain the wrapper PATH.
   AGENT_GH_SHIM_DIR=$(mktemp -d "/tmp/agent-shim-XXXXXX" 2>/dev/null) || AGENT_GH_SHIM_DIR=""
   if [[ -n "$AGENT_GH_SHIM_DIR" ]]; then
     chmod 700 "$AGENT_GH_SHIM_DIR" 2>/dev/null || true
@@ -392,10 +406,14 @@ setup_agent_token() {
        && ln -sf "${_LIB_AUTH_DIR}/gh-with-token-refresh.sh" "${AGENT_GH_SHIM_DIR}/gh" 2>/dev/null; then
       :
     else
-      echo "WARN: [INV-79] could not create the agent-owned gh shim — falling back to the wrapper shim dir on the agent PATH (bare gh still resolves; AC#1 no-wrapper-shim not met this run)." >&2
-      rm -rf "$AGENT_GH_SHIM_DIR" 2>/dev/null || true
-      AGENT_GH_SHIM_DIR=""
+      echo "ERROR: could not create the scoped agent gh shim" >&2
+      cleanup_github_auth
+      return 1
     fi
+  else
+    echo "ERROR: could not create the scoped agent shim directory" >&2
+    cleanup_github_auth
+    return 1
   fi
   return 0
 }
@@ -409,9 +427,9 @@ setup_agent_token() {
 #     re-reads the scoped file on every call and the scoped refresh daemon keeps it
 #     fresh past the 1h App-token TTL (#234 review [P1] — a one-time GH_TOKEN
 #     snapshot went stale on long runs and started failing pushes/comments/ticks).
-#   - sets GH_TOKEN=<scoped snapshot> as a FALLBACK for any direct `gh` resolution
-#     that bypasses the refresh shim (the shim, when GH_TOKEN_FILE is set, re-reads
-#     the file and overrides this snapshot — so the file always wins when fresh).
+#   - loads GH_TOKEN/GITHUB_TOKEN inside the child from the scoped file, never
+#     placing their values in process arguments. The refresh shim re-reads the
+#     file on each call; direct CLI calls retain the scoped launch snapshot.
 #   - unsets GITHUB_PERSONAL_ACCESS_TOKEN (the App-token alias) AND GH_USER_PAT (the
 #     host-user PAT — a scoped agent retaining it could `export GH_TOKEN=$GH_USER_PAT`
 #     and regain approve/merge, defeating the contract; #234 review [P1] f97959a3).
@@ -430,28 +448,25 @@ setup_agent_token() {
 # `gh pr merge` still 403) AND stays fresh on long runs. (`bash scripts/gh` — a
 # relative path, not a PATH lookup — resolves the shared project shim independently.)
 #
-# Degraded shim fallback: if AGENT_GH_SHIM_DIR could not be created (mkdir/symlink
-# failure in setup_agent_token), PATH is left intact (the wrapper dir stays) so bare
-# `gh` still resolves — availability over the AC nicety; setup_agent_token logged it.
+# App-mode shim setup failures abort before this function can launch an agent.
 #
 # SECURITY: GH_TOKEN_FILE is set to the SCOPED file only; the wrapper's full-write
 # token file (a DIFFERENT path, held in the wrapper shell's GH_TOKEN_FILE) is never
 # exposed to the agent subtree.
 #
-# Emits an EMPTY array (length 0 → no behavior change) when no scoped token is
-# armed: PAT mode, app-mode-mint-failure, or AGENT_GH_TOKEN_FILE unreadable. The
-# caller MUST treat an empty array as "run the agent with the unchanged env".
+# PAT/non-GitHub mode can emit an empty prefix. App mode returns an error if its
+# scoped file is missing or unreadable; callers MUST propagate that error.
 build_agent_env_argv() {
   local -n _env_out="$1"
   _env_out=()
 
-  # No scoped token → no scrub (PAT mode / mint failure). The agent inherits the
-  # wrapper env unchanged, the documented degraded behavior.
-  [[ -n "$AGENT_GH_TOKEN_FILE" && -s "$AGENT_GH_TOKEN_FILE" ]] || return 0
-
-  local scoped
-  scoped=$(cat "$AGENT_GH_TOKEN_FILE" 2>/dev/null) || return 0
-  [[ -n "$scoped" ]] || return 0
+  if [[ -z "$AGENT_GH_TOKEN_FILE" || ! -s "$AGENT_GH_TOKEN_FILE" || ! -r "$AGENT_GH_TOKEN_FILE" ]]; then
+    if [[ "$GH_AUTH_MODE" == "app" ]] && github_seam_active; then
+      echo "ERROR: scoped agent credential unavailable; refusing agent launch" >&2
+      return 1
+    fi
+    return 0
+  fi
 
   # [INV-79] GH_USER_PAT is SCRUBBED from the agent subtree. It is a host-user PAT
   # (typically `repo`-scoped) — a scoped agent that retained it could
@@ -466,21 +481,25 @@ build_agent_env_argv() {
   # unset; the App token is scoped via GH_TOKEN_FILE / GH_TOKEN below.
   _env_out=(
     env
+    -u GH_TOKEN
+    -u GITHUB_TOKEN
     -u GITHUB_PERSONAL_ACCESS_TOKEN
     -u GH_USER_PAT
     "GH_TOKEN_FILE=${AGENT_GH_TOKEN_FILE}"
-    "GH_TOKEN=${scoped}"
   )
 
   # [INV-79] Rewrite PATH: strip the wrapper's GH_WRAPPER_DIR (AC #1 — no wrapper
   # shim in the agent env) and prepend the AGENT-owned shim dir so bare `gh` still
   # resolves. Only when the agent shim was created; otherwise leave PATH intact
-  # (degraded fallback — bare `gh` must still resolve).
+  # Setup has already required an agent-owned shim in app mode.
   if [[ -n "$AGENT_GH_SHIM_DIR" ]]; then
     local _agent_path
     _agent_path=$(_strip_path_entry "$PATH" "$GH_WRAPPER_DIR")
     _env_out+=( "PATH=${AGENT_GH_SHIM_DIR}:${_agent_path}" )
   fi
+  # Read inside the child: exec arguments contain only the protected file reference.
+  # shellcheck disable=SC2016
+  _env_out+=( bash -c 'token=$(cat -- "$GH_TOKEN_FILE") || exit 1; [[ -n "$token" ]] || exit 1; export GH_TOKEN="$token" GITHUB_TOKEN="$token"; exec "$@"' scoped-agent )
 }
 
 # _strip_path_entry <path> <entry> — echo <path> with any exact-match <entry>

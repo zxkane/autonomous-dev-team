@@ -810,6 +810,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ "$VALIDATE_CONFIG_ONLY" -eq 1 ]]; then
+  cleanup_github_auth
   exit 0
 fi
 

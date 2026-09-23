@@ -143,6 +143,7 @@ environment differs from the wrapper's:
 | Var | Wrapper shell | Agent subtree (app mode, scoped) | Agent subtree (PAT / no-scope) |
 |-----|---------------|----------------------------------|-------------------------------|
 | `GH_TOKEN` | full-write token | **scoped** token (snapshot fallback) | inherited (shared) |
+| `GITHUB_TOKEN` | caller value, if set | **scoped** token loaded in the child | inherited (shared) |
 | `GH_TOKEN_FILE` | full-write token file | **scoped** token file (`AGENT_GH_TOKEN_FILE`) | inherited |
 | `GITHUB_PERSONAL_ACCESS_TOKEN` | full-write token | **unset** | inherited |
 | `GH_USER_PAT` | host PAT (if set) | **unset** (bot triggers brokered via the wrapper) | inherited |
@@ -191,8 +192,11 @@ strictly ahead of `${BASE_BRANCH}`, successful zero-match existence read) —
 see the [INV-79](invariants.md#inv-79-in-app-mode-the-agent-process-gets-only-a-scoped-token-the-wrapper-keeps-full-write-and-is-the-sole-approvemergepr-create-path)
 #519 amendment. The wrapper passes the issue title as the drain's 3rd argument
 for the recovery PR's synthesized title. In PAT
-mode / app-mode-mint-failure the prefix is empty (no scrub) — byte-identical to
-pre-INV-79.
+mode the prefix is empty (no scrub), preserving its existing documented behavior.
+App-mode scoped credential or shim failures instead abort and clean up before
+launch. The caller propagates launch-prefix failures even when Bash errexit is
+suppressed. The child loads token values from the protected file into its
+environment; neither scoped tokens nor JWT headers are placed in process argv.
 
 ### Structured blocked-403 marker ([INV-85], #511)
 
