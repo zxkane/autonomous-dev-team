@@ -79,7 +79,7 @@ _generate_jwt() {
   echo "${unsigned}.${signature}"
 }
 
-# Parse a JSON field from stdin, with error details on failure.
+# Parse a JSON field from stdin without echoing credential-response content.
 # Args: $1=field_name, $2=context (for error messages)
 _parse_json_field() {
   local field="$1"
@@ -95,10 +95,13 @@ _parse_json_field() {
 import sys, json
 field = sys.argv[1]
 context = sys.argv[2]
-data = json.load(sys.stdin)
-if field not in data:
-    msg = data.get('message', 'field not found')
-    print(f'API error ({context}): {msg}', file=sys.stderr)
+try:
+    data = json.load(sys.stdin)
+except (ValueError, UnicodeError):
+    print(f'API error ({context}): invalid JSON response', file=sys.stderr)
+    sys.exit(1)
+if not isinstance(data, dict) or field not in data:
+    print(f'API error ({context}): required field {field} is missing', file=sys.stderr)
     sys.exit(1)
 val = data[field]
 if val is None:
@@ -131,48 +134,67 @@ _app_install_token() {
 
   # Find the installation ID for this repository
   local install_response
-  install_response=$(curl -s \
-    -H "Authorization: Bearer $jwt" \
+  # Keep the JWT off process argv and ignore ambient curl config.
+  install_response=$(curl -q -s \
+    --connect-timeout 10 --max-time 30 \
+    --config - \
     -H "Accept: application/vnd.github+json" \
     -w "\n%{http_code}" \
-    "https://api.github.com/repos/${repo_owner}/${repo_name}/installation")
+    "https://api.github.com/repos/${repo_owner}/${repo_name}/installation" \
+    <<< "header = \"Authorization: Bearer $jwt\"") || {
+    echo "ERROR: GitHub installation lookup request failed" >&2
+    return 1
+  }
 
   local http_code
   http_code=$(echo "$install_response" | tail -1)
   install_response=$(echo "$install_response" | sed '$d')
 
-  if [[ "$http_code" -lt 200 || "$http_code" -ge 300 ]]; then
-    echo "ERROR: GitHub API returned HTTP $http_code for installation lookup. Body: $install_response" >&2
+  if ! [[ "$http_code" =~ ^[0-9]{3}$ ]]; then
+    echo "ERROR: GitHub API returned an invalid HTTP status for installation lookup" >&2
+    return 1
+  fi
+  if [[ "$http_code" != 2[0-9][0-9] ]]; then
+    echo "ERROR: GitHub API returned HTTP $http_code for installation lookup" >&2
     return 1
   fi
 
   local installation_id
   installation_id=$(echo "$install_response" | _parse_json_field "id" "installation lookup") || {
-    echo "ERROR: Failed to parse installation ID. Response: $install_response" >&2
+    echo "ERROR: Failed to parse installation ID" >&2
     return 1
   }
 
   # Exchange JWT for an installation access token
   local token_response
-  token_response=$(curl -s \
+  token_response=$(curl -q -s \
+    --connect-timeout 10 --max-time 30 \
+    --config - \
     -X POST \
-    -H "Authorization: Bearer $jwt" \
     -H "Accept: application/vnd.github+json" \
     -w "\n%{http_code}" \
     "https://api.github.com/app/installations/${installation_id}/access_tokens" \
-    -d "$request_body")
+    -d "$request_body" \
+    <<< "header = \"Authorization: Bearer $jwt\"") || {
+    echo "ERROR: GitHub token exchange request failed" >&2
+    return 1
+  }
 
   http_code=$(echo "$token_response" | tail -1)
   token_response=$(echo "$token_response" | sed '$d')
 
-  if [[ "$http_code" -lt 200 || "$http_code" -ge 300 ]]; then
-    echo "ERROR: GitHub API returned HTTP $http_code for token exchange. Body: $token_response" >&2
+  if ! [[ "$http_code" =~ ^[0-9]{3}$ ]]; then
+    echo "ERROR: GitHub API returned an invalid HTTP status for token exchange" >&2
+    return 1
+  fi
+  if [[ "$http_code" != 2[0-9][0-9] ]]; then
+    echo "ERROR: GitHub API returned HTTP $http_code for token exchange" >&2
     return 1
   fi
 
   local token
   token=$(echo "$token_response" | _parse_json_field "token" "token exchange") || {
-    echo "ERROR: Failed to parse token. Response: $token_response" >&2
+    echo "ERROR: Failed to parse token" >&2
     return 1
   }
 

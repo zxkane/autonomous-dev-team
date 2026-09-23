@@ -241,10 +241,11 @@ done
                         || assert_fail "scoped token file NOT under GH_WRAPPER_DIR"
 [[ "$pfxlen" -gt 0 ]] && assert_pass "app mode: build_agent_env_argv emits a non-empty scrub prefix (len=$pfxlen)" \
                       || assert_fail "app mode scrub prefix empty"
-if printf '%s' "$pfx" | grep -qF 'GH_TOKEN=SCOPED-TOKEN-abc123'; then
-  assert_pass "scrub prefix sets GH_TOKEN to the SCOPED token (snapshot fallback)"
+if ! printf '%s' "$pfx" | grep -qF 'SCOPED-TOKEN-abc123' \
+   && printf '%s' "$pfx" | grep -qF -- '-u GH_TOKEN'; then
+  assert_pass "scrub prefix loads the scoped token by reference, not in process arguments"
 else
-  assert_fail "scrub prefix missing scoped GH_TOKEN: $pfx"
+  assert_fail "scrub prefix leaks a token or leaves the inherited GH_TOKEN intact"
 fi
 # #234 review [P1]: GH_TOKEN_FILE must be POINTED AT the scoped file (refresh-aware),
 # NOT unset — else the agent's gh goes stale after the 1h App-token TTL. The value
@@ -1599,6 +1600,56 @@ GHSTUB
   fi
 else
   echo -e "  ${RED}FAIL${NC}: TC-FBDISP fixtures missing ($FBDISP_NOLEAF / $FBDISP_LEAF)"; FAIL=$((FAIL + 1))
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-TOKEN-SPLIT-070: configured permission JSON is preserved exactly ==="
+CONFIGURED='{"contents":"write","issues":"write","pull_requests":"read","workflows":"write"}'
+rendered=$(env -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR AGENT_TOKEN_PERMISSIONS="$CONFIGURED" \
+  bash -c "source '$SBA/lib-auth.sh'; printf '%s' \"\$AGENT_TOKEN_PERMISSIONS\"")
+if [[ "$rendered" == "$CONFIGURED" ]] && printf '%s' "$rendered" | jq -e . >/dev/null; then
+  assert_pass "configured permissions stay valid JSON without an appended brace"
+else
+  assert_fail "configured permission JSON changed"
+fi
+
+echo "=== TC-TOKEN-SPLIT-071: app-mode setup failures never permit an agent launch ==="
+for failure in missing-arguments invalid-permissions failed-mint; do
+  SBF=$(new_auth_sandbox)
+  if env -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR REPO_OWNER=owner REPO_NAME=repo \
+    CASE="$failure" bash -c '
+      source "$1/lib-auth.sh"
+      GH_AUTH_MODE=app
+      _spawn_token_daemon() { (exit 1) & }
+      sleep() { :; }
+      case "$CASE" in
+        missing-arguments) setup_agent_token ;;
+        invalid-permissions) AGENT_TOKEN_PERMISSIONS="not-json"; setup_agent_token 123 /unused.pem ;;
+        failed-mint) setup_agent_token 123 /unused.pem ;;
+      esac
+    ' -- "$SBF" >/dev/null 2>&1; then
+    assert_fail "$failure did not fail closed"
+  else
+    assert_pass "$failure fails closed"
+  fi
+done
+
+echo "=== TC-TOKEN-SPLIT-072: a missing scoped credential fails even in a conditional caller ==="
+SBF=$(new_auth_sandbox)
+sentinel="$TMPROOT/unsafe-agent-started"
+if env -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR PATH=/usr/bin:/bin bash -c '
+  source "$1/lib-auth.sh"
+  AGENT_TIMEOUT=10 AGENT_PERMISSION_MODE=auto
+  source "$2/lib-agent.sh" >/dev/null 2>&1 || true
+  GH_AUTH_MODE=app
+  AGENT_GH_TOKEN_FILE=""
+  if _run_with_timeout touch "$3"; then exit 1; fi
+  [[ ! -e "$3" ]]
+' -- "$SBF" "$SCRIPTS" "$sentinel" >/dev/null 2>&1; then
+  assert_pass "missing scoped token prevents execution with errexit suppressed"
+else
+  assert_fail "an agent ran without its scoped token"
 fi
 
 # ---------------------------------------------------------------------------
