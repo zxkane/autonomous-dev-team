@@ -2,6 +2,12 @@
 # autonomous.conf — Configuration for the Autonomous Dev Team pipeline.
 # Copy this file to autonomous.conf and fill in your project values.
 # Values can also be overridden via environment variables.
+
+# Optional session knowledge: auto (default) assesses dev/review sessions and
+# writes useful docs only after a confirmed merge, in a separate commit/PR.
+# Explicit no-update is valid. off disables capture/writeback without deleting
+# existing receipts or local AGENTS.local.md. No extra model call is made.
+# SESSION_KNOWLEDGE="auto"
 #
 # === Migration: 2026-05-17 — AGENT_*_EXTRA_ARGS introduced (closes #140) ===
 #

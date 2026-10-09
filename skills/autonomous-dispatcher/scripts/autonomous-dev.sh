@@ -37,6 +37,7 @@ export AUTONOMOUS_CONF_DIR="$SCRIPT_DIR"
 source "${LIB_DIR}/lib-error.sh"
 source "${LIB_DIR}/lib-agent.sh"
 source "${LIB_DIR}/lib-auth.sh"
+source "${LIB_DIR}/lib-session-knowledge.sh"
 # [#421] provider_prompt_fragment — sourced BEFORE lib-review-bots.sh, whose
 # render_bot_review_section() calls it. Every prose call site is load-bearing
 # agent instruction text (not observe-only), so sourced UNGUARDED like
@@ -1900,6 +1901,8 @@ if [[ "${REVIEW_BLOCKING_SEVERITY:-P1}" == adaptive ]]; then
   DEV_REVIEW_ROUND=$(_review_round_parse_count "$(_review_round_prior_marker "$(itp_list_comments "$ISSUE_NUMBER" 2>/dev/null || printf '[]')")")
 fi
 DEV_DELIVERY_POLICY="$(_dev_delivery_policy_prompt_block "$DEV_REVIEW_ROUND")"
+DEV_KNOWLEDGE_SESSION="${RUN_ID:-$(uuidgen)}-dev"
+begin_session_knowledge dev "$DEV_KNOWLEDGE_SESSION"
 if [[ "$MODE" = "new" ]]; then
   SESSION_ID="${SESSION_ID:-$(uuidgen)}"
 
@@ -1921,6 +1924,7 @@ ${OPEN_PR_FAST_PATH}
 ${PR_CREATE_BROKER_BLOCK}
 ${DEV_BLOCKED_403_MARKER_BLOCK}
 ${DEV_DELIVERY_POLICY}
+$(render_session_knowledge_prompt dev "$DEV_KNOWLEDGE_SESSION")
 ## Instructions
 1. Use ${DEV_SKILL_CMD:-/autonomous-dev} to load the skill and follow Steps 1-12 exactly
 2. After creating the PR, update issue #${ISSUE_NUMBER} with a comment containing:
@@ -2050,6 +2054,7 @@ ${DEV_BLOCKED_403_MARKER_BLOCK}
 ${DEV_CONFLICT_REBASE_BLOCK}
 ${POST_APPROVAL_FINDINGS}
 ${DEV_DELIVERY_POLICY}
+$(render_session_knowledge_prompt dev "$DEV_KNOWLEDGE_SESSION")
 ## Review Feedback (from issue comments)
 
 <user-issue-content>
@@ -2132,6 +2137,7 @@ ${DEV_BLOCKED_403_MARKER_BLOCK}
 ${DEV_CONFLICT_REBASE_BLOCK}
 ${POST_APPROVAL_FINDINGS}
 ${DEV_DELIVERY_POLICY}
+$(render_session_knowledge_prompt dev "$DEV_KNOWLEDGE_SESSION")
 ## Previous Review Feedback (from issue comments)
 
 <user-issue-content>

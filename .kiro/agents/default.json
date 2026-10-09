@@ -78,6 +78,10 @@
       {
         "command": "hooks/verify-completion.sh",
         "timeout_ms": 10000
+      },
+      {
+        "command": "hooks/check-session-knowledge.sh",
+        "timeout_ms": 15000
       }
     ]
   }

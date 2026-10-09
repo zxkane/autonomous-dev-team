@@ -60,6 +60,23 @@ The default model is Sonnet (vs Opus for dev) — review is checklist-driven and
 
 ## Lifecycle
 
+Each review fan-out member receives its own task knowledge receipt and explicit
+helper identifiers. Before posting a verdict, it inspects pending dev/review facts,
+corrects/discards stale candidates, and records useful updates or a no-update
+reason. This is local metadata, independent of verdict authenticity and severity.
+
+After the successful merge/approved transition, the wrapper calls
+`postmerge_session_knowledge`. A provider read must confirm `MERGED` and `mergedAt`;
+open, closed-unmerged, queued or unreadable states cannot publish documentation.
+The helper fetches the configured base, applies only scoped guidance/troubleshooting/
+lessons targets in a separate worktree, and commits a nonempty diff. It pushes the
+documentation branch and creates/reuses a PR through the existing code-host seams.
+It does not merge that PR, add issue-closing keywords, change task labels, invoke
+another model or push trunk. Failures retain private receipts/commits for
+`scripts/distill-knowledge.sh --issue N --pr P`; the original feature merge remains
+successful. An incomplete assessment is pending, never a claim of no lessons.
+See [INV-151](invariants.md#inv-151-session-knowledge-is-optional-private-until-confirmed-merge-and-published-only-as-an-isolated-documentation-change).
+
 ```mermaid
 sequenceDiagram
     participant D as dispatch-local.sh

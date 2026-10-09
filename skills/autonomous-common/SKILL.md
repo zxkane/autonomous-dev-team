@@ -16,6 +16,11 @@ description: >
 
 Shared workflow-enforcement hooks and agent-callable utility scripts used by `autonomous-dev`, `autonomous-review`, and `autonomous-dispatcher`. The other autonomous-* skills reference scripts and hooks here — when those reference paths break, this is usually the skill to look at.
 
+For optional dev/review learning capture, scoped fact revision, local environment
+references, or post-merge documentation writeback, read
+[`references/session-knowledge.md`](references/session-knowledge.md). Assessments
+may report no update; only a useful documentation diff creates a commit/PR.
+
 ## Setup for `npx skills add` Users
 
 After `npx skills add`, run the installer for your coding agent once from the project root:
@@ -83,6 +88,7 @@ Claude Code only. The installer prompts for these; if installing manually, add t
 
 - **`hooks/`** — workflow-enforcement hooks (block-push-to-main, block-commit-outside-worktree, check-pr-review, check-shellcheck, verify-completion, …). See `hooks/README.md` for the canonical list and per-hook semantics.
 - **`scripts/`** — agent-callable utilities used by the dev/review skills:
+  - `session-knowledge.sh` / `session-knowledge.py` — private shared task receipts, optional verified candidates, local knowledge, and isolated documentation commits (Python standard library)
   - `install-project-hooks.sh` — IDE-agnostic project-side bootstrap: symlinks dispatcher `*.sh` into `<project>/scripts/` (without overwriting project-local files), symlinks `<project>/hooks`, prunes dangling links, installs the git pre-push hook. Re-run after every `npx skills update` (closes #153)
   - `lib-installer.sh` — shared merge/write helpers used by every per-agent installer
   - `lib-installer-translate.sh` — schema translation helpers for near-clone agents (event-name map, tool-name map, timeout-unit conversion)

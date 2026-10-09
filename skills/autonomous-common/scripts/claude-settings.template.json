@@ -44,7 +44,8 @@
     "Stop": [
       {
         "hooks": [
-          { "type": "command", "command": "\"$CLAUDE_PROJECT_DIR\"/hooks/verify-completion.sh", "timeout": 10 }
+          { "type": "command", "command": "\"$CLAUDE_PROJECT_DIR\"/hooks/verify-completion.sh", "timeout": 10 },
+          { "type": "command", "command": "\"$CLAUDE_PROJECT_DIR\"/hooks/check-session-knowledge.sh", "timeout": 15 }
         ]
       }
     ]

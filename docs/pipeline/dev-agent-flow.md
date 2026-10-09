@@ -6,6 +6,16 @@ The wrapper is the **producer** for two of the five [handoffs](handoffs.md) (dev
 
 ## Lifecycle
 
+Each wrapper run begins a private `issue-N` knowledge assessment with a distinct
+run/session receipt. New, resume and fallback prompts all provide the common
+helper/reference. Before handoff, the agent retains verified durable candidates
+or a no-update reason; HEAD changes require reassessment. Linked worktrees share
+the common Git ledger, so retries do not lose earlier independent facts. Local
+environment/credential references are written only to ignored, mode-600 root
+`AGENTS.local.md` in the primary checkout. No raw transcript is retained by this
+mechanism and dev does not publish knowledge before merge. See
+[INV-151](invariants.md#inv-151-session-knowledge-is-optional-private-until-confirmed-merge-and-published-only-as-an-isolated-documentation-change).
+
 ```mermaid
 sequenceDiagram
     participant D as dispatch-local.sh

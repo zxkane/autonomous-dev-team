@@ -69,6 +69,9 @@ hooks:
         - type: command
           command: "\"$CLAUDE_PROJECT_DIR\"/hooks/verify-completion.sh"
           timeout: 10
+        - type: command
+          command: "\"$CLAUDE_PROJECT_DIR\"/hooks/check-session-knowledge.sh"
+          timeout: 15
 ---
 
 # TDD Development Workflow
@@ -195,6 +198,13 @@ git check-ignore -q .worktrees 2>/dev/null || echo "WARNING: .worktrees not in .
 ### All Subsequent Steps Run INSIDE the Worktree
 
 After creating the worktree, **all development commands** (test, lint, build, commit, push) are executed from within the worktree directory. The main workspace is not touched until cleanup.
+
+For interactive work, begin an optional knowledge assessment using the common
+skill's `scripts/session-knowledge.sh begin` (use `--task issue-<N>` when applicable).
+Autonomous wrappers begin it automatically. Before handoff, assess new verified
+facts or record why no update is needed; read
+[`../autonomous-common/references/session-knowledge.md`](../autonomous-common/references/session-knowledge.md).
+The Stop hook checks assessment, without requiring any lesson or file update.
 
 ---
 
@@ -466,9 +476,16 @@ For the full retrigger commands, reply patterns, and thread resolution semantics
 
 ---
 
-## Step 13: Cleanup Worktree
+## Step 13: Post-Merge Knowledge and Cleanup
 
 After the PR is merged or closed, execute in your terminal:
+
+On a **merged** PR, finish any pending knowledge writeback before removing the
+worktree. The review wrapper does this automatically. For a manual merge, use
+`scripts/distill-knowledge.sh --issue <N> --pr <merged-pr>`; standalone tasks can
+use the local `apply` building block described in the common reference. Useful
+changes produce a separate documentation commit/PR; no new or corrected facts
+produce no commit. A closed, unmerged PR does not publish its candidates.
 
 ```bash
 # Return to main workspace

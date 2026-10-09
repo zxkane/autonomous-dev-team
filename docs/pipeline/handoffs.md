@@ -209,6 +209,22 @@ Distinct from H5b: verdict was PASS and PR approval succeeded, but `gh pr merge`
 
 ## Cross-cutting concerns
 
+### Optional knowledge at H3 and after H5
+
+Dev and each reviewer assess durable facts before their handoff/verdict. Their
+private common-Git-directory receipts survive worktree cleanup and subsequent
+sessions; stable path/key pairs select the latest correction, while an explicit
+discard withdraws an incorrect candidate. No-update does not erase prior facts
+from the same or another session, or promote an unchanged older fact over a newer
+correction. Reverification metadata alone does not create another publication.
+
+After H5's confirmed merge, an observer applies useful documentation in an
+isolated worktree and publishes a separate PR. This adds no lifecycle label or
+dispatcher handoff and never changes H5's outcome. No useful diff creates no
+commit or PR. Unassessed sessions and failed writebacks remain distinguishable
+from completed no-ops. Environment details/credential references remain local.
+See [INV-151](invariants.md#inv-151-session-knowledge-is-optional-private-until-confirmed-merge-and-published-only-as-an-isolated-documentation-change).
+
 These don't belong to any single handoff but cut across multiple:
 
 ### Wrapper-trap-vs-dispatcher race (H3 / H4 / H5)
