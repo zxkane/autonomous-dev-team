@@ -526,6 +526,39 @@ _run_with_timeout() {
     }
   fi
 
+  local _agent_scope_prefix=() _agent_scope_state="" _agent_scope_unit=""
+  local _agent_scope_fallback="${_agent_scope_disabled:-0}"
+  if [[ "${_agent_scope_disabled:-0}" != 1 ]] \
+    && declare -F _lane_agent_scope_prepare >/dev/null 2>&1; then
+    if ! _lane_agent_scope_prepare "${ADT_LANE_DIR:-}" _agent_scope_prefix \
+      _agent_scope_state _agent_scope_unit; then
+      if [[ -n "${ADT_LANE_DIR:-}" && "$(lane_get "$ADT_LANE_DIR" BACKEND 2>/dev/null)" == systemd-scope ]]; then
+        _agent_scope_fallback=1
+      fi
+    fi
+  fi
+  if [[ "$_agent_scope_fallback" == 1 ]]; then
+    _agent_scope_prefix=()
+    _agent_scope_unit=""
+    _agent_scope_state="$(mktemp -d "$ADT_LANE_DIR/.agent-scope.XXXXXX")" || {
+      [[ -z "$_turn_ready_file" ]] || rm -f -- "$_turn_ready_file"
+      [[ -z "$_turn_launch_lock_fd" ]] || _turn_control_unlock _turn_launch_lock_fd
+      [[ "$_turn_hard_controlled" != 1 ]] || return "${TURN_CONTROL_ERROR_RC:-93}"
+      return 1
+    }
+  fi
+
+  local _agent_launch_cmd=("${cmd[@]}")
+  if [[ "$_turn_hard_controlled" == 1 ]]; then
+    _agent_launch_cmd=(bash -c '
+      ready_file="$1"
+      shift
+      sleep "${_TURN_CONTROL_SETSID_READY_DELAY_SECONDS:-0}"
+      printf "ready\n" >"$ready_file" || exit 93
+      exec "$@"
+    ' _ "$_turn_ready_file" "${cmd[@]}")
+  fi
+
   # [Lane-GC PR-5 / INV-118] FD hygiene: close the inherited guardian write-
   # fd in THIS spawn's fd table before exec'ing into setsid/the agent CLI —
   # `{ADT_GUARD_FD}` fds are NOT close-on-exec by default (verified
@@ -546,18 +579,60 @@ _run_with_timeout() {
   (
     [[ -n "${ADT_GUARD_FD:-}" ]] && exec {ADT_GUARD_FD}>&-
     [[ -n "$_turn_launch_lock_fd" ]] && exec {_turn_launch_lock_fd}>&-
-    if [[ "$_turn_hard_controlled" == "1" ]]; then
-      exec setsid bash -c '
-        ready_file="$1"
+    if [[ -n "$_agent_scope_state" ]]; then
+      exec "${_agent_scope_prefix[@]}" setsid bash -c '
+        control="$1"
         shift
-        sleep "${_TURN_CONTROL_SETSID_READY_DELAY_SECONDS:-0}"
-        printf "ready\n" >"$ready_file" || exit 93
-        exec "$@"
-      ' _ "$_turn_ready_file" "${cmd[@]}"
+        printf "%s\n" "$$" > "$control/ready" || exit 93
+        deadline=$((SECONDS + 15))
+        while (( SECONDS < deadline )); do
+          decision=$(readlink "$control/decision" 2>/dev/null)
+          [[ "$decision" == go ]] && exec "$@"
+          [[ "$decision" != abort ]] || exit 93
+          [[ -d "$control" ]] || exit 93
+          sleep 0.01
+        done
+        ln -s abort "$control/decision" 2>/dev/null || true # An existing atomic go/abort winner cannot be replaced.
+        [[ "$(readlink "$control/decision" 2>/dev/null)" == go ]] && exec "$@"
+        exit 93
+      ' _ "$_agent_scope_state" "${_agent_launch_cmd[@]}"
     fi
-    exec "${launcher[@]}" "${cmd[@]}"
+    exec "${launcher[@]}" "${_agent_launch_cmd[@]}"
   ) &
   _AGENT_RUN_PID=$!
+
+  if [[ -n "$_agent_scope_state" ]]; then
+    local _scope_rc=0 _scope_start
+    _scope_start="$(proc_start_time "$_AGENT_RUN_PID")"
+    if [[ "$_agent_scope_fallback" == 1 ]]; then
+      lane_admit_agent_pgid "${ADT_LANE_DIR:-}" "$_AGENT_RUN_PID" \
+        "$_agent_scope_state" || _scope_rc=$?
+    else
+      lane_record_agent_scope "${ADT_LANE_DIR:-}" "$_agent_scope_unit" \
+        "$_AGENT_RUN_PID" "$_agent_scope_state" || _scope_rc=$?
+    fi
+    if [[ "$_scope_rc" != 0 ]]; then
+      # An unacknowledged child cannot execute the payload. Stop that attempt
+      # before retrying, and keep the original stdin/argv in this caller.
+      local _abort_rc=0
+      _lane_agent_launch_abort "$_agent_scope_state" "$_agent_scope_unit" \
+        "$_AGENT_RUN_PID" "$_scope_start" || _abort_rc=$?
+      if [[ "$_abort_rc" == 0 ]]; then
+        wait "$_AGENT_RUN_PID" 2>/dev/null || true # Only wait after verified child termination.
+      fi
+      rm -rf -- "$_agent_scope_state"
+      [[ -z "$_turn_ready_file" ]] || rm -f -- "$_turn_ready_file"
+      [[ -z "$_turn_launch_lock_fd" ]] || _turn_control_unlock _turn_launch_lock_fd
+      if [[ "$_scope_rc" != 1 || "$_agent_scope_fallback" == 1 || "$_abort_rc" != 0 ]]; then
+        [[ "$_turn_hard_controlled" != 1 ]] || return "${TURN_CONTROL_ERROR_RC:-93}"
+        return 1
+      fi
+      echo "[lib-agent] scoped registration failed before payload start; using PGID fallback" >&2
+      local _agent_scope_disabled=1
+      _run_with_timeout "$@"
+      return $?
+    fi
+  fi
   [[ -n "$_turn_launch_lock_fd" ]] \
     && _turn_control_unlock _turn_launch_lock_fd
 
@@ -882,6 +957,9 @@ _run_with_timeout() {
   local _rc
   wait "$_AGENT_RUN_PID"
   _rc=$?
+  if [[ -n "$_agent_scope_state" ]]; then
+    rm -rf -- "$_agent_scope_state" 2>/dev/null || true # Private scratch cleanup cannot replace the captured payload status.
+  fi
 
   # Reconcile with the watchdog (PR #469 review round-2, both [P1]s):
   #

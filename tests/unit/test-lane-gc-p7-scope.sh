@@ -94,6 +94,11 @@ _real_systemd_available() {
 
 REAL_SYSTEMD=false
 _real_systemd_available && REAL_SYSTEMD=true
+REAL_LOGIN_USER="${USER:-$(id -un)}"
+REAL_LINGER="unavailable"
+if [[ "$REAL_SYSTEMD" == true ]]; then
+  REAL_LINGER="$(loginctl show-user "$REAL_LOGIN_USER" -p Linger --value 2>/dev/null || echo unavailable)"
+fi
 
 # ===========================================================================
 echo ""
@@ -109,7 +114,7 @@ if [[ "$REAL_SYSTEMD" == true ]]; then
     echo "BACKEND=$backend"
   ')
   BACKEND001="${OUT001#BACKEND=}"
-  REAL_LINGER="$(loginctl show-user -p Linger --value 2>/dev/null || echo no)"
+  REAL_LINGER="$(loginctl show-user "${USER:-$(id -un)}" -p Linger --value 2>/dev/null || echo no)"
   if [[ "$REAL_LINGER" == "yes" ]]; then
     assert_skip "TC-LGC7-001: real _lane_backend() refusal on Linger=no" "this host's REAL Linger is 'yes' — the refusal-path assumption for this specific test does not hold here; TC-LGC7-014 (SHIM) covers the positive path unconditionally"
     assert_skip "TC-LGC7-002: WARN names the missing prerequisite" "same as above"
@@ -919,7 +924,7 @@ OUT080=$(ADT_LANE_BACKEND_OVERRIDE=systemd-scope bash -c '
 BACKEND080=$(echo "$OUT080" | grep -o 'BACKEND=.*' | cut -d= -f2)
 UNIT080=$(echo "$OUT080" | grep -o 'UNIT=.*' | cut -d= -f2)
 REAL_LINGER80="no"
-[[ "$REAL_SYSTEMD" == true ]] && REAL_LINGER80="$(loginctl show-user -p Linger --value 2>/dev/null || echo no)"
+[[ "$REAL_SYSTEMD" == true ]] && REAL_LINGER80="$(loginctl show-user "${USER:-$(id -un)}" -p Linger --value 2>/dev/null || echo no)"
 if [[ "$REAL_LINGER80" == "yes" ]]; then
   assert_skip "TC-LGC7-080: override-cannot-widen on a Linger=no host" "this host's REAL Linger is 'yes' — the narrowing scenario this test targets does not apply here"
   assert_skip "TC-LGC7-080b: UNIT sentinel on override-refused host" "same as above"
@@ -942,7 +947,7 @@ assert_eq "TC-LGC7-080c: ADT_LANE_BACKEND_OVERRIDE=pgid unconditionally forces p
 NS081="lgc7-081"
 export ADT_STATE_ROOT="$(_lane_state_root "$NS081")"
 if [[ "$REAL_SYSTEMD" == true ]]; then
-  REAL_LINGER81="$(loginctl show-user -p Linger --value 2>/dev/null || echo no)"
+  REAL_LINGER81="$(loginctl show-user "${USER:-$(id -un)}" -p Linger --value 2>/dev/null || echo no)"
   if [[ "$REAL_LINGER81" != "yes" ]]; then
     OUT081=$(bash -c '
       source "'"$LIB_LANE"'"
@@ -982,7 +987,7 @@ chmod +x "$TRIPWIRE_BIN2/systemctl" "$TRIPWIRE_BIN2/systemd-run"
 NS090="lgc7-090"
 export ADT_STATE_ROOT="$(_lane_state_root "$NS090")"
 rm -f "$TMPROOT/tc090.tripwire"
-PATH="$TRIPWIRE_BIN2:$PATH" TRIPWIRE_LOG2="$TMPROOT/tc090.tripwire" bash -c '
+ADT_LANE_BACKEND_OVERRIDE=pgid PATH="$TRIPWIRE_BIN2:$PATH" TRIPWIRE_LOG2="$TMPROOT/tc090.tripwire" bash -c '
   source "'"$LIB_LANE"'"
   LANE_ID=$(lane_mint proj090 dev 90)
   LANE_DIR=$(lane_install proj090 "$LANE_ID")

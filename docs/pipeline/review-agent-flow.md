@@ -1,5 +1,12 @@
 # Review-Agent Wrapper Flow
 
+The shared `_run_with_timeout` launch path enrolls eligible review members in
+distinct, registered agent scopes (#522, INV-120). Its readiness handshake
+preserves stdin, launcher argv, credential scrubbing, PID publication and hard
+turn-control ownership before payload execution. Guardian and immediate lane
+reap include every entry in `agent-scopes`; the portable PGID path remains the
+registration-failure fallback. P8 delayed-GC scope refusal remains separate.
+
 The review-agent wrapper is `skills/autonomous-dispatcher/scripts/autonomous-review.sh`. The dispatcher launches it via `dispatch-local.sh review <issue>`. The wrapper finds the PR linked to the issue, runs the underlying agent against it, parses the agent's verdict from issue comments, and either approves+merges (PASS) or submits `--request-changes` and sends the issue back to dev (FAIL). The **wrapper** owns the GitHub-native PR review/merge action on BOTH sides — `--approve`/`gh pr merge` on PASS and `--request-changes` on a substantive FAIL — while the review **agent** posts a verdict comment only and never runs `gh pr review`/`gh pr merge` itself ([INV-52](invariants.md#inv-52-the-review-wrapper-owns-the-github-native-pr-reviewmerge-action-the-agent-posts-verdicts-only)).
 
 The wrapper is the **producer** for two of the five [handoffs](handoffs.md) (review → approved/merged, review → pending-dev) and the **consumer** for one (dispatcher → review).

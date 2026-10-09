@@ -1,5 +1,13 @@
 # Design: Lane-GC P5 — guardian sidecar
 
+Full-wrapper scope enrollment (#522) extends the existing scope reap step to
+every successful agent unit in the lane's `agent-scopes` registry, before the
+unconditional PGID escalation. Scope readiness and registry publication precede
+payload launch, and the scope bootstrap closes inherited guardian descriptors.
+The real-wrapper acceptance fixture proves that wrapper SIGKILL triggers this
+guardian path and reaps an agent plus its re-setsid child without leaving a live
+fixture process. See `lane-gc-p7-scope.md` and the wrapper-scope test cases.
+
 **Status:** Implementation notes for issue #381 (Lane-GC series PR-5). Full
 design authority is `docs/designs/lane-containment-gc.md` §4-C3 (guardian
 sidecar), §9 PR-5. This doc records only the PR-open numbering

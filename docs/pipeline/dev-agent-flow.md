@@ -140,6 +140,15 @@ forwarded to the CLI as literal args — the scrub would silently no-op and the
 full-write credential would leak (#234 review [P1] #1). The agent subtree's
 environment differs from the wrapper's:
 
+On an eligible lane, `_run_with_timeout` first registers a unique agent scope
+and verifies its leader's cgroup membership before releasing a private launch
+gate. The same timeout, credential-scrub and launcher argv execute inside that
+scope. Registration failure before acknowledgement uses the original PGID
+path exactly once. Parallel agents have separate entries in `agent-scopes`;
+guardian and immediate lane reap visit every registered scope before the
+portable PGID escalation. A closed lane refuses a new payload. The explicit-user
+linger probe and this full-wrapper enrollment ship together (#522, INV-120).
+
 | Var | Wrapper shell | Agent subtree (app mode, scoped) | Agent subtree (PAT / no-scope) |
 |-----|---------------|----------------------------------|-------------------------------|
 | `GH_TOKEN` | full-write token | **scoped** token (snapshot fallback) | inherited (shared) |

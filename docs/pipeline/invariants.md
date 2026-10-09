@@ -6971,6 +6971,23 @@ Any signal absent from `box_health`'s output (its underlying source unreadable) 
 
 _Triage (issue #236): [machine-checked: tests/unit/test-lane-gc-p7-scope.sh]_
 
+**Full-wrapper amendment (#522):** `_lane_backend` and `adt-gc.sh --doctor`
+invoke `loginctl show-user "${USER:-$(id -un)}" -p Linger --value` with an
+explicit account. `_run_with_timeout` honors the recorded backend, gives
+parallel agent calls unique unit names and disables systemd argv environment
+expansion. A private readiness/acknowledgement gate verifies the waitable
+PID/PGID, actual cgroup membership and locked registry write before executing
+the existing timeout, credential-scrub and launcher command. An unacknowledged
+registration failure retries once through PGID; payload errors never retry.
+Closed lanes and ambiguous acknowledgement failures refuse a new payload.
+`agent-scopes` records successful units beneath the lane's `UNIT` prefix;
+guardian and immediate lane reap visit each, then always retain PGID escalation.
+No override bypasses linger, bus or probe checks, and no host linger state is
+changed. P8 delayed-GC scope refusal and its observation gate are unchanged.
+Verification: `test-agent-wrapper-scope.sh` plus
+`tests/e2e/run-agent-wrapper-scope-e2e.sh` using the unmodified real wrapper,
+actual cgroup membership, a re-setsid escapee and wrapper SIGKILL.
+
 **Rule** (Lane-GC series PR-7, design `docs/designs/lane-containment-gc.md` §4-C1 `_lane_backend`/§4-C7, drafted as INV-114 in the design doc — renumbered here per the numbering note below): the pgid backend (`[INV-109]`/`[INV-114]`) remains fully sufficient alone on every platform and is what macOS always uses; this invariant adds a Linux-only, feature-detected enhancement that is layered on top of it, never a replacement for it.
 
 1. **Backend selection is probed exactly once per wrapper run, at mint time, inside `lane_install`** — never re-probed by any kill-side consumer (`lane_kill`, the guardian, GC all read the decision back off the `lane` file's `BACKEND`/`UNIT` fields). `_lane_backend()` (`lib-lane.sh`) returns `systemd-scope` only if **every** prerequisite holds, checked cheapest-and-most-decisive first: (a) `uname -s` is `Linux`; (b) `systemd-run` is on `PATH`; (c) `loginctl show-user -p Linger --value` is exactly `yes` — checked at **selection** time, not merely at probe time (platform:F3): without linger, `user@.service` dies with the last operator session and cascade-SIGKILLs every enrolled scope, so this is the single most consequential gate and produces the WARN a host is most likely to hit in production (this series' own dev/CI box currently reports `Linger=no`); (d) the user bus socket exists at `${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/bus`; (e) a real probe spawn, `systemd-run --user --scope --quiet -- true`, actually succeeds (a degraded user manager — e.g. failed units present — can still fail an actual spawn even with linger=yes and a live bus). **Any single missing prerequisite is a silent, complete fallback to `BACKEND=pgid`** plus exactly one `[lib-lane] WARN:` line naming which prerequisite was missing — never a hard failure, per the design's own principle 8 ("prevention where the platform allows it, but the portable path must be sufficient alone"). The `loginctl`/`systemd-run` probe calls are both wrapped through `_lane_bounded` (a `timeout`/`gtimeout` feature-detected wrapper, mirroring `lib-agent.sh`'s own `_AGENT_TIMEOUT_CMD` resolution) so a wedged user bus cannot hang mint-time probing on EVERY wrapper dispatch, scope-eligible or not (review round-1 finding — verified empirically with a PATH-shimmed 60-second-sleeping `loginctl`: the probe now returns in ~5s, not 60s). A test-only `ADT_LANE_BACKEND_OVERRIDE` seam may only NARROW this function's result, never widen it: `=pgid` unconditionally forces pgid (always safe); `=systemd-scope` is a REQUEST that still has to pass every one of the five checks above — it is not a bypass (review round-1 finding — an inherited copy of that env var previously skipped the ENTIRE probe including the load-bearing linger gate, which would have enrolled scopes on a Linger=no host, the exact mass-SIGKILL-on-last-logout scenario this invariant exists to forbid).
