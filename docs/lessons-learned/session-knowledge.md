@@ -25,6 +25,10 @@ retry's branch/worktree ownership and preserve unexpected edits. Recreate a
 removed owned worktree from its unchanged committed branch rather than making
 another commit.
 
+Path checks must remain effective during the write. Open parent directories
+without following symlinks and replace through their descriptors; rechecking a
+pathname alone still permits a directory swap between check and use.
+
 Keep identifiable private references in a local policy. A public skill should
 not hardcode private repository names to detect them. Scan both candidates and
 complete resulting files, require explicit credential references/placeholders,

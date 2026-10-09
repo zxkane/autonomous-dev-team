@@ -10199,6 +10199,10 @@ Unassessed sessions and failed application/publication remain pending. Completed
 receipts reuse their commit/PR rather than duplicating them; a no-op creates no
 empty commit. An unavailable PR-list read or mismatched remote head fails closed.
 
+Public document writes open each parent with `O_NOFOLLOW` and replace through
+directory descriptors, so a concurrent symlink swap cannot redirect the write
+outside the selected worktree. Git publication uses the validated commit SHA.
+
 **Motivation**: Lessons from repeated dev/review sessions otherwise disappear with
 session/worktree cleanup, while unconditional export produces noise and can expose
 machine details. Keep useful repository facts reviewable and local context private.

@@ -80,6 +80,43 @@ def save_json(path, value):
     atomic_write(path, json.dumps(value, ensure_ascii=False, sort_keys=True) + "\n")
 
 
+def write_document(root, relative, content):
+    """Anchor every parent and the replacement to descriptors, without symlink traversal."""
+    parts = relative_path(relative).parts
+    directory_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    temporary = ".knowledge-" + uuid.uuid4().hex
+    try:
+        for part in parts[:-1]:
+            try:
+                os.mkdir(part, mode=0o755, dir_fd=directory_fd)
+            except FileExistsError:
+                pass
+            child_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = child_fd
+        try:
+            destination = os.stat(parts[-1], dir_fd=directory_fd, follow_symlinks=False)
+            if not stat.S_ISREG(destination.st_mode):
+                raise KnowledgeError("Public documentation destination is not a regular file.")
+        except FileNotFoundError:
+            pass
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644, dir_fd=directory_fd)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, parts[-1], src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+        os.fsync(directory_fd)
+    finally:
+        try:
+            try:
+                os.unlink(temporary, dir_fd=directory_fd)
+            except FileNotFoundError:
+                pass
+        finally:
+            os.close(directory_fd)
+
+
 def load_json(path):
     safe_path(path.parent, path.name)
     return json.loads(path.read_text()) if path.exists() else None
@@ -426,11 +463,7 @@ def apply_updates(repo, directory, args):
             raise KnowledgeError("Unexpected commit in knowledge worktree; preserve it for inspection.")
     elif changed:
         for path in changed:
-            target = safe_path(worktree, path)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            # Tracked documentation is public, unlike private receipts/local knowledge.
-            atomic_write(target, desired[path])
-            target.chmod(0o644)
+            write_document(worktree, path, desired[path])
         git(worktree, "diff", "--check")
         git(worktree, "add", "--", *changed)
         git(worktree, "diff", "--cached", "--check")

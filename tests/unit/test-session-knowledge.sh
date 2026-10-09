@@ -12,6 +12,8 @@ import subprocess
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import patch
+import types
 
 SOURCE = Path(os.environ["KNOWLEDGE_TEST_ROOT"])
 HELPER = SOURCE / "skills/autonomous-common/scripts/session-knowledge.sh"
@@ -370,6 +372,30 @@ class KnowledgeTests(unittest.TestCase):
         self.git("checkout", "-q", first["branch"], cwd=first["worktree"])
         self.apply(ok=False)
         self.assertTrue(Path(first["worktree"]).exists())
+
+    def test_directory_swap_after_open_cannot_redirect_document_write(self):
+        module = types.ModuleType("knowledge")
+        module.__file__ = str(HELPER.with_suffix(".py"))
+        exec(compile(HELPER.with_suffix(".py").read_text(), module.__file__, "exec"), module.__dict__)
+        root = Path(self.temp.name) / "write-root"
+        outside = Path(self.temp.name) / "outside"
+        (root / "module").mkdir(parents=True)
+        outside.mkdir()
+        real_open = module.os.open
+        swapped = False
+        def swap_after_open(path, flags, *args, **kwargs):
+            nonlocal swapped
+            fd = real_open(path, flags, *args, **kwargs)
+            if path == "module" and kwargs.get("dir_fd") is not None and not swapped:
+                (root / "module").rename(root / "preserved")
+                (root / "module").symlink_to(outside, target_is_directory=True)
+                swapped = True
+            return fd
+        with patch.object(module.os, "open", side_effect=swap_after_open):
+            module.write_document(root, "module/AGENTS.md", "verified guidance\n")
+        self.assertTrue(swapped)
+        self.assertFalse((outside / "AGENTS.md").exists())
+        self.assertEqual((root / "preserved/AGENTS.md").read_text(), "verified guidance\n")
 
     def test_identical_managed_content_produces_no_new_commit(self):
         self.begin()
