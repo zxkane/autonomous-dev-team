@@ -36,6 +36,7 @@ export AUTONOMOUS_CONF_DIR="$SCRIPT_DIR"
 source "${LIB_DIR}/lib-error.sh"
 source "${LIB_DIR}/lib-agent.sh"
 source "${LIB_DIR}/lib-auth.sh"
+source "${LIB_DIR}/lib-session-knowledge.sh"
 # [#421] provider_prompt_fragment — sourced BEFORE lib-review-bots.sh, whose
 # render_bot_review_section() calls it, and before build_review_prompt's own
 # call sites below. Every call site renders load-bearing agent instruction
@@ -1614,9 +1615,15 @@ build_review_prompt() {
   local _agent_model
   _agent_model=$(_resolve_review_agent_model_label "${_agent_name}")
   _agent_model="${_agent_model:-sonnet}"
+  local _knowledge_prompt=""
+  # Extracted prompt fixtures can omit the library; real wrappers source it above.
+  if declare -F render_session_knowledge_prompt >/dev/null 2>&1; then
+    _knowledge_prompt="$(render_session_knowledge_prompt review "review-${_agent_session_id}")"
+  fi
   cat <<EOF
 You are reviewing PR #${PR_NUMBER} for issue #${ISSUE_NUMBER} in the ${REPO} project.
 PR branch: ${PR_BRANCH:-UNKNOWN}
+${_knowledge_prompt}
 $(if [[ "${_agent_name}" == "codex" ]]; then
   # INV-62 (#218): the codex review lane runs the purpose-built \`codex review\`
   # subcommand (lib-review-codex.sh::_run_codex_review), which AUTO-SCOPES the diff
@@ -2958,6 +2965,7 @@ for _agent in "${REVIEW_AGENTS_LIST[@]}"; do
     [[ -n "${ADT_GUARD_FD:-}" ]] && exec {ADT_GUARD_FD}>&-
     # Per-subshell AGENT_CMD override so run_agent dispatches to THIS CLI.
     AGENT_CMD="$_agent"
+    begin_session_knowledge review "review-${_agent_session_id}"
     # INV-78 (#233): export this agent's verdict-artifact path into its
     # environment so a CLI (or a future adapter) can read it from the env in
     # addition to the prompt. Scope is THIS subshell only — never leaks to a
@@ -5328,6 +5336,9 @@ if [[ "$PASSED_VERDICT" == "true" ]]; then
       fi
 
       log "Issue #${ISSUE_NUMBER} marked approved; auto-close handled by GitHub via 'Closes #N' resolution (merge_closes_issue=${_merge_closes})."
+      if ! postmerge_session_knowledge "$ISSUE_NUMBER" "$PR_NUMBER"; then
+        log "WARNING: Feature merge succeeded; optional session knowledge writeback remains pending. Retry scripts/distill-knowledge.sh before deleting its private receipts."
+      fi
     else
       # Auto-merge failed (#145). Post the marker on the PR (dev re-dispatch
       # detects it via /issues/<n>/comments to trigger rebase), then flip the

@@ -21,9 +21,21 @@ hooks:
         - type: command
           command: "\"$CLAUDE_PROJECT_DIR\"/hooks/verify-completion.sh"
           timeout: 10
+        - type: command
+          command: "\"$CLAUDE_PROJECT_DIR\"/hooks/check-session-knowledge.sh"
+          timeout: 15
 ---
 
 # Autonomous Review Mode
+
+Before posting the verdict, assess durable session knowledge using the helper
+and identifiers supplied by the wrapper. Inspect earlier dev/review candidates,
+correct or discard stale facts, and record an explicit no-update reason when
+appropriate. Read
+[`../autonomous-common/references/session-knowledge.md`](../autonomous-common/references/session-knowledge.md).
+The Stop hook checks this assessment, not the existence of lessons. After a
+confirmed merge the wrapper commits useful scoped documentation updates and
+opens a separate PR; local environment/credential references stay ignored.
 
 > **Provider-lane scope.** The prose below is written in GitHub terms — `gh pr review`, `gh pr merge`, `gh pr checks`, `gh pr view`, `gh issue view` — because those are the GitHub-lane concrete forms. Every INV-52 / INV-44 rule (agent posts a verdict comment; wrapper owns approve/request-changes/merge; wrapper enforces the mergeable hard gate) is provider-agnostic and applies verbatim to the GitLab lane (`CODE_HOST=gitlab`): the wrapper drives `chp_approve` / `chp_merge` / `chp_mergeable` provider seams instead of the `gh pr *` verbs. When your prompt is running under `CODE_HOST=gitlab`, treat every `gh pr …` / `gh issue …` example as a placeholder for the wrapper-supplied seam — do not hand-roll `glab` calls to replace them.
 

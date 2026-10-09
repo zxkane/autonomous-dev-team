@@ -61,8 +61,20 @@ IDEs without hook support (Cursor, Windsurf, etc.) rely on skill instructions fo
 | `post-git-action-clear.sh` | PostToolUse | Bash | Clears state after git actions |
 | `post-git-push.sh` | PostToolUse | Bash | Post-push reminder for CI/E2E |
 | `verify-completion.sh` | Stop | All | Blocks task completion until CI/E2E pass and review threads resolve; fails closed on >100-thread PRs (single-page read cannot verify completeness, #412) |
+| `check-session-knowledge.sh` | Stop | Activated dev/review sessions | Checks a current assessment; explicit no-update is valid. Does not parse transcripts or require lessons. |
 | `lib.sh` | Library | N/A | Shared utility functions |
 | `state-manager.sh` | Library | N/A | Workflow state management |
+
+## Optional Session Knowledge
+
+The separate `session-knowledge.sh` helper uses private receipts under the common
+Git directory, shared across linked worktrees. An explicit `begin` or wrapper
+activation scopes Stop to the task; unrelated sessions exit silently. Assessment
+receipts bind to the current source HEAD and have no arbitrary time expiry.
+Record only verified candidates or a no-update reason. After an actual merge,
+the wrapper applies useful updates in a documentation worktree and opens a
+separate PR. See the
+[recording and retry reference](../references/session-knowledge.md).
 
 ## State Manager Usage
 

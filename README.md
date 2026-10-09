@@ -14,6 +14,21 @@ schedule.
   Antigravity CLI (agy), and most CLIs with a `-p <prompt>` non-interactive
   flag — see [docs/agent-clis.md](docs/agent-clis.md).
 
+## Knowledge after merge
+
+Dev and review sessions can retain verified lessons across retries. After a
+confirmed merge, useful updates go to the nearest `AGENTS.md`,
+`docs/troubleshooting/`, or `docs/lessons-learned/` in a separate documentation
+commit and PR. Existing facts are revised rather than duplicated. No new or
+corrected information means no documentation change, empty commit or extra model
+call. Machine details and credential references stay in ignored, mode-600
+`AGENTS.local.md`; credential values remain in their existing private sources.
+
+The Stop hook checks an assessment, which may explicitly report no update.
+Read the [recording and retry reference](skills/autonomous-common/references/session-knowledge.md)
+for interactive use. After upgrading skills, re-run the project bootstrap and
+your agent's hook installer to register the new Stop hook.
+
 ## Quick Start
 
 ### Option A: Install as portable skills (recommended)

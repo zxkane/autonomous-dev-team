@@ -10175,3 +10175,48 @@ that could bypass configured stricter floors despite correct downstream filterin
 typed evidence vetoes, mixed-owner routing, artifact-prose isolation, fixed-policy
 caps, and the classifier-to-filter no-tag-tail regression for P1/P2/P3 and adaptive.
 `tests/unit/test-review-convergence-rules.sh` retains the legacy adaptive checks.
+
+## INV-151: session knowledge is optional, private until confirmed merge, and published only as an isolated documentation change
+
+_Triage (issue #236): [machine-checked: tests/unit/test-session-knowledge.sh]_
+
+**Rule**: Dev/review sessions assess verified durable facts or explicitly record
+why no update is needed. The Stop hook checks an activated session's current
+assessment, not a minimum number of lessons. The receipt binds to its assessed
+worktree/branch so a launcher-checkout Stop checks the actual source revision.
+Parallel members have distinct receipts even when their CLI names repeat.
+Private receipts in the common Git
+directory preserve candidates across sessions/worktrees. Latest path/key wins;
+discard withdraws a candidate. Reassessment accumulates per-fact changes; a
+no-update receipt neither erases prior candidates nor promotes an older fact over
+a newer correction. Private evidence/classification changes alone do not create
+another publication. Exact/managed replacements revise obsolete
+facts without appending contradictions. Local environment/credential references
+go only to ignored, mode-600 `AGENTS.local.md`; credential literals are rejected.
+
+The post-merge observer requires provider state `MERGED` with a merge timestamp.
+Only a useful allowed Markdown diff creates an isolated documentation commit and
+separate PR whose branch avoids the issue-linkage marker. Publication confirms a
+normalized provider PR identity/head; optional create-command stdout is not a
+completion signal. Existing index/worktrees, trunk, feature labels and merge outcome
+remain independent. No raw transcript parsing or extra model invocation occurs.
+Unassessed session receipts remain private/pending and do not block other assessed
+candidates. Failed application/publication remains pending. Completed
+receipts reuse their commit/PR rather than duplicating them; a no-op creates no
+empty commit. An unavailable PR-list read or mismatched remote head fails closed.
+
+Public document writes open each parent with `O_NOFOLLOW` and replace through
+directory descriptors, so a concurrent symlink swap cannot redirect the write
+outside the selected worktree. Git publication uses the validated commit SHA.
+
+**Motivation**: Lessons from repeated dev/review sessions otherwise disappear with
+session/worktree cleanup, while unconditional export produces noise and can expose
+machine details. Keep useful repository facts reviewable and local context private.
+
+**Producer**: dev/review prompt builders, candidate recorder and post-merge observer.
+**Consumer**: Stop hook, scoped guidance readers and documentation PR reviewers.
+**Status**: **ENFORCED** by the common helper/hook and `lib-session-knowledge.sh`.
+**Tests**: `tests/unit/test-session-knowledge.sh` exercises real linked worktrees,
+no-op/correction/removal behavior, evidence/privacy/path checks and isolated commits.
+`tests/unit/test-session-knowledge-merge.sh` verifies actual-merge gating, a real
+bare remote, publication failures and idempotent retry with provider fixtures.

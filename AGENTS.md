@@ -26,8 +26,9 @@ GitHub issue scanner that dispatches dev and review agents on a cron
 schedule. Manages the autonomous pipeline lifecycle via labels.
 
 ### autonomous-common
-Shared infrastructure: workflow enforcement hooks and agent-callable utility
-scripts (mark-issue-checkbox, reply-to-comments, resolve-threads, gh-as-user).
+Shared infrastructure: workflow enforcement hooks, optional session knowledge,
+and agent-callable utility scripts (mark-issue-checkbox, reply-to-comments,
+resolve-threads, gh-as-user).
 Required by autonomous-dev and autonomous-review. Not directly invocable.
 
 ### create-issue
@@ -49,12 +50,14 @@ project-root `hooks` symlink.
 
 **Template users** already have `hooks -> skills/autonomous-common/hooks`.
 
-**`npx skills add` users** must create the symlink manually after install:
+**`npx skills add` users** bootstrap the project links after install:
 
 ```bash
-ln -sf .claude/skills/autonomous-common/hooks hooks
-ln -sf .claude/skills/autonomous-dispatcher/scripts scripts
+bash .agents/skills/autonomous-common/scripts/install-project-hooks.sh
 ```
+
+The installer preserves project-local scripts and links dispatcher entry points
+individually. Re-run it after upgrading skills to pick up new entries.
 
 Hooks are supported by Claude Code, Codex CLI, and Kiro CLI. Other IDEs follow
 the workflow steps manually. See `hooks/README.md` for the full reference.
@@ -66,4 +69,18 @@ Pipeline and utility scripts are bundled inside skill directories:
 - Pipeline scripts: `skills/autonomous-dispatcher/scripts/`
 - Review scripts: `skills/autonomous-review/scripts/`
 
-All accessible via the `scripts/` symlink at the project root.
+Dispatcher entries are accessible through `scripts/`; common utilities remain
+in the installed common skill directory.
+
+## Session Knowledge
+
+Before dev handoff or a review verdict, assess verified durable facts or record
+why no update is needed. Read the common
+[`session knowledge reference`](skills/autonomous-common/references/session-knowledge.md).
+After confirmed merge, useful updates become an isolated documentation commit
+and separate PR. Keep current instructions in the nearest `AGENTS.md`, diagnoses
+in `docs/troubleshooting/`, and reusable lessons in `docs/lessons-learned/`.
+Correct stale facts instead of adding contradictions. No useful diff means no
+commit. Machine details and credential references belong in ignored, mode-600
+`AGENTS.local.md` in the primary checkout; consult it when local context is needed.
+Never record credential values in an assessment or tracked documentation.
