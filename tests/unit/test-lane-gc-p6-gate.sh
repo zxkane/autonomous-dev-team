@@ -1412,14 +1412,16 @@ assert_contains "TC-LGC6-162c: remote DEFERRED age>=threshold + FAILED revert ->
 
 # ===========================================================================
 echo ""
-echo "=== TC-LGC6-120: no forbidden phrases / private-repo references in touched files ==="
+echo "=== TC-LGC6-120: no pasted cross-repository comment references in touched files ==="
 # ===========================================================================
 TOUCHED_FILES=("$LIB_LANE" "$LIB_DISPATCH" "$DISPATCH_LOCAL" "$TICK" "$LIVENESS_DRIVER")
-PRIVATE_HITS=$(grep -niE 'quant-scorer|vidsyllabus|issuecomment-[0-9]+' "${TOUCHED_FILES[@]}" 2>/dev/null || true)
+# User-specific private identifiers belong in machine-local publication policy,
+# not in this public test. Check generic pasted cross-repository references.
+PRIVATE_HITS=$(grep -niE 'issuecomment-[0-9]+|<owner>/<repo>#[0-9]+' "${TOUCHED_FILES[@]}" 2>/dev/null || true)
 if [[ -z "$PRIVATE_HITS" ]]; then
-  assert_pass "TC-LGC6-120: no private-repo references in any touched file"
+  assert_pass "TC-LGC6-120: no pasted cross-repository comment references in any touched file"
 else
-  assert_fail "TC-LGC6-120: found private-repo references: $PRIVATE_HITS"
+  assert_fail "TC-LGC6-120: found pasted cross-repository comment references: $PRIVATE_HITS"
 fi
 # Scoped to this PR's OWN new gate block only — dispatch-local.sh already
 # carries a legitimate pre-existing "codex review round-N" citation
