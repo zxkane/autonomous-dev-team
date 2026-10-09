@@ -4316,8 +4316,23 @@ an agent that runs `gh pr review --approve` / `gh pr merge` gets a deterministic
   mint, so there is NO second token. `setup_agent_token` logs a ONE-TIME WARN
   ("enforcement degraded to convention in PAT mode"), `build_agent_env_argv`
   emits an EMPTY prefix (no scrub), and behavior is byte-identical to pre-INV-79.
-  An app-mode scoped-mint failure degrades the same way (WARN + no scrub) —
-  availability over the defense-in-depth bonus.
+  App mode MUST NOT use that degradation: invalid permission JSON, missing app
+  inputs, scoped-mint failure, or failed shim setup return an error and clean up
+  the authentication lifecycle. A missing scoped file at launch is also fatal.
+  `_run_with_timeout` propagates the error explicitly even inside a conditional
+  caller where Bash disables errexit. Config-validation-only review invocations
+  also clean up any authentication they initialized before returning.
+
+**Credential transport and regression checks.** Configured permission JSON is
+preserved verbatim; the default object is assigned outside parameter-expansion
+braces. Agent permissions cannot grant PR write access. The launch prefix carries
+only the scoped file path: a child shell reads it, sets `GH_TOKEN` and
+`GITHUB_TOKEN` in its environment, and execs the requested command. Neither token
+value appears in argv. JWT authorization headers likewise reach curl by stdin,
+and token-exchange error logs omit credential-bearing response bodies.
+`TC-TOKEN-SPLIT-070` through `072` cover configured JSON, fatal setup failures and
+launch rejection under suppressed errexit; the existing environment/launcher
+tests verify scoped credential delivery without weakening broker ownership.
 
 **Broker-request durability + lost-request recovery (#519 amendment).** The
 brokered PR-create request is a LOAD-BEARING handoff: losing it converts a

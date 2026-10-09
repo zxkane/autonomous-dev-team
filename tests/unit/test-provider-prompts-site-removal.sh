@@ -105,16 +105,17 @@ fi
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== TC-P36-030/031: cutover-baseline.json shrank to EXACTLY 13, per-file breakdown matches ==="
+echo "=== TC-P36-030/031: cutover-baseline.json shrank to EXACTLY 12, per-file breakdown matches ==="
 # ---------------------------------------------------------------------------
+# The fail-closed auth path also removes the former shim-fallback diagnostic.
 total=$(jq -r '.surviving_sites | length' "$BASELINE")
 la=$(jq -r '[.surviving_sites[] | select(.file=="lib-auth.sh")] | length' "$BASELINE")
 cpc=$(jq -r '[.surviving_sites[] | select(.file=="check-provider-cutover.sh")] | length' "$BASELINE")
 ad=$(jq -r '[.surviving_sites[] | select(.file=="autonomous-dev.sh")] | length' "$BASELINE")
 ar=$(jq -r '[.surviving_sites[] | select(.file=="autonomous-review.sh")] | length' "$BASELINE")
 lrb=$(jq -r '[.surviving_sites[] | select(.file=="lib-review-bots.sh")] | length' "$BASELINE")
-if [[ "$total" -eq 13 ]] && [[ "$la" -eq 5 ]] && [[ "$cpc" -eq 3 ]] && [[ "$ad" -eq 1 ]] && [[ "$ar" -eq 4 ]] && [[ "$lrb" -eq 0 ]]; then
-  ok "TC-P36-030/031 baseline shrank to 13 (lib-auth=5, check-provider-cutover=3, autonomous-dev=1, autonomous-review=4, lib-review-bots=0)"
+if [[ "$total" -eq 12 ]] && [[ "$la" -eq 4 ]] && [[ "$cpc" -eq 3 ]] && [[ "$ad" -eq 1 ]] && [[ "$ar" -eq 4 ]] && [[ "$lrb" -eq 0 ]]; then
+  ok "TC-P36-030/031 baseline shrank to 12 (lib-auth=4, check-provider-cutover=3, autonomous-dev=1, autonomous-review=4, lib-review-bots=0)"
 else
   bad "TC-P36-030/031 baseline breakdown mismatch: total=$total lib-auth=$la check-provider-cutover=$cpc autonomous-dev=$ad autonomous-review=$ar lib-review-bots=$lrb"
 fi

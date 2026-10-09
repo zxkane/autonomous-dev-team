@@ -434,13 +434,13 @@ _run_with_timeout() {
   # review [P1]). CLI-agnostic: applied here, it wraps EVERY adapter's
   # invocation uniformly (claude/codex/gemini/kiro/opencode/agy/generic) and the
   # launcher (the `cc` function) too — `env VAR=x …` sets the env for the command
-  # AND all descendants. Emits an EMPTY array (no prefix) in PAT mode /
-  # app-mode-mint-failure, so behavior is byte-identical when no scoped token is
-  # armed. Guarded on the helper existing so a unit harness that sources lib-agent
+  # AND all descendants. PAT mode can emit an empty prefix. App-mode setup errors
+  # must stop execution, including when errexit is suppressed by a caller.
+  # Guarded on the helper existing so a unit harness that sources lib-agent
   # without lib-auth still runs (no scrub).
   local _agent_env_prefix=()
   if declare -F build_agent_env_argv >/dev/null 2>&1; then
-    build_agent_env_argv _agent_env_prefix
+    build_agent_env_argv _agent_env_prefix || return 1
   fi
 
   # Order: [timeout] <env-scrub> <launcher> <agent argv>. The scrub `env …`
