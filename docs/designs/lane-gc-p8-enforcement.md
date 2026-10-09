@@ -95,43 +95,19 @@ dry-run with source `built-in-platform-guard`. An explicit
 `ADT_GC_ENFORCE=1` or `--kill` remains available only after a separate operator
 validation.
 
-**systemd scope:** not enabled by the proposed rollout. On the audited
-production wrapper host, the authoritative explicit-user command
-`loginctl show-user "$USER" -p Linger --value` reports `yes`. The current P7
-probe omits the username; on this host that command returns an empty value
-with rc 0, so `_lane_backend` currently falls back to `pgid` and records
-`BACKEND=pgid`. That accidental fallback is not treated as a correct
-linger-disabled safety claim.
+**systemd scope:** full-wrapper enrollment is implemented and accepted by
+#522/#556. Explicit-user linger probing, private atomic launch admission and
+per-agent scope registration now ship together. The real unmodified-wrapper
+E2E proves agent and re-setsid-child membership plus guardian reap after
+wrapper SIGKILL; the existing host linger state was preserved.
 
-P8 deliberately does not correct the probe in isolation: doing so on this
-already-linger-enabled host could select `systemd-scope` before the primary
-agent launch path is enrolled. Follow-up #522 must change both `_lane_backend`
-and `--doctor` to use an explicit user while completing the enrollment and
-E2E work below. Operators must not rely on the current empty probe or alter
-linger as part of P8.
-
-The P7 scope implementation covers `lane_spawn`, but the real agent launch
-chokepoint is `lib-agent.sh::_run_with_timeout`, which currently creates a
-plain `setsid` process group rather than entering `lane_spawn`. A wrapper may
-therefore record scope eligibility without proving that its main agent subtree
-was enrolled in that scope. Before any host may select `systemd-scope`,
-follow-up #522 must:
-
-1. correct the linger probe to pass `${USER:-$(id -un)}` explicitly;
-2. route `_run_with_timeout` through the selected scope backend without
-   weakening timeout, PID-file, turn-control, stdin, or credential-scrub
-   contracts;
-3. run a full wrapper under the existing real linger-enabled user manager;
-4. SIGKILL the wrapper mid-run and prove the agent plus a re-setsid escapee
-   leave `cgroup.procs` and are reaped through the guardian/GC path.
-
-Until that work lands, and before any host is allowed to select
-`systemd-scope`, the portable PGID path is the only backend proposed for this
-candidate. It is not production-authorized until the soak gate closes.
-`lane_kill ... require-identity` enforces the boundary directly: a recorded
-`BACKEND=systemd-scope` returns refusal code 3 before either the scope or any
-recorded PGID is signaled. Immediate wrapper/guardian-owned cleanup keeps the
-existing scope fast path.
+This does not widen P8 delayed signaling. `lane_kill ... require-identity`
+continues to reject `BACKEND=systemd-scope` with refusal code 3 before any
+scope or PGID signal. Immediate wrapper/guardian-owned cleanup uses the
+registered scopes and retains PGID escalation. Delayed scope signaling needs
+its own durable ownership/identity policy and acceptance; full-wrapper
+containment alone does not authorize reconstructing scope ownership from old
+records. The operator-owned production observation gate remains open.
 
 ## Rollback
 

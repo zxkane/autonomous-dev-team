@@ -73,7 +73,7 @@ so this PR claims the slot after that:
    `UNIT=-` lines; `lane_spawn()` gains a backend-dispatching branch (scope
    vs. plain `setsid`); best-effort `lane_kill()` calls `_lane_scope_kill()`
    before its existing pgid escalation. P8's delayed-GC strict policy is the
-   explicit exception and refuses scope pending #522.
+   explicit exception and refuses delayed scope signaling.
 2. **`skills/autonomous-dispatcher/scripts/lib-guardian.sh`**: `do_reap()`
    gains the identical `_lane_scope_kill()` call, in the identical position
    (before the pgid escalation), for the identical reason.
@@ -83,7 +83,7 @@ so this PR claims the slot after that:
    `backend_eligibility=<systemd-scope|pgid>` summary line that runs the
    real probe live. P7 originally required no GC decision-table change; P8's
    later identity hardening now calls `lane_kill ... require-identity`, whose
-   scope refusal is the rollout backstop pending #522.
+   scope refusal remains the separate delayed-ownership boundary after #522.
 4. **`skills/autonomous-dispatcher/scripts/autonomous.conf.example`**: two
    new knobs, `LANE_TASKS_MAX` (default 512) and `LANE_MEMORY_MAX` (unset
    default), documented with the same "only takes effect when eligible"
@@ -156,7 +156,7 @@ the real host before being relied on in code or tests.
    refusal tests must therefore query an explicit user and skip when that
    value is `yes`; the deterministic `Linger=no` refusal remains covered by
    the PATH-shim case. Correcting the production probe is coupled to full
-   scope enrollment in #522 rather than landed alone in P8.
+   scope enrollment in #522; both are now accepted together.
 
 ## Review-round-1 fixes (post-empirical-findings, before merge)
 
@@ -267,24 +267,15 @@ This is a narrower deferral than PR-4's macOS-runner deferral (that one
 covers an entire platform's AC set; this one covers exactly one job on one
 already-supported platform).
 
-**P8 rollout correction:** the #384 audit found a broader integration gap
-than this PR's `lane_spawn` tests cover. The production agent chokepoint is
-`lib-agent.sh::_run_with_timeout`, which still starts the main agent under a
-plain `setsid`; it does not call `lane_spawn`. Consequently a wrapper can
-record `BACKEND=systemd-scope` without proving that its main agent subtree
-entered that scope. P8 does not enable linger or claim full-wrapper scope
-coverage: the production host is already `Linger=yes`, while P7's no-user
-probe returns empty and therefore selects `pgid`. That accidental fallback
-does not prove a safe scope rollout. P8 prepares the portable-backend
-enforcement implementation, but production authorization still depends on
-#384's open soak gate. A follow-up must correct the probe with an explicit
-username, wire `_run_with_timeout` through the selected backend, and pass the
-full-wrapper SIGKILL/guardian `cgroup.procs` E2E described in
-`docs/designs/lane-gc-p8-enforcement.md`. This replaces the earlier "before
-P8" scheduling promise with a stricter "before scope enablement" rollout gate
-rather than pretending the missing E2E passed. P8 enforces the gate in code:
-`lane_kill ... require-identity` returns 3 before any scope or PGID signal
-when `BACKEND=systemd-scope`.
+**P8 rollout boundary after #522:** full-wrapper scope enrollment and the
+explicit-user probes are now implemented and accepted by #522/#556. The
+wrapper-scope tests provide the primary-agent evidence that the older P7
+`lane_spawn` primitive tests did not establish. No host linger state was
+changed. Immediate owner/guardian cleanup visits all registered agent scopes.
+P8 delayed signaling remains PGID-only: `lane_kill ... require-identity`
+returns 3 before any scope or PGID signal for a scope lane. A separate durable
+scope-ownership policy and #384's observation acceptance remain prerequisites
+for expanding that delayed collector behavior.
 
 ## Test coverage shape (design §9 PR-7's own AC list, mapped to TC-LGC7-\*)
 
@@ -315,7 +306,7 @@ It cannot and does not prove real cgroup/kernel semantics — that a
 `cgroup.kill` is genuinely atomic across fork races. Those claims are proven
 instead by this PR's own REAL (non-shimmed) `lane_spawn` scope primitive test
 (TC-LGC7-040), which runs directly against a real systemd/kernel where the
-host qualifies. It does not prove that `_run_with_timeout` enrolls a wrapper's
-main agent, and P8 does not use it as such proof. A host where the real scope
+host qualifies. That primitive test alone does not prove primary-agent enrollment; the real
+full-wrapper test added by #522 provides that separate evidence. A host where the real scope
 primitive cannot run skips TC-LGC7-040 with an explicit `SKIP (reason: ...)`
 line rather than faking a pass.

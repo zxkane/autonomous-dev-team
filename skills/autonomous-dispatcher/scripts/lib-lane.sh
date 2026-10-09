@@ -1657,7 +1657,8 @@ _lane_recorded_identity_for_pgid() {
 
 # lane_delayed_signal_backend_verified <lane_dir> — delayed GC accepts only
 # the exact portable backend. Missing, unknown, and systemd-scope records all
-# fail closed until #522 proves complete wrapper enrollment.
+# fail closed pending separate durable delayed-scope ownership acceptance.
+# Full-wrapper containment was accepted in #522; this gate is not widened.
 lane_delayed_signal_backend_verified() {
   local lane_dir="$1" backend
   backend="$(lane_get "$lane_dir" BACKEND 2>/dev/null)" || return 3
