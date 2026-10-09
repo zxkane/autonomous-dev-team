@@ -1,5 +1,5 @@
 #!/bin/bash
-# Lane-GC P8 (#384): kill-by-default plus one-flag box-wide rollback.
+# Lane-GC P8 (#384): default dry-run safety preparation and box-wide rollback.
 
 set -uo pipefail
 
@@ -60,8 +60,8 @@ echo "=== Lane-GC P8 mode selection ==="
 ST1="$TMPROOT/default"
 mkdir -p "$ST1"
 OUT1="$(env -u ADT_GC_ENFORCE ADT_STATE_ROOT="$ST1" bash "$ADT_GC" --doctor 2>&1)"
-assert_contains "TC-LGC8-001: unset flag defaults to kill" \
-  "mode_default=kill (source=built-in, ADT_GC_ENFORCE=<unset>)" "$OUT1"
+assert_contains "TC-LGC8-001: unset flag defaults to dry-run" \
+  "mode_default=dry-run (source=built-in, ADT_GC_ENFORCE=<unset>)" "$OUT1"
 OUT1B="$(_LANE_UNAME_OVERRIDE=Darwin env -u ADT_GC_ENFORCE ADT_STATE_ROOT="$ST1" bash "$ADT_GC" --doctor 2>&1)"
 assert_contains "TC-LGC8-001b: unvalidated Darwin remains dry-run by default" \
   "mode_default=dry-run (source=built-in-platform-guard, ADT_GC_ENFORCE=<unset>)" "$OUT1B"
@@ -183,12 +183,23 @@ make_old_pending() {
 ST9="$TMPROOT/default-behavior"
 PENDING9="$(make_old_pending "$ST9")"
 OUT9="$(env -u ADT_GC_ENFORCE ADT_STATE_ROOT="$ST9" bash "$ADT_GC" --quick 2>&1)"
-if [[ ! -d "$PENDING9" ]]; then
-  pass "TC-LGC8-009a: default mode removes an eligible pending directory"
+if [[ -d "$PENDING9" ]]; then
+  pass "TC-LGC8-009a: default mode preserves an eligible pending directory"
 else
-  fail "TC-LGC8-009a: default mode left eligible pending directory in place"
+  fail "TC-LGC8-009a: default mode unexpectedly removed pending directory"
 fi
-assert_contains "TC-LGC8-009b: default mode records a real kill" "killed=1" "$OUT9"
+assert_contains "TC-LGC8-009b: default mode reports classification only" \
+  "would_kill=1 killed=0" "$OUT9"
+
+ST9E="$TMPROOT/opt-in-behavior"
+PENDING9E="$(make_old_pending "$ST9E")"
+OUT9E="$(ADT_GC_ENFORCE=1 ADT_STATE_ROOT="$ST9E" bash "$ADT_GC" --quick 2>&1)"
+if [[ ! -d "$PENDING9E" ]]; then
+  pass "TC-LGC8-009e: explicit opt-in removes an eligible pending directory"
+else
+  fail "TC-LGC8-009e: explicit opt-in left eligible pending directory in place"
+fi
+assert_contains "TC-LGC8-009f: explicit opt-in records a real kill" "killed=1" "$OUT9E"
 
 ST9C="$TMPROOT/darwin-default-behavior"
 PENDING9C="$(make_old_pending "$ST9C")"
@@ -504,7 +515,7 @@ STDERR12="$(ADT_STATE_ROOT="$ST12" bash -c '
 ' _ "$LIB_LANE" "$STDERR_DIR12" 2>&1 >/dev/null)"
 assert_contains "TC-LGC8-012b: PGID lock open does not permanently suppress caller stderr" \
   "stderr-preserved" "$STDERR12"
-OUT12="$(env -u ADT_GC_ENFORCE ADT_STATE_ROOT="$ST12" bash "$ADT_GC" --quick 2>&1)"
+OUT12="$(env -u ADT_GC_ENFORCE ADT_STATE_ROOT="$ST12" bash "$ADT_GC" --kill --quick 2>&1)"
 sleep 0.2
 if kill -0 -- "-$PG12" 2>/dev/null; then
   fail "TC-LGC8-012c: identity-matched PGID survived strict GC"
@@ -524,7 +535,7 @@ ADT_STATE_ROOT="$ST13" bash -c '
 ' _ "$LIB_LANE" "$LANE13" "$PG13"
 awk '{$4="v1-linux:1"; print}' "$LANE13/pgids" > "$LANE13/pgids.tmp"
 mv "$LANE13/pgids.tmp" "$LANE13/pgids"
-OUT13="$(env -u ADT_GC_ENFORCE ADT_STATE_ROOT="$ST13" bash "$ADT_GC" --quick 2>&1)"
+OUT13="$(env -u ADT_GC_ENFORCE ADT_STATE_ROOT="$ST13" bash "$ADT_GC" --kill --quick 2>&1)"
 if kill -0 -- "-$PG13" 2>/dev/null; then
   pass "TC-LGC8-013a: recycled PGID identity is never signaled"
 else
@@ -548,7 +559,7 @@ setsid sleep 30 &
 PG14=$!
 SPAWNED_GROUPS+=("$PG14")
 printf '%s agent %s\n' "$PG14" "$(date +%s)" > "$LANE14/pgids"
-env -u ADT_GC_ENFORCE ADT_STATE_ROOT="$ST14" bash "$ADT_GC" --quick >/dev/null 2>&1
+env -u ADT_GC_ENFORCE ADT_STATE_ROOT="$ST14" bash "$ADT_GC" --kill --quick >/dev/null 2>&1
 if kill -0 -- "-$PG14" 2>/dev/null; then
   pass "TC-LGC8-014a: legacy identity-less PGID fails toward leak"
 else
@@ -587,7 +598,7 @@ SPAWNED_GROUPS+=("$GUARD15")
 ST15="$TMPROOT/guardian-mismatch"
 GUARD_ID15="$(ADT_STATE_ROOT="$ST15" bash -c 'source "$1"; proc_identity "$2"' _ "$LIB_LANE" "$GUARD15")"
 LANE15="$(make_terminal_lane_with_guardian "$ST15" p8guardian 15 "$GUARD15" "${GUARD_ID15%:*}:0")"
-env -u ADT_GC_ENFORCE ADT_STATE_ROOT="$ST15" bash "$ADT_GC" --quick >/dev/null 2>&1
+env -u ADT_GC_ENFORCE ADT_STATE_ROOT="$ST15" bash "$ADT_GC" --kill --quick >/dev/null 2>&1
 if kill -0 "$GUARD15" 2>/dev/null; then
   pass "TC-LGC8-015a: recycled guardian PID is never signaled"
 else
@@ -604,7 +615,7 @@ GUARD16=$!
 SPAWNED_GROUPS+=("$GUARD16")
 ST16="$TMPROOT/guardian-legacy"
 LANE16="$(make_terminal_lane_with_guardian "$ST16" p8guardian 16 "$GUARD16" "-")"
-env -u ADT_GC_ENFORCE ADT_STATE_ROOT="$ST16" bash "$ADT_GC" --quick >/dev/null 2>&1
+env -u ADT_GC_ENFORCE ADT_STATE_ROOT="$ST16" bash "$ADT_GC" --kill --quick >/dev/null 2>&1
 if kill -0 "$GUARD16" 2>/dev/null; then
   pass "TC-LGC8-016a: legacy identity-less guardian is never signaled"
 else

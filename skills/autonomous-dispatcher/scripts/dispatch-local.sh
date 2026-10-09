@@ -329,8 +329,8 @@ _gate_check_signals() {
 # [review P2-1, honest contract scope] This does NOT mean the reclaim call
 # below can never result in a kill anywhere on the host. `adt-gc.sh
 # --quick` is a SEPARATE component governed by its OWN safety predicate
-# ([INV-117]): P8 prepares Linux enforcement as the built-in candidate, but
-# production rollout remains blocked on #384's soak gate. `ADT_GC_ENFORCE=0`
+# ([INV-117]): the built-in mode remains dry-run on every platform; the
+# default flip and production enforcement remain gated by #384. `ADT_GC_ENFORCE=0`
 # rolls it back to classification-only; a box-wide adt-gc.conf veto has higher
 # precedence than the environment. In enforce mode that SAME `--quick` call
 # CAN perform a real kill of registry-DEAD-lane residue — but that kill is

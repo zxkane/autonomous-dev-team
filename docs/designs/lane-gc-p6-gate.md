@@ -278,9 +278,9 @@ skill: pick the simpler, more maintainable option)
 - **The gate's "never kills" claim is scoped to its own admission-decision
   code, never to `adt-gc.sh`'s reclaim step** (review P2-1). The refusal
   path's one bounded `adt-gc.sh --quick` call is a SEPARATE component
-  under its OWN safety predicate ([INV-117]). P8 prepares Linux enforcement
-  as the built-in candidate, but production rollout remains blocked on
-  #384's soak gate; `ADT_GC_ENFORCE=0` provides the dry-run rollback, with a
+  under its OWN safety predicate ([INV-117]). The built-in mode remains
+  dry-run on every platform; the default flip and production enforcement
+  remain blocked on #384's soak gate; `ADT_GC_ENFORCE=0` provides the dry-run rollback, with a
   box-wide persistent config veto taking precedence over the environment.
   In enforce mode that same `--quick` call CAN kill registry-dead-lane
   residue — authorized by INV-117's own

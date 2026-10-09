@@ -98,11 +98,11 @@ Per-task command shapes (passed through both backends identically):
 ## Lane GC Enforcement
 
 `adt-gc.sh` periodically reclaims residue from dead lanes under INV-117's
-registry-driven safety predicate. The P8 implementation candidate makes Linux
-`--kill` the built-in mode, but production merge and rollout remain blocked on
-issue #384's at-least-two-week clean-soak gate. Do not install this candidate
-on a production host before that gate is closed. Inspect the effective mode and
-host prerequisites:
+registry-driven safety predicate. The built-in default remains `--dry-run`
+on all platforms. P8 safety improvements may merge while the default flip and
+production enforcement remain gated by issue #384's at-least-two-week clean
+soak. Explicit `ADT_GC_ENFORCE=1` or `--kill` requires authorized enforcement.
+Inspect the effective mode and host prerequisites:
 
 ```bash
 bash "$PROJECT_DIR/scripts/adt-gc.sh" --doctor
@@ -117,7 +117,7 @@ mkdir -p "$ADT_STATE_ROOT"
 printf 'ADT_GC_ENFORCE=0\n' > "$ADT_STATE_ROOT/adt-gc.conf"
 ```
 
-Remove the file to restore the installed version's built-in default. A present
+Remove the file to restore environment selection or the built-in dry-run default. A present
 rollback file vetoes `ADT_GC_ENFORCE=1` from the environment; explicit
 `--dry-run`/`--kill` overrides both without inspecting them. Precedence is CLI
 mode > persistent config veto > environment > built-in. Selected invalid values

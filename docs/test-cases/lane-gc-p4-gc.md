@@ -15,6 +15,12 @@ under `env -u PROJECT_DIR` for CI parity. Every test isolates
 `$HOME/.local/state` — so this suite is safe to run on a box with a live
 dispatcher.
 
+The PGID decision-table fixtures force `ADT_LANE_BACKEND_OVERRIDE=pgid`,
+independent of host scope eligibility. Negative process assertions reject
+cleanup decisions while permitting diagnostic skip records. TC-LGC4-025 keeps
+a real wrapper alive, validates lane liveness, clears the terminal exemption,
+and raises its daemon above the age floor to exercise live-lane protection.
+
 ## Pass 1 — registry-driven (AC1)
 
 | ID | Scenario | Expected |

@@ -16,10 +16,10 @@
 #   adt-gc.sh [--dry-run|--kill] [--quick] [--doctor] [-h|--help]
 #
 #   --dry-run   Classify and log every candidate; never signal anything.
-#               Explicit per-invocation rollback from the P8 candidate default.
-#   --kill      Actually TERM/KILL/rm-rf classified candidates. Linux DEFAULT
-#               in this candidate; production rollout remains gated by #384's
-#               at-least-two-week clean soak.
+#               DEFAULT on every platform.
+#   --kill      Actually TERM/KILL/rm-rf classified candidates. Explicit opt-in;
+#               the default flip and production enforcement remain gated by
+#               #384's at-least-two-week clean soak.
 #   --quick     Pass 1 (registry-driven) ONLY — no env reads, no same-uid
 #               process enumeration. Meant for the opportunistic call at
 #               the top of every dispatch-local.sh run, so it must be fast
@@ -73,7 +73,6 @@ source "${LIB_DIR}/lib-metrics.sh" 2>/dev/null || true
 GC_MODE="dry-run"
 GC_MODE_SOURCE="built-in-platform-guard"
 if [[ "$(_lane_uname)" == "Linux" ]]; then
-  GC_MODE="kill"
   GC_MODE_SOURCE="built-in"
 fi
 GC_ENFORCE_EFFECTIVE="<unset>"

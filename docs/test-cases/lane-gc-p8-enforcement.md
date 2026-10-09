@@ -1,11 +1,10 @@
-# Test Cases - Lane-GC P8 enforcement flip (#384)
+# Test Cases - Lane-GC P8 safety preparation (#384)
 
-Final issue in the Lane-GC series. These tests prove the implementation
-candidate that changes Linux `adt-gc.sh` from dry-run-by-default to
-kill-by-default while retaining one box-wide rollback flag and a non-Linux
-platform guard. They do not satisfy issue #384's operator-owned, at-least
-two-week production-soak gate; merge and rollout remain blocked on that
-evidence.
+These tests prove the default-dry-run safety preparation for the final issue
+in the Lane-GC series. Explicit enforcement and one box-wide rollback flag
+remain available. The default flip and production enforcement remain under
+issue #384's operator-owned, at-least-two-week production-soak gate; merging
+the safety preparation does not satisfy that gate.
 
 Production evidence and the Linux-only/scope rollout boundaries are recorded
 in `docs/designs/lane-gc-p8-enforcement.md`.
@@ -16,7 +15,7 @@ Test runner: `bash tests/unit/test-lane-gc-p8-enforcement.sh`.
 
 | ID | Scenario | Expected |
 |----|----------|----------|
-| TC-LGC8-001 | `ADT_GC_ENFORCE` unset and no box-wide config | Linux default mode is `kill`; unvalidated Darwin remains `dry-run` unless explicitly enabled |
+| TC-LGC8-001 | `ADT_GC_ENFORCE` unset and no box-wide config | Linux, Darwin and unknown platforms default to `dry-run` |
 | TC-LGC8-001d | `uname -s` fails | platform is unknown and the built-in mode remains `dry-run` |
 | TC-LGC8-002 | `ADT_GC_ENFORCE=1` in the environment | mode is `kill`; the pre-P8 opt-in remains valid |
 | TC-LGC8-003 | `ADT_GC_ENFORCE=0` in the environment | mode is `dry-run`; this is the immediate rollback |
@@ -25,13 +24,14 @@ Test runner: `bash tests/unit/test-lane-gc-p8-enforcement.sh`.
 | TC-LGC8-006 | box-wide config says `0`, environment says `1` | the persistent rollback veto wins and mode remains `dry-run` |
 | TC-LGC8-007 | explicit `--dry-run`/`--kill` is present with an invalid lower-precedence environment/config value | explicit CLI mode wins; ignored lower-precedence sources are not parsed or warned about |
 | TC-LGC8-008a-g | environment is invalid, or box-wide config is missing/duplicate/contains extra content | warn and fail toward `dry-run`; parse config as data and never execute its content |
-| TC-LGC8-008h/i | the rollback path is a dangling symlink | treat the selected config as invalid, warn, and fail toward `dry-run` rather than restoring the kill default |
+| TC-LGC8-008h/i | the rollback path is a dangling symlink | treat the selected config as invalid, warn, and fail toward `dry-run` |
 
 ## Behavioral proof
 
 | ID | Scenario | Expected |
 |----|----------|----------|
-| TC-LGC8-009 | an isolated `.pending-*` directory older than 24h, no mode flag | Linux default removes it and reports `killed=1`; Darwin's platform guard preserves it and reports classification only |
+| TC-LGC8-009a-d | an isolated `.pending-*` directory older than 24h, no mode flag | Linux and Darwin preserve it and report `would_kill=1`, `killed=0` |
+| TC-LGC8-009e/f | the same isolated fixture with explicit `ADT_GC_ENFORCE=1` | removes it and reports `killed=1` |
 | TC-LGC8-010 | the same fixture with box-wide `ADT_GC_ENFORCE=0` | directory remains and the run reports `would_kill=1`, `killed=0` |
 | TC-LGC8-011a-f | install the Linux cron timer and macOS launchd agent with a fresh custom `ADT_STATE_ROOT` | the installer creates the root before scheduler log redirection, persists it in the host-wide root pointer, and scheduled plus unset opportunistic callers resolve the same root; a re-run without an explicit root preserves the existing custom root, a symlinked pointer warns and falls back, and macOS-loaded `lib-lane.sh` retains sibling-library resolution when GNU `readlink -f` is unavailable |
 | TC-LGC8-011g/h | install a timer with relative `ADT_STATE_ROOT` | reject the path and exit non-zero before writing scheduler configuration |
@@ -47,13 +47,13 @@ Test runner: `bash tests/unit/test-lane-gc-p8-enforcement.sh`.
 | TC-LGC8-016 | rule 1.4 finds a live legacy guardian PID with no identity | GC cannot distinguish the real guardian from PID reuse, so it signals nothing and preserves the lane directory for a later/manual reap |
 | TC-LGC8-017 | BSD/macOS process-identity seam against a live fixture process | emits a compact `v1-bsd:<recorded-ppid>:<sha256>` identity; exact identity matches, a changed hash proves mismatch, and malformed identity is unverifiable |
 | TC-LGC8-017e | a matching BSD v1 identity is presented to delayed-signal authorization | diagnostic matching remains available, but authorization refuses it |
-| TC-LGC8-018a-d | two live groups pass snapshot identity checks, then one fails the lane-wide pre-TERM revalidation; separately, a lane records `BACKEND=systemd-scope` | a phase-preflight refusal returns `3` before that phase starts; strict delayed GC also returns `3` for the scope lane before invoking `systemctl` or signaling its PGID, pending #522 |
+| TC-LGC8-018a-d | two live groups pass snapshot identity checks, then one fails the lane-wide pre-TERM revalidation; separately, a lane records `BACKEND=systemd-scope` | a phase-preflight refusal returns `3` before that phase starts; strict delayed GC also returns `3` for the scope lane before invoking `systemctl` or signaling its PGID, pending separate delayed scope ownership acceptance |
 | TC-LGC8-018e-g | strict reap lacks `reap.lock`; separately, a writer attempts registration after strict snapshot closure | missing lock returns `3` and sends no signal; strict GC creates `pgids.closed` under `pgids.lock`, and the late append is rejected |
 | TC-LGC8-018h-k | strict reap sees missing/unknown `BACKEND`, or `lane_kill` receives a misspelled policy | only exact `BACKEND=pgid` is accepted; an unknown policy returns usage error before locks or signals |
 | TC-LGC8-018l-o | every group passes phase preflight, then the second group changes identity immediately before its TERM or KILL | the first group may already have received that phase's signal; return `3` and stop before signaling the changed group or any remaining group |
 | TC-LGC8-019 | an identity-aware individual-PID escalation delivers TERM, then identity revalidation fails before KILL | returns `3`; KILL is refused and the changed live process remains |
 | TC-LGC8-020a/b | a Pass 2/3 candidate and its PGID leader match at classification, TERM lands, then leader identity changes before KILL | returns `3`; the KILL phase is refused and the changed process remains |
-| TC-LGC8-021 | Pass 2 and every Pass 3 rule encounter a candidate tagged to a dead `systemd-scope` lane | refuse before signaling; lane-scoped rules also refuse before enumerating lane-owned candidates, pending full-wrapper scope enrollment in #522 |
+| TC-LGC8-021 | Pass 2 and every Pass 3 rule encounter a candidate tagged to a dead `systemd-scope` lane | refuse before signaling; lane-scoped rules also refuse before enumerating lane-owned candidates, pending separate delayed scope ownership acceptance; full-wrapper enrollment was accepted in #522/#556 |
 | TC-LGC8-022 | Pass 2/3 candidate classification order and identity transport | bind the PID before any env/argv/cwd classification, pass identities explicitly, and use one durable authorization helper |
 | TC-LGC8-023 | a full Pass 2/3 run needs the same-user PID set from multiple process-substitution call sites | prime the PID snapshot in the parent shell before Pass 2 so process-substitution subshells inherit one cached enumeration |
 | TC-LGC8-024 | Pass 3.1 scans 200 eligible dead lanes and 40 same-user PIDs | enumerate candidates once and read each PID's identity/argv once; compare the cached argv against all lane hints in memory |

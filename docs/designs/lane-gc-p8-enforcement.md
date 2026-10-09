@@ -1,8 +1,9 @@
-# Lane-GC P8 enforcement rollout record
+# Lane-GC P8 safety preparation and rollout record
 
-**Status:** implementation candidate for issue #384; production rollout is not
-authorized. The frozen architecture authority remains
-`docs/designs/lane-containment-gc.md` rev 3. This file records the available
+**Status:** default-dry-run safety preparation for issue #384. The safety
+changes may merge independently; the default flip and production enforcement
+remain gated by #384 and are not authorized. The frozen architecture authority
+remains `docs/designs/lane-containment-gc.md` rev 3. This file records the available
 production evidence, the still-open soak gate, rollout boundaries, and the
 implementation hardening prepared for a future Linux dry-run-to-kill flip.
 
@@ -36,7 +37,7 @@ production-soak evidence. The frozen prefix is immutable and excludes every
 post-freeze record, including the uncontaminated-looking 731-739 interval, so
 future appends cannot silently change this evidence population. A new clean
 window of at least 14 days, or equivalent uncontaminated evidence accepted by
-the operator, is still required before merge or rollout.
+the operator, is still required before the default flip or production enforcement.
 
 The actual post-P2 onboarding snapshot contains two project ticks in the host
 crontab: `autonomous-dev-team` and one downstream checkout. Both projects' effective
@@ -109,12 +110,15 @@ its own durable ownership/identity policy and acceptance; full-wrapper
 containment alone does not authorize reconstructing scope ownership from old
 records. The operator-owned production observation gate remains open.
 
-## Rollback
+## Default mode and rollback
 
-The candidate implementation changes the Linux built-in mode to `kill`; the
-production installation remains dry-run until the soak gate closes and this
-change is merged and installed. Other platforms retain the built-in platform
-guard described above. The persistent box-wide rollback is exactly:
+The built-in mode remains `dry-run` on Linux, Darwin and unknown platforms.
+Merging these safety improvements does not flip the default or authorize
+production enforcement. The future default flip and production enablement
+remain under #384 after a clean, candidate-bound observation window is accepted.
+Explicit `ADT_GC_ENFORCE=1` or `--kill` remains available for authorized
+enforcement. Other platforms retain the platform guard described above.
+The persistent box-wide rollback is exactly:
 
 ```text
 ADT_GC_ENFORCE=0
@@ -155,8 +159,9 @@ reading remote lane markers.
 
 ## Verification
 
-`tests/unit/test-lane-gc-p8-enforcement.sh` contains 120 passing assertions.
-They cover the default/rollback precedence, invalid and dangling config,
+`tests/unit/test-lane-gc-p8-enforcement.sh` contains 122 assertions.
+They cover default classification without deletion, explicit opt-in cleanup,
+rollback precedence, invalid and dangling config,
 custom timer roots and transactional rollback, shared local/remote state-root
 resolution, boot-bound identities, legacy refusal, guardian and Pass 2/3
 signal-time identity changes, strict lock ownership, registration closure,
@@ -166,7 +171,7 @@ transport, and the scope rollout guard.
 Owner-side re-dispatch, legacy PID-file, wrapper cleanup, and guardian EOF
 paths intentionally retain their pre-P8 best-effort behavior because they act
 while ownership is contemporaneous. Moving those paths to the delayed-GC
-authority model is not part of the enforcement flip.
+authority model is not part of these safety improvements.
 
 ## Pass 3 ownership matching
 

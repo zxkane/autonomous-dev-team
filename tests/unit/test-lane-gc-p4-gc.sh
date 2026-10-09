@@ -20,6 +20,10 @@
 
 set -uo pipefail
 
+# These decision-table fixtures exercise PGID GC. Host scope eligibility must
+# not switch them to the separately tested strict delayed-scope refusal path.
+export ADT_LANE_BACKEND_OVERRIDE=pgid
+
 PASS=0
 FAIL=0
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -44,6 +48,14 @@ assert_contains() {
 assert_not_contains() {
   local desc="$1" needle="$2" haystack="$3"
   if [[ "$haystack" != *"$needle"* ]]; then assert_pass "$desc"; else assert_fail "$desc (needle='$needle' unexpectedly found)"; fi
+}
+assert_not_classified() {
+  local desc="$1" pid="$2" log="$3"
+  if grep -Eq "(^|[[:space:]])(would-kill|kill)[[:space:]].*[[:space:]]pid=${pid}([[:space:]]|$)" <<< "$log"; then
+    assert_fail "$desc (cleanup decision found for pid=$pid)"
+  else
+    assert_pass "$desc"
+  fi
 }
 
 for f in "$LIB_LANE" "$ADT_GC" "$INSTALL_GC_TIMER" "$DISPATCH_LOCAL"; do
@@ -475,7 +487,7 @@ sleep 0.3
 ST22=$(mktemp -d)
 run_gc_dry_full "$ST22" >/dev/null
 CATLOG22=$(cat "$ST22/adt-gc.log" 2>/dev/null || true)
-assert_not_contains "TC-LGC4-022: legacy sig WITHOUT CC_USER (bare conf-sourcing decoy) is never treated as would-kill" "pid=$PID22" "$CATLOG22"
+assert_not_classified "TC-LGC4-022: legacy sig WITHOUT CC_USER (bare conf-sourcing decoy) is never treated as would-kill" "$PID22" "$CATLOG22"
 kill -9 -- "-$PID22" 2>/dev/null || true
 rm -rf "$ST22"
 
@@ -496,7 +508,7 @@ PID23=$(cat "$P2ROOT/pid23")
 SPAWNED_PIDS+=("$PID23")
 run_gc_dry_full "$ST23" >/dev/null
 CATLOG23=$(cat "$ST23/adt-gc.log" 2>/dev/null || true)
-assert_not_contains "TC-LGC4-023: TERM_PROGRAM decoy is unconditionally skipped despite a matching tagged-dead-lane env" "pid=$PID23" "$CATLOG23"
+assert_not_classified "TC-LGC4-023: TERM_PROGRAM decoy is unconditionally skipped despite a matching tagged-dead-lane env" "$PID23" "$CATLOG23"
 kill -9 -- "-$PID23" 2>/dev/null || true
 rm -rf "$ST23"
 
@@ -518,21 +530,30 @@ rm -rf "$ST24"
 
 # TC-LGC4-025: live-lane daemon — tagged with a LIVE lane's id -> skip.
 ST25=$(mktemp -d)
+sleep 400 &
+WRAPPER25_PID=$!
+SPAWNED_PIDS+=("$WRAPPER25_PID")
 LANE25_ID=$(bash -c '
   source "'"$LIB_LANE"'"
   export ADT_STATE_ROOT="'"$ST25"'"
   LANE_ID=$(lane_mint p2 dev 25)
-  lane_install p2 "$LANE_ID" >/dev/null
+  LANE_DIR=$(lane_install p2 "$LANE_ID")
+  lane_set "$LANE_DIR" WRAPPER_PID "'"$WRAPPER25_PID"'"
+  lane_set "$LANE_DIR" WRAPPER_START "$(proc_start_time "'"$WRAPPER25_PID"'")"
+  [[ "$(lane_probe "$LANE_DIR")" == live ]] || exit 1
   echo "$LANE_ID"
-')
-setsid env ADT_LANE_ID="$LANE25_ID" bash -c "sleep 400" &
+') || assert_fail "TC-LGC4-025 setup: wrapper lane must be live"
+setsid env -u TERM_PROGRAM ADT_LANE_ID="$LANE25_ID" bash -c "sleep 400" &
 disown
 PID25=$!
 SPAWNED_PIDS+=("$PID25")
+export "_GC_PROC_AGE_OVERRIDE_${PID25}=301"
 run_gc_dry_full "$ST25" >/dev/null
+unset "_GC_PROC_AGE_OVERRIDE_${PID25}"
 CATLOG25=$(cat "$ST25/adt-gc.log" 2>/dev/null || true)
-assert_not_contains "TC-LGC4-025: process tagged with a LIVE lane's id is never swept" "pid=$PID25" "$CATLOG25"
+assert_not_classified "TC-LGC4-025: process tagged with a LIVE lane's id is never swept" "$PID25" "$CATLOG25"
 kill -9 -- "-$PID25" 2>/dev/null || true
+kill -9 "$WRAPPER25_PID" 2>/dev/null || true
 rm -rf "$ST25"
 
 # TC-LGC4-030: rule 2.4 first conjunct — a process eligible via rule 2.1
@@ -602,7 +623,7 @@ export "_GC_PROC_AGE_OVERRIDE_${PID31}=100"
 run_gc_dry_full "$ST31" >/dev/null
 unset "_GC_PROC_AGE_OVERRIDE_${PID31}"
 CATLOG31=$(cat "$ST31/adt-gc.log" 2>/dev/null || true)
-assert_not_contains "TC-LGC4-031: tagged-dead-lane process below the 300s age floor is never classified (rule 2.5)" "pid=$PID31" "$CATLOG31"
+assert_not_classified "TC-LGC4-031: tagged-dead-lane process below the 300s age floor is never classified (rule 2.5)" "$PID31" "$CATLOG31"
 kill -9 -- "-$PID31" 2>/dev/null || true
 rm -rf "$ST31"
 
@@ -650,7 +671,7 @@ if [[ -n "$DAEMON26_PID" ]] && [[ "$(bash -c 'source "'"$LIB_LANE"'"; proc_ppid 
   run_gc_dry_full "$ST26" >/dev/null
   unset "_GC_PROC_AGE_OVERRIDE_${DAEMON26_PID}"
   CATLOG26=$(cat "$ST26/adt-gc.log" 2>/dev/null || true)
-  assert_not_contains "TC-LGC4-026: mid-upgrade legacy live wrapper's reparented same-pgid daemon is protected by rule 2.4's ancestry gate (direct pgid match)" "pid=$DAEMON26_PID" "$CATLOG26"
+  assert_not_classified "TC-LGC4-026: mid-upgrade legacy live wrapper's reparented same-pgid daemon is protected by rule 2.4's ancestry gate (direct pgid match)" "$DAEMON26_PID" "$CATLOG26"
   rm -rf "$ST26"
 else
   assert_pass "TC-LGC4-026: skipped — reparenting to init did not occur as expected on this sandbox"
@@ -821,7 +842,7 @@ if [[ -n "$PID28" ]]; then
   run_gc_dry_full "$ST28" >/dev/null
   unset "_GC_PROC_AGE_OVERRIDE_${PID28}"
   CATLOG28=$(cat "$ST28/adt-gc.log" 2>/dev/null || true)
-  assert_not_contains "TC-LGC4-028: launcher-bridge live wrapper — a dead-lane-tagged process sharing a pgid with a live wrapper-argv MEMBER (not the group leader) is protected by rule 2.3's group-scoped match" "pid=$PID28" "$CATLOG28"
+  assert_not_classified "TC-LGC4-028: launcher-bridge live wrapper — a dead-lane-tagged process sharing a pgid with a live wrapper-argv MEMBER (not the group leader) is protected by rule 2.3's group-scoped match" "$PID28" "$CATLOG28"
   kill -9 -- "-$PG28" 2>/dev/null || true
 else
   assert_pass "TC-LGC4-028: skipped — could not observe the launcher-bridge group's spawned pid on this sandbox"
@@ -950,7 +971,7 @@ SPAWNED_PIDS+=("$PID44")
 sleep 0.3
 run_gc_dry_full "$ST44" >/dev/null
 CATLOG44=$(cat "$ST44/adt-gc.log" 2>/dev/null || true)
-assert_not_contains "TC-LGC4-044: wedged gh with an EXISTING auth dir is never swept" "pid=$PID44" "$CATLOG44"
+assert_not_classified "TC-LGC4-044: wedged gh with an EXISTING auth dir is never swept" "$PID44" "$CATLOG44"
 kill -9 -- "-$PID44" 2>/dev/null || true
 rm -rf "$AUTH_GONE" "$AUTH_LIVE"
 rm -rf "$ST44"
@@ -1016,7 +1037,7 @@ if [[ -n "$PID42" ]] && [[ "$(bash -c 'source "'"$LIB_LANE"'"; proc_ppid "'"$PID
   # test-only override), proving the age gate itself, not just the seam.
   run_gc_dry_full "$ST42" >/dev/null
   CATLOG42=$(cat "$ST42/adt-gc.log" 2>/dev/null || true)
-  assert_not_contains "TC-LGC4-042: Chrome heuristic — reparented puppeteer profile below the 2h age floor is never classified" "pid=$PID42" "$CATLOG42"
+  assert_not_classified "TC-LGC4-042: Chrome heuristic — reparented puppeteer profile below the 2h age floor is never classified" "$PID42" "$CATLOG42"
   kill -9 -- "-$PID42" 2>/dev/null || true
   kill -9 "$PID42" 2>/dev/null || true
 else
@@ -1076,7 +1097,7 @@ if [[ -n "$PID46" ]]; then
   SPAWNED_PIDS+=("$PID46")
   run_gc_dry_full "$ST46" >/dev/null
   CATLOG46=$(cat "$ST46/adt-gc.log" 2>/dev/null || true)
-  assert_not_contains "TC-LGC4-046: E2E server whose recorded WORKTREE still exists is never swept" "pid=$PID46" "$CATLOG46"
+  assert_not_classified "TC-LGC4-046: E2E server whose recorded WORKTREE still exists is never swept" "$PID46" "$CATLOG46"
   kill -9 -- "-$PID46" 2>/dev/null || true
 else
   assert_pass "TC-LGC4-046: skipped — could not observe the fixture's cwd-scoped pid on this sandbox"
@@ -1552,7 +1573,7 @@ if [[ -n "$PID200" ]]; then
   SPAWNED_PIDS+=("$PID200")
   run_gc_dry_full "$ST200" >/dev/null
   CATLOG200=$(cat "$ST200/adt-gc.log" 2>/dev/null || true)
-  assert_not_contains "TC-LGC4-200 (P1-1): rule 3.4 with TERM_PROGRAM set is skipped — never kills an operator shell cwd'd inside a removed worktree" "pid=$PID200" "$CATLOG200"
+  assert_not_classified "TC-LGC4-200 (P1-1): rule 3.4 with TERM_PROGRAM set is skipped — never kills an operator shell cwd'd inside a removed worktree" "$PID200" "$CATLOG200"
   kill -9 -- "-$PID200" 2>/dev/null || true
 else
   assert_pass "TC-LGC4-200: skipped — could not observe the fixture's cwd-scoped pid on this sandbox"
@@ -1717,7 +1738,7 @@ if [[ -n "$PID206" ]] && [[ "$(bash -c 'source "'"$LIB_LANE"'"; proc_ppid "'"$PI
   run_gc_dry_full "$ST206" >/dev/null
   unset "_GC_PROC_AGE_OVERRIDE_${PID206}"
   CATLOG206=$(cat "$ST206/adt-gc.log" 2>/dev/null || true)
-  assert_not_contains "TC-LGC4-206 (P1-4): rule 3.2 skips a candidate whose profile dir has a LIVE sharer" "pid=$PID206" "$CATLOG206"
+  assert_not_classified "TC-LGC4-206 (P1-4): rule 3.2 skips a candidate whose profile dir has a LIVE sharer" "$PID206" "$CATLOG206"
   for child in $(pgrep -P "$SHARER206_PID" 2>/dev/null || true); do
     kill -9 "$child" 2>/dev/null || true
   done
@@ -1754,7 +1775,7 @@ if [[ -n "$PID207" ]]; then
   run_gc_dry_full "$ST207" >/dev/null
   unset "_GC_PROC_AGE_OVERRIDE_${PID207}"
   CATLOG207=$(cat "$ST207/adt-gc.log" 2>/dev/null || true)
-  assert_not_contains "TC-LGC4-207 (P1-4): rule 3.2 skips a candidate with a live chrome-devtools-mcp ancestor" "pid=$PID207" "$CATLOG207"
+  assert_not_classified "TC-LGC4-207 (P1-4): rule 3.2 skips a candidate with a live chrome-devtools-mcp ancestor" "$PID207" "$CATLOG207"
   rm -rf "$ST207"
 else
   assert_pass "TC-LGC4-207: skipped — could not observe the fixture's child pid on this sandbox"
