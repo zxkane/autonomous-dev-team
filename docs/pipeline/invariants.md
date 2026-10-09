@@ -10182,7 +10182,10 @@ _Triage (issue #236): [machine-checked: tests/unit/test-session-knowledge.sh]_
 
 **Rule**: Dev/review sessions assess verified durable facts or explicitly record
 why no update is needed. The Stop hook checks an activated session's current
-assessment, not a minimum number of lessons. Private receipts in the common Git
+assessment, not a minimum number of lessons. The receipt binds to its assessed
+worktree/branch so a launcher-checkout Stop checks the actual source revision.
+Parallel members have distinct receipts even when their CLI names repeat.
+Private receipts in the common Git
 directory preserve candidates across sessions/worktrees. Latest path/key wins;
 discard withdraws a candidate. Reassessment accumulates per-fact changes; a
 no-update receipt neither erases prior candidates nor promotes an older fact over
@@ -10193,9 +10196,12 @@ go only to ignored, mode-600 `AGENTS.local.md`; credential literals are rejected
 
 The post-merge observer requires provider state `MERGED` with a merge timestamp.
 Only a useful allowed Markdown diff creates an isolated documentation commit and
-separate PR. Existing index/worktrees, trunk, feature labels and merge outcome
+separate PR whose branch avoids the issue-linkage marker. Publication confirms a
+normalized provider PR identity/head; optional create-command stdout is not a
+completion signal. Existing index/worktrees, trunk, feature labels and merge outcome
 remain independent. No raw transcript parsing or extra model invocation occurs.
-Unassessed sessions and failed application/publication remain pending. Completed
+Unassessed session receipts remain private/pending and do not block other assessed
+candidates. Failed application/publication remains pending. Completed
 receipts reuse their commit/PR rather than duplicating them; a no-op creates no
 empty commit. An unavailable PR-list read or mismatched remote head fails closed.
 

@@ -64,7 +64,7 @@ EOF
 # The caller keeps the original successful merge/label transition independent.
 # No model invocation, issue write, trunk push, or second merge occurs here.
 postmerge_session_knowledge() {
-  local issue="$1" pr="$2" helper pending meta applied status branch commit digest worktree existing match_count number url body
+  local issue="$1" pr="$2" helper pending meta applied status branch commit digest worktree existing match_count number body
   [[ "${SESSION_KNOWLEDGE:-auto}" != off ]] || return 0
   [[ "$issue" =~ ^[1-9][0-9]*$ && "$pr" =~ ^[1-9][0-9]*$ ]] || return 1
   helper="$(_session_knowledge_helper)"
@@ -93,16 +93,9 @@ postmerge_session_knowledge() {
   existing="$(chp_pr_list all 'number,headRefName,headRefOid')" || return 1
   jq -e 'type == "array"' >/dev/null <<<"$existing" || return 1
   match_count="$(jq --arg branch "$branch" '[.[] | select(.headRefName == $branch)] | length' <<<"$existing")"
-  if [[ "$match_count" != 0 ]]; then
-    [[ "$match_count" == 1 ]] || return 1
-    jq -e --arg branch "$branch" --arg commit "$commit" \
-      '.[] | select(.headRefName == $branch) | .headRefOid == $commit' >/dev/null <<<"$existing" || return 1
-    number="$(jq -r --arg branch "$branch" '.[] | select(.headRefName == $branch) | .number' <<<"$existing")"
-    bash "$helper" --repo "$PROJECT_DIR" published --task "issue-${issue}" --merged-pr "$pr" --digest "$digest" --pr "$number" >/dev/null
-    return $?
-  fi
-  _session_knowledge_git -C "$worktree" push origin "${commit}:refs/heads/${branch}" >/dev/null 2>&1 || return 1
-  body="$(cat <<'EOF'
+  if [[ "$match_count" == 0 ]]; then
+    _session_knowledge_git -C "$worktree" push origin "${commit}:refs/heads/${branch}" >/dev/null 2>&1 || return 1
+    body="$(cat <<'EOF'
 Retain verified, reusable guidance and lessons from completed development and review sessions.
 
 The update was generated only for new or corrected repository facts after a confirmed merge. Local environment information and credential references remain in ignored local files.
@@ -110,6 +103,16 @@ The update was generated only for new or corrected repository facts after a conf
 Validation: scoped documentation targets, exact legacy replacements, credential/identifier scan, and git diff --check passed before the isolated documentation commit. Review the resulting guidance and evidence before merging.
 EOF
 )"
-  url="$(chp_create_pr "$branch" 'docs(knowledge): retain verified session lessons' "$body")" || return 1
-  bash "$helper" --repo "$PROJECT_DIR" published --task "issue-${issue}" --merged-pr "$pr" --digest "$digest" --url "$url" >/dev/null
+    # Creation stdout is provider-specific and optional. A normalized read is
+    # the durable identity, including when creation succeeded before a crash.
+    chp_create_pr "$branch" 'docs(knowledge): retain verified session lessons' "$body" >/dev/null || return 1
+    existing="$(chp_pr_list all 'number,headRefName,headRefOid')" || return 1
+    jq -e 'type == "array"' >/dev/null <<<"$existing" || return 1
+    match_count="$(jq --arg branch "$branch" '[.[] | select(.headRefName == $branch)] | length' <<<"$existing")"
+  fi
+  [[ "$match_count" == 1 ]] || return 1
+  jq -e --arg branch "$branch" --arg commit "$commit" \
+    '.[] | select(.headRefName == $branch) | .headRefOid == $commit' >/dev/null <<<"$existing" || return 1
+  number="$(jq -r --arg branch "$branch" '.[] | select(.headRefName == $branch) | .number' <<<"$existing")"
+  bash "$helper" --repo "$PROJECT_DIR" published --task "issue-${issue}" --merged-pr "$pr" --digest "$digest" --pr "$number" >/dev/null
 }

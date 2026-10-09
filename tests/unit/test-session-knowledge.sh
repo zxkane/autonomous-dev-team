@@ -115,6 +115,67 @@ class KnowledgeTests(unittest.TestCase):
         self.cli("assess", "--none", "Rechecked the new revision.")
         self.cli("check")
 
+    def test_stop_checks_the_assessed_worktree_from_the_primary_checkout(self):
+        feature = Path(self.temp.name) / "feature"
+        self.git("worktree", "add", "-qb", "feat/source", str(feature))
+        self.git("commit", "--allow-empty", "-qm", "test: feature revision", cwd=feature)
+        self.cli("begin", "--no-active", "--task", "issue-1", "--session", "dev-a")
+        self.cli("assess", "--task", "issue-1", "--session", "dev-a", "--none",
+                 "No new durable facts.", cwd=feature)
+        env = {**self.env, "AUTONOMOUS_KNOWLEDGE_TASK": "issue-1",
+               "AUTONOMOUS_KNOWLEDGE_SESSION": "dev-a"}
+        def stop(payload):
+            return subprocess.run(["bash", str(HOOK)], cwd=self.repo, input=json.dumps(payload),
+                                  capture_output=True, text=True, env=env)
+        for payload in ({"cwd": str(self.repo)}, {}):
+            result = stop(payload)
+            self.assertEqual(result.returncode, 0, result.stderr)
+        self.git("commit", "--allow-empty", "-qm", "test: unrelated primary revision")
+        self.assertEqual(stop({"cwd": str(self.repo)}).returncode, 0)
+        self.git("commit", "--allow-empty", "-qm", "test: changed feature revision", cwd=feature)
+        result = stop({"cwd": str(self.repo)})
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("worktree", result.stderr)
+
+    def test_switching_the_assessed_worktree_branch_invalidates_the_receipt(self):
+        feature = Path(self.temp.name) / "feature"
+        self.git("worktree", "add", "-qb", "feat/source", str(feature))
+        self.cli("begin", "--no-active", "--task", "issue-1", "--session", "dev-a")
+        self.cli("assess", "--task", "issue-1", "--session", "dev-a", "--none",
+                 "No new durable facts.", cwd=feature)
+        self.cli("check", "--task", "issue-1", "--session", "dev-a")
+        self.git("checkout", "-qb", "feat/other", cwd=feature)
+        self.cli("check", "--task", "issue-1", "--session", "dev-a", ok=False)
+
+    def test_same_cli_review_members_have_independent_assessments(self):
+        library = SOURCE / "skills/autonomous-dispatcher/scripts/lib-session-knowledge.sh"
+        wrapper = library.with_name("autonomous-review.sh").read_text().splitlines()
+        begin = next(line for line in wrapper if "begin_session_knowledge review" in line)
+        prompt = next(line for line in wrapper if '_knowledge_prompt="$(render_session_knowledge_prompt review' in line)
+        harness = '''set -euo pipefail
+source "$KNOWLEDGE_LIBRARY"
+RUN_ID=test-run
+_agent=codex
+_agent_name=codex
+for _agent_session_id in member-a member-b; do
+BEGIN
+PROMPT
+  [[ "$_knowledge_prompt" == *"--session ${AUTONOMOUS_KNOWLEDGE_SESSION}"* ]]
+  if [[ "$_agent_session_id" == member-a ]]; then
+    first_session="$AUTONOMOUS_KNOWLEDGE_SESSION"
+    bash "$KNOWLEDGE_HELPER" --repo "$PROJECT_DIR" assess --none 'No new durable facts.' >/dev/null
+  else
+    [[ "$AUTONOMOUS_KNOWLEDGE_SESSION" != "$first_session" ]]
+    ! bash "$KNOWLEDGE_HELPER" --repo "$PROJECT_DIR" check
+  fi
+done
+'''.replace("BEGIN", begin).replace("PROMPT", prompt)
+        result = subprocess.run(["bash", "-c", harness], cwd=self.repo, capture_output=True, text=True,
+                                env={**self.env, "KNOWLEDGE_LIBRARY": str(library), "KNOWLEDGE_HELPER": str(HELPER),
+                                     "PROJECT_DIR": str(self.repo), "LIB_DIR": str(library.parent),
+                                     "ISSUE_NUMBER": "1", "PR_HEAD_SHA": self.baseline})
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_no_new_update_preserves_prior_facts_from_the_same_session(self):
         self.begin()
         self.assess([self.update()])
@@ -319,6 +380,15 @@ class KnowledgeTests(unittest.TestCase):
         self.assertEqual(second["commit"], first["commit"])
         self.assertEqual(len(self.git("worktree", "list", "--porcelain").stdout.split("worktree ")), 2)
 
+    def test_empty_publication_identity_does_not_complete_the_receipt(self):
+        self.begin()
+        self.assess([self.update()])
+        first = self.apply()
+        for flag in ("--url", "--pr"):
+            self.cli("published", "--task", "issue-1", "--digest", first["digest"], flag, "", ok=False)
+        self.assertEqual(self.apply()["status"], "committed")
+        self.assertTrue(Path(first["worktree"]).exists())
+
     def test_committed_retry_recreates_a_removed_worktree(self):
         self.begin()
         self.assess([self.update()])
@@ -336,7 +406,8 @@ class KnowledgeTests(unittest.TestCase):
         operations = [{key: value for key, value in item.items() if key not in {"evidence", "kind"}}
                       for item in pending["updates"]]
         digest = hashlib.sha256(json.dumps(operations, sort_keys=True).encode()).hexdigest()
-        branch = f"docs/knowledge-issue-1-1-{digest[:12]}"
+        task_key = hashlib.sha256(b"issue-1").hexdigest()[:12]
+        branch = f"docs/knowledge-{task_key}-1-{digest[:12]}"
         self.git("branch", branch)
         self.apply(ok=False)
         self.apply(ok=False)

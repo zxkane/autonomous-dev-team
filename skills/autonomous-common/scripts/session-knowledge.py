@@ -255,6 +255,19 @@ class Repository:
     def head(self):
         return os.environ.get("AUTONOMOUS_KNOWLEDGE_HEAD") or git(self.root, "rev-parse", "HEAD").stdout.strip()
 
+    def assessment_head(self, assessment):
+        # Stop's cwd can be the launcher checkout, not the worktree the agent
+        # assessed. Bind the receipt to its actual source and verify ownership.
+        source = Path(assessment.get("source_root", str(self.root))).resolve()
+        try:
+            common = Path(git(source, "rev-parse", "--path-format=absolute", "--git-common-dir").stdout.strip()).resolve()
+            branch = git(source, "branch", "--show-current").stdout.strip()
+            if common != self.common or branch != assessment.get("source_branch", branch):
+                return None
+            return os.environ.get("AUTONOMOUS_KNOWLEDGE_HEAD") or git(source, "rev-parse", "HEAD").stdout.strip()
+        except KnowledgeError:
+            return None
+
     def identity(self, args):
         task = args.task or os.environ.get("AUTONOMOUS_KNOWLEDGE_TASK") or self.active.get("task")
         session = args.session or os.environ.get("AUTONOMOUS_KNOWLEDGE_SESSION") or self.active.get("session")
@@ -403,7 +416,9 @@ def apply_updates(repo, directory, args):
     previous = load_json(receipt_path)
     if previous and previous.get("base_ref", args.base_ref) != args.base_ref:
         raise KnowledgeError("Knowledge receipt belongs to a different merge target; preserve it for inspection.")
-    branch = f"docs/knowledge-{args.task}-{args.merged_pr}-{digest[:12]}"
+    # Never expose an issue-N token: INV-86 treats it as issue/PR linkage.
+    task_key = hashlib.sha256(args.task.encode()).hexdigest()[:12]
+    branch = f"docs/knowledge-{task_key}-{args.merged_pr}-{digest[:12]}"
     worktree = safe_path(repo.primary, ".worktrees/" + branch)
     if previous and previous["status"] in {"published", "noop"}:
         return previous
@@ -523,8 +538,10 @@ def main():
                 save_json(repo.active_path, {"task": task, "session": session, "branch": repo.branch()})
             output = {"task": task, "session": session, "status": "begun"}
         elif args.command == "check":
-            if not current or current["status"] != "assessed" or current.get("head") != repo.head():
-                print("Assess durable session knowledge before finishing. Use session-knowledge.sh assess --input <json-file> "
+            if not current or current["status"] != "assessed" or not current.get("head") or current["head"] != repo.assessment_head(current):
+                source = (current or {}).get("source_root", str(repo.root))
+                print(f"Assess durable session knowledge from source worktree {source} before finishing. "
+                      "Use session-knowledge.sh assess --input <json-file> "
                       "or assess --none 'reason no update is needed'. No lesson or documentation change is required.", file=sys.stderr)
                 return 2
             return 0
@@ -552,7 +569,8 @@ def main():
             retained = {(item["path"], item["key"]): {**item, "_sequence": item.get("_sequence", current.get("sequence", 0))}
                         for item in current.get("updates", [])}
             retained.update({(item["path"], item["key"]): {**item, "_sequence": sequence} for item in updates})
-            current.update(status="assessed", head=repo.head(), updates=list(retained.values()), reason=reason,
+            current.update(status="assessed", head=repo.head(), source_root=str(repo.root), source_branch=repo.branch(),
+                           updates=list(retained.values()), reason=reason,
                            local_count=len(local), sequence=sequence)
             save_json(receipt, current)
             output = {"status": "assessed", "public_updates": len(updates), "local_updates": len(local)}
@@ -563,8 +581,8 @@ def main():
         else:
             matches = [path for path in directory.glob("publication-*.json") if load_json(path).get("digest") == args.digest
                        and (not args.merged_pr or load_json(path).get("merged_pr") == args.merged_pr)]
-            if len(matches) != 1 or (args.url and not re.fullmatch(r"https://[^\s]+", args.url)) or (
-                    args.pr and not re.fullmatch(r"[1-9][0-9]*", args.pr)):
+            if len(matches) != 1 or (args.url is not None and not re.fullmatch(r"https://[^\s]+", args.url)) or (
+                    args.pr is not None and not re.fullmatch(r"[1-9][0-9]*", args.pr)):
                 raise KnowledgeError("A unique committed receipt and PR URL/number are required.")
             output = load_json(matches[0])
             if output["status"] not in {"committed", "published"}:

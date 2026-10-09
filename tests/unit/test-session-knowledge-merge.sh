@@ -62,6 +62,11 @@ chp_pr_list() {
 chp_create_pr() {
   echo create >> "$KNOWLEDGE_CALLS"
   [[ "${FAIL_CREATE:-0}" != 1 ]] || return 1
+  local commit
+  commit=$(git -C "$PROJECT_DIR" rev-parse "refs/heads/$1")
+  jq -nc --arg branch "$1" --arg commit "$commit" \
+    '[{number:2,headRefName:$branch,headRefOid:$commit}]' > "$KNOWLEDGE_PRS"
+  [[ "${QUIET_CREATE:-0}" != 1 ]] || return 0
   printf '%s\n' 'https://example.com/pull/2'
 }
 postmerge_session_knowledge 1 1
@@ -120,6 +125,25 @@ postmerge_session_knowledge 1 1
         self.assertEqual(len(self.git("worktree", "list", "--porcelain").stdout.split("worktree ")), 2)
         self.assertEqual(self.git("rev-parse", "HEAD").stdout.strip(), self.base)
 
+    def test_documentation_pr_is_not_resolved_as_the_original_issue_pr(self):
+        self.capture()
+        self.run_merge()
+        branch = self.branches()[0]
+        self.pr_list.write_text(json.dumps([{"number": 2, "headRefName": branch,
+                                            "closingIssueNumbers": []}]))
+        linkage = self.directory / "linkage.sh"
+        linkage.write_text('''#!/usr/bin/env bash
+set -euo pipefail
+chp_find_pr_for_issue() { cat "$KNOWLEDGE_PRS"; }
+source "$KNOWLEDGE_LINKAGE"
+[[ -z "$(resolve_pr_for_issue 1)" ]]
+! verify_pr_closes_issue 2 1
+''')
+        result = subprocess.run(["bash", str(linkage)], cwd=self.repo,
+                                env={**self.env, "KNOWLEDGE_LINKAGE": str(LIBRARY.with_name("lib-pr-linkage.sh"))},
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_push_failure_retains_commit_for_retry(self):
         self.capture()
         self.run_merge(ok=False, FAIL_PUSH="1")
@@ -138,6 +162,16 @@ postmerge_session_knowledge 1 1
         commit = self.git("rev-parse", branch).stdout.strip()
         self.run_merge()
         self.assertEqual(self.git("rev-parse", branch).stdout.strip(), commit)
+
+    def test_provider_create_success_does_not_require_url_stdout(self):
+        self.capture()
+        self.run_merge(QUIET_CREATE="1")
+        receipts = list((self.repo / ".git/session-knowledge/tasks/issue-1").glob("publication-*.json"))
+        self.assertEqual(len(receipts), 1)
+        self.assertEqual(json.loads(receipts[0].read_text()).get("pr"), "2")
+        self.run_merge(QUIET_CREATE="1")
+        self.assertEqual(self.calls.read_text().splitlines().count("create"), 1)
+        self.assertEqual(len(self.git("worktree", "list", "--porcelain").stdout.split("worktree ")), 2)
 
     def test_successful_unrecorded_pr_is_reused(self):
         self.capture()

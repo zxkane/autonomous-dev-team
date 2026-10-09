@@ -105,8 +105,11 @@ bash <helper> assess --task <task> --session <session> --input <json-file>
 bash <helper> assess --task <task> --session <session> --none 'Existing guidance already covers this session.'
 ```
 
-Assess after the final code changes and before returning/posting a verdict. A HEAD
-change invalidates the receipt. Reviewers inspect all pending facts and overwrite
+Assess after the final code changes and before returning/posting a verdict. The
+receipt binds to that worktree and branch; Stop may run from the launcher checkout
+and still checks the assessed source. A source HEAD or branch change invalidates
+the receipt. Parallel members use distinct member IDs, including repeated CLIs.
+Reviewers inspect all pending facts and overwrite
 or discard stale ones before the wrapper can consume their verdict.
 
 ## Public-reference policy
@@ -133,9 +136,17 @@ recording/reviewing agent must also apply the user's public-artifact rules.
 The review wrapper requires provider state `MERGED` with a merge timestamp,
 fetches the configured base, applies candidates in a documentation worktree and
 commits only a nonempty eligible diff. It then pushes the branch and creates or
-reuses a separate documentation PR. The original task's labels and merge result
+reuses a separate documentation PR. Its branch avoids the pipeline's `issue-N`
+linkage marker. Publication confirms the provider's PR number and head rather
+than depending on an optional create-command URL. The original task's labels and
+merge result
 are independent; the documentation PR follows ordinary review/CI and is not
 automatically merged. No additional model call is made.
+
+Unassessed session receipts remain private and pending; they do not imply there
+were no lessons or prevent other assessed candidates from being published. A
+queued/asynchronous merge needs the retry entry once the provider reports MERGED;
+this callback does not start an additional merge watcher.
 
 For an interactive/manual merge, or a pending writeback after publication failure,
 run the installed dispatcher entry from the project root before cleanup:
