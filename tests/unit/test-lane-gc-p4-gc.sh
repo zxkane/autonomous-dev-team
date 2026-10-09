@@ -20,6 +20,10 @@
 
 set -uo pipefail
 
+# These decision-table fixtures exercise PGID GC. Host scope eligibility must
+# not switch them to the separately tested strict delayed-scope refusal path.
+export ADT_LANE_BACKEND_OVERRIDE=pgid
+
 PASS=0
 FAIL=0
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -44,6 +48,14 @@ assert_contains() {
 assert_not_contains() {
   local desc="$1" needle="$2" haystack="$3"
   if [[ "$haystack" != *"$needle"* ]]; then assert_pass "$desc"; else assert_fail "$desc (needle='$needle' unexpectedly found)"; fi
+}
+assert_not_classified() {
+  local desc="$1" pid="$2" log="$3"
+  if grep -Eq "(^|[[:space:]])(would-kill|kill)[[:space:]].*[[:space:]]pid=${pid}([[:space:]]|$)" <<< "$log"; then
+    assert_fail "$desc (cleanup decision found for pid=$pid)"
+  else
+    assert_pass "$desc"
+  fi
 }
 
 for f in "$LIB_LANE" "$ADT_GC" "$INSTALL_GC_TIMER" "$DISPATCH_LOCAL"; do
@@ -202,6 +214,7 @@ bash -c '
   lane_set "$LANE_DIR" STATE reaping
   # A real, alive "guardian" for this test.
   sleep 30 & disown
+  lane_set "$LANE_DIR" GUARDIAN_IDENTITY "$(proc_identity "$!")"
   lane_set "$LANE_DIR" GUARDIAN_PID "$!"
 '
 run_gc_dry "$ST2" >/dev/null
@@ -224,6 +237,7 @@ bash -c '
   lane_set "$LANE_DIR" WRAPPER_PID 999999
   lane_set "$LANE_DIR" STATE reaping
   sleep 30 & disown
+  lane_set "$LANE_DIR" GUARDIAN_IDENTITY "$(proc_identity "$!")"
   lane_set "$LANE_DIR" GUARDIAN_PID "$!"
   touch -d "@$(( $(date +%s) - 301 ))" "$LANE_DIR/lane"
 '
@@ -373,6 +387,7 @@ bash -c '
   LANE_DIR=$(lane_install p1 "$LANE_ID")
   lane_set "$LANE_DIR" WRAPPER_PID 999999
   lane_set "$LANE_DIR" STATE clean-exit
+  lane_set "$LANE_DIR" GUARDIAN_IDENTITY "$(proc_identity "'"$GUARDIAN13_PID"'")"
   lane_set "$LANE_DIR" GUARDIAN_PID "'"$GUARDIAN13_PID"'"
   touch -d "@$(( $(date +%s) - 90000 ))" "$LANE_DIR/lane" 2>/dev/null || true
 '
@@ -472,7 +487,7 @@ sleep 0.3
 ST22=$(mktemp -d)
 run_gc_dry_full "$ST22" >/dev/null
 CATLOG22=$(cat "$ST22/adt-gc.log" 2>/dev/null || true)
-assert_not_contains "TC-LGC4-022: legacy sig WITHOUT CC_USER (bare conf-sourcing decoy) is never treated as would-kill" "pid=$PID22" "$CATLOG22"
+assert_not_classified "TC-LGC4-022: legacy sig WITHOUT CC_USER (bare conf-sourcing decoy) is never treated as would-kill" "$PID22" "$CATLOG22"
 kill -9 -- "-$PID22" 2>/dev/null || true
 rm -rf "$ST22"
 
@@ -493,7 +508,7 @@ PID23=$(cat "$P2ROOT/pid23")
 SPAWNED_PIDS+=("$PID23")
 run_gc_dry_full "$ST23" >/dev/null
 CATLOG23=$(cat "$ST23/adt-gc.log" 2>/dev/null || true)
-assert_not_contains "TC-LGC4-023: TERM_PROGRAM decoy is unconditionally skipped despite a matching tagged-dead-lane env" "pid=$PID23" "$CATLOG23"
+assert_not_classified "TC-LGC4-023: TERM_PROGRAM decoy is unconditionally skipped despite a matching tagged-dead-lane env" "$PID23" "$CATLOG23"
 kill -9 -- "-$PID23" 2>/dev/null || true
 rm -rf "$ST23"
 
@@ -515,21 +530,30 @@ rm -rf "$ST24"
 
 # TC-LGC4-025: live-lane daemon — tagged with a LIVE lane's id -> skip.
 ST25=$(mktemp -d)
+sleep 400 &
+WRAPPER25_PID=$!
+SPAWNED_PIDS+=("$WRAPPER25_PID")
 LANE25_ID=$(bash -c '
   source "'"$LIB_LANE"'"
   export ADT_STATE_ROOT="'"$ST25"'"
   LANE_ID=$(lane_mint p2 dev 25)
-  lane_install p2 "$LANE_ID" >/dev/null
+  LANE_DIR=$(lane_install p2 "$LANE_ID")
+  lane_set "$LANE_DIR" WRAPPER_PID "'"$WRAPPER25_PID"'"
+  lane_set "$LANE_DIR" WRAPPER_START "$(proc_start_time "'"$WRAPPER25_PID"'")"
+  [[ "$(lane_probe "$LANE_DIR")" == live ]] || exit 1
   echo "$LANE_ID"
-')
-setsid env ADT_LANE_ID="$LANE25_ID" bash -c "sleep 400" &
+') || assert_fail "TC-LGC4-025 setup: wrapper lane must be live"
+setsid env -u TERM_PROGRAM ADT_LANE_ID="$LANE25_ID" bash -c "sleep 400" &
 disown
 PID25=$!
 SPAWNED_PIDS+=("$PID25")
+export "_GC_PROC_AGE_OVERRIDE_${PID25}=301"
 run_gc_dry_full "$ST25" >/dev/null
+unset "_GC_PROC_AGE_OVERRIDE_${PID25}"
 CATLOG25=$(cat "$ST25/adt-gc.log" 2>/dev/null || true)
-assert_not_contains "TC-LGC4-025: process tagged with a LIVE lane's id is never swept" "pid=$PID25" "$CATLOG25"
+assert_not_classified "TC-LGC4-025: process tagged with a LIVE lane's id is never swept" "$PID25" "$CATLOG25"
 kill -9 -- "-$PID25" 2>/dev/null || true
+kill -9 "$WRAPPER25_PID" 2>/dev/null || true
 rm -rf "$ST25"
 
 # TC-LGC4-030: rule 2.4 first conjunct — a process eligible via rule 2.1
@@ -599,7 +623,7 @@ export "_GC_PROC_AGE_OVERRIDE_${PID31}=100"
 run_gc_dry_full "$ST31" >/dev/null
 unset "_GC_PROC_AGE_OVERRIDE_${PID31}"
 CATLOG31=$(cat "$ST31/adt-gc.log" 2>/dev/null || true)
-assert_not_contains "TC-LGC4-031: tagged-dead-lane process below the 300s age floor is never classified (rule 2.5)" "pid=$PID31" "$CATLOG31"
+assert_not_classified "TC-LGC4-031: tagged-dead-lane process below the 300s age floor is never classified (rule 2.5)" "$PID31" "$CATLOG31"
 kill -9 -- "-$PID31" 2>/dev/null || true
 rm -rf "$ST31"
 
@@ -647,7 +671,7 @@ if [[ -n "$DAEMON26_PID" ]] && [[ "$(bash -c 'source "'"$LIB_LANE"'"; proc_ppid 
   run_gc_dry_full "$ST26" >/dev/null
   unset "_GC_PROC_AGE_OVERRIDE_${DAEMON26_PID}"
   CATLOG26=$(cat "$ST26/adt-gc.log" 2>/dev/null || true)
-  assert_not_contains "TC-LGC4-026: mid-upgrade legacy live wrapper's reparented same-pgid daemon is protected by rule 2.4's ancestry gate (direct pgid match)" "pid=$DAEMON26_PID" "$CATLOG26"
+  assert_not_classified "TC-LGC4-026: mid-upgrade legacy live wrapper's reparented same-pgid daemon is protected by rule 2.4's ancestry gate (direct pgid match)" "$DAEMON26_PID" "$CATLOG26"
   rm -rf "$ST26"
 else
   assert_pass "TC-LGC4-026: skipped — reparenting to init did not occur as expected on this sandbox"
@@ -818,7 +842,7 @@ if [[ -n "$PID28" ]]; then
   run_gc_dry_full "$ST28" >/dev/null
   unset "_GC_PROC_AGE_OVERRIDE_${PID28}"
   CATLOG28=$(cat "$ST28/adt-gc.log" 2>/dev/null || true)
-  assert_not_contains "TC-LGC4-028: launcher-bridge live wrapper — a dead-lane-tagged process sharing a pgid with a live wrapper-argv MEMBER (not the group leader) is protected by rule 2.3's group-scoped match" "pid=$PID28" "$CATLOG28"
+  assert_not_classified "TC-LGC4-028: launcher-bridge live wrapper — a dead-lane-tagged process sharing a pgid with a live wrapper-argv MEMBER (not the group leader) is protected by rule 2.3's group-scoped match" "$PID28" "$CATLOG28"
   kill -9 -- "-$PG28" 2>/dev/null || true
 else
   assert_pass "TC-LGC4-028: skipped — could not observe the launcher-bridge group's spawned pid on this sandbox"
@@ -947,7 +971,7 @@ SPAWNED_PIDS+=("$PID44")
 sleep 0.3
 run_gc_dry_full "$ST44" >/dev/null
 CATLOG44=$(cat "$ST44/adt-gc.log" 2>/dev/null || true)
-assert_not_contains "TC-LGC4-044: wedged gh with an EXISTING auth dir is never swept" "pid=$PID44" "$CATLOG44"
+assert_not_classified "TC-LGC4-044: wedged gh with an EXISTING auth dir is never swept" "$PID44" "$CATLOG44"
 kill -9 -- "-$PID44" 2>/dev/null || true
 rm -rf "$AUTH_GONE" "$AUTH_LIVE"
 rm -rf "$ST44"
@@ -1013,7 +1037,7 @@ if [[ -n "$PID42" ]] && [[ "$(bash -c 'source "'"$LIB_LANE"'"; proc_ppid "'"$PID
   # test-only override), proving the age gate itself, not just the seam.
   run_gc_dry_full "$ST42" >/dev/null
   CATLOG42=$(cat "$ST42/adt-gc.log" 2>/dev/null || true)
-  assert_not_contains "TC-LGC4-042: Chrome heuristic — reparented puppeteer profile below the 2h age floor is never classified" "pid=$PID42" "$CATLOG42"
+  assert_not_classified "TC-LGC4-042: Chrome heuristic — reparented puppeteer profile below the 2h age floor is never classified" "$PID42" "$CATLOG42"
   kill -9 -- "-$PID42" 2>/dev/null || true
   kill -9 "$PID42" 2>/dev/null || true
 else
@@ -1073,7 +1097,7 @@ if [[ -n "$PID46" ]]; then
   SPAWNED_PIDS+=("$PID46")
   run_gc_dry_full "$ST46" >/dev/null
   CATLOG46=$(cat "$ST46/adt-gc.log" 2>/dev/null || true)
-  assert_not_contains "TC-LGC4-046: E2E server whose recorded WORKTREE still exists is never swept" "pid=$PID46" "$CATLOG46"
+  assert_not_classified "TC-LGC4-046: E2E server whose recorded WORKTREE still exists is never swept" "$PID46" "$CATLOG46"
   kill -9 -- "-$PID46" 2>/dev/null || true
 else
   assert_pass "TC-LGC4-046: skipped — could not observe the fixture's cwd-scoped pid on this sandbox"
@@ -1260,7 +1284,7 @@ rm -rf "$ST73"
 
 # ===========================================================================
 echo ""
-echo "=== TC-LGC4-080..083: log discipline + ADT_GC_SUMMARY metrics ==="
+echo "=== TC-LGC4-080..084: log discipline + ADT_GC_SUMMARY metrics ==="
 # ===========================================================================
 ST80=$(mktemp -d)
 OUT80=$(ADT_STATE_ROOT="$ST80" bash "$ADT_GC" --dry-run 2>&1)
@@ -1269,6 +1293,37 @@ for field in would_kill= killed= would_kill_legacy_signature= unknown_class= liv
   assert_contains "TC-LGC4-082: summary carries field $field" "$field" "$OUT80"
 done
 rm -rf "$ST80"
+
+NOW_MS_SRC="$(sed -n '/^_gc_now_ms() {$/,/^}/p' "$ADT_GC")"
+NOW_MS_UUTILS="$(bash -c '
+  eval "$1"
+  date() {
+    case "$1" in
+      "+%s %N") printf "1700000000 123456789\n" ;;
+      "+%s%3N") printf "1700000000123456789\n" ;;
+      "+%s") printf "1700000000\n" ;;
+      *) return 1 ;;
+    esac
+  }
+  _gc_now_ms
+' _ "$NOW_MS_SRC")"
+assert_eq "TC-LGC4-084a: _gc_now_ms uses the first three digits of a full-width nanosecond field" \
+  "1700000000123" "$NOW_MS_UUTILS"
+
+NOW_MS_NO_NANOS="$(bash -c '
+  eval "$1"
+  date() {
+    case "$1" in
+      "+%s %N") printf "1700000000 %%N\n" ;;
+      "+%s%3N") printf "1700000000%%3N\n" ;;
+      "+%s") printf "1700000000\n" ;;
+      *) return 1 ;;
+    esac
+  }
+  _gc_now_ms
+' _ "$NOW_MS_SRC")"
+assert_eq "TC-LGC4-084b: _gc_now_ms falls back to whole-second milliseconds without numeric nanoseconds" \
+  "1700000000000" "$NOW_MS_NO_NANOS"
 
 ST81=$(mktemp -d)
 mkdir -p "$ST81"
@@ -1361,6 +1416,7 @@ echo "=== TC-LGC4-100..105: install-gc-timer.sh ==="
 # ===========================================================================
 TIMERBIN=$(mktemp -d)
 CRONSTORE=$(mktemp)
+TIMERHOME=$(mktemp -d)
 cat > "$TIMERBIN/crontab" <<'EOF'
 #!/bin/bash
 STORE="${CRONTAB_STUB_STORE:?}"
@@ -1376,20 +1432,20 @@ EOF
 chmod +x "$TIMERBIN/crontab"
 echo "unrelated-existing-line" > "$CRONSTORE"
 
-PATH="$TIMERBIN:$PATH" CRONTAB_STUB_STORE="$CRONSTORE" ADT_STATE_ROOT="$(mktemp -d)" bash "$INSTALL_GC_TIMER" >/dev/null 2>&1
+PATH="$TIMERBIN:$PATH" CRONTAB_STUB_STORE="$CRONSTORE" HOME="$TIMERHOME" ADT_STATE_ROOT="$(mktemp -d)" bash "$INSTALL_GC_TIMER" >/dev/null 2>&1
 MARKER_COUNT_1=$(grep -c 'adt-gc-timer' "$CRONSTORE")
 assert_eq "TC-LGC4-100: fresh install adds exactly one marked line" "1" "$MARKER_COUNT_1"
 assert_contains "TC-LGC4-100b: unrelated existing crontab content preserved" "unrelated-existing-line" "$(cat "$CRONSTORE")"
 
-PATH="$TIMERBIN:$PATH" CRONTAB_STUB_STORE="$CRONSTORE" ADT_STATE_ROOT="$(mktemp -d)" bash "$INSTALL_GC_TIMER" >/dev/null 2>&1
+PATH="$TIMERBIN:$PATH" CRONTAB_STUB_STORE="$CRONSTORE" HOME="$TIMERHOME" ADT_STATE_ROOT="$(mktemp -d)" bash "$INSTALL_GC_TIMER" >/dev/null 2>&1
 MARKER_COUNT_2=$(grep -c 'adt-gc-timer' "$CRONSTORE")
 assert_eq "TC-LGC4-101: re-run stays idempotent (still exactly one marked line)" "1" "$MARKER_COUNT_2"
 
-PATH="$TIMERBIN:$PATH" CRONTAB_STUB_STORE="$CRONSTORE" bash "$INSTALL_GC_TIMER" --uninstall >/dev/null 2>&1
+PATH="$TIMERBIN:$PATH" CRONTAB_STUB_STORE="$CRONSTORE" HOME="$TIMERHOME" bash "$INSTALL_GC_TIMER" --uninstall >/dev/null 2>&1
 MARKER_COUNT_3=$(grep -c 'adt-gc-timer' "$CRONSTORE" || true)
 assert_eq "TC-LGC4-102: --uninstall removes the marked line" "0" "$MARKER_COUNT_3"
 assert_contains "TC-LGC4-102b: unrelated content still preserved after uninstall" "unrelated-existing-line" "$(cat "$CRONSTORE")"
-rm -rf "$TIMERBIN" "$CRONSTORE"
+rm -rf "$TIMERBIN" "$CRONSTORE" "$TIMERHOME"
 
 # macOS branch — stubbed launchctl + isolated HOME.
 LAUNCHDBIN=$(mktemp -d)
@@ -1517,7 +1573,7 @@ if [[ -n "$PID200" ]]; then
   SPAWNED_PIDS+=("$PID200")
   run_gc_dry_full "$ST200" >/dev/null
   CATLOG200=$(cat "$ST200/adt-gc.log" 2>/dev/null || true)
-  assert_not_contains "TC-LGC4-200 (P1-1): rule 3.4 with TERM_PROGRAM set is skipped — never kills an operator shell cwd'd inside a removed worktree" "pid=$PID200" "$CATLOG200"
+  assert_not_classified "TC-LGC4-200 (P1-1): rule 3.4 with TERM_PROGRAM set is skipped — never kills an operator shell cwd'd inside a removed worktree" "$PID200" "$CATLOG200"
   kill -9 -- "-$PID200" 2>/dev/null || true
 else
   assert_pass "TC-LGC4-200: skipped — could not observe the fixture's cwd-scoped pid on this sandbox"
@@ -1552,7 +1608,7 @@ export "_GC_ENV_UNREADABLE_OVERRIDE_${PID201}=1"
 run_gc_dry_full "$ST201" >/dev/null
 unset "_GC_PROC_AGE_OVERRIDE_${PID201}" "_GC_ENV_UNREADABLE_OVERRIDE_${PID201}"
 CATLOG201=$(cat "$ST201/adt-gc.log" 2>/dev/null || true)
-assert_not_contains "TC-LGC4-201a (P1-2): env-unknowable candidate is never would-killed, even with every other rule-2.1 condition satisfied" "would-kill" "$CATLOG201"
+assert_not_contains "TC-LGC4-201a (P1-2): env-unknowable candidate is never would-killed, even with every other rule-2.1 condition satisfied" "would-kill rule=2 pid=$PID201 " "$CATLOG201"
 assert_contains "TC-LGC4-201b (P1-2): env-unknowable skip is logged with its own reason (fail-toward-leak, not a silent drop)" "reason=env-unknowable-fail-toward-leak" "$CATLOG201"
 kill -9 -- "-$PID201" 2>/dev/null || true
 rm -rf "$ST201"
@@ -1682,7 +1738,10 @@ if [[ -n "$PID206" ]] && [[ "$(bash -c 'source "'"$LIB_LANE"'"; proc_ppid "'"$PI
   run_gc_dry_full "$ST206" >/dev/null
   unset "_GC_PROC_AGE_OVERRIDE_${PID206}"
   CATLOG206=$(cat "$ST206/adt-gc.log" 2>/dev/null || true)
-  assert_not_contains "TC-LGC4-206 (P1-4): rule 3.2 skips a candidate whose profile dir has a LIVE sharer" "pid=$PID206" "$CATLOG206"
+  assert_not_classified "TC-LGC4-206 (P1-4): rule 3.2 skips a candidate whose profile dir has a LIVE sharer" "$PID206" "$CATLOG206"
+  for child in $(pgrep -P "$SHARER206_PID" 2>/dev/null || true); do
+    kill -9 "$child" 2>/dev/null || true
+  done
   kill -9 "$SHARER206_PID" 2>/dev/null || true
   kill -9 -- "-$PID206" 2>/dev/null || true
   kill -9 "$PID206" 2>/dev/null || true
@@ -1716,7 +1775,7 @@ if [[ -n "$PID207" ]]; then
   run_gc_dry_full "$ST207" >/dev/null
   unset "_GC_PROC_AGE_OVERRIDE_${PID207}"
   CATLOG207=$(cat "$ST207/adt-gc.log" 2>/dev/null || true)
-  assert_not_contains "TC-LGC4-207 (P1-4): rule 3.2 skips a candidate with a live chrome-devtools-mcp ancestor" "pid=$PID207" "$CATLOG207"
+  assert_not_classified "TC-LGC4-207 (P1-4): rule 3.2 skips a candidate with a live chrome-devtools-mcp ancestor" "$PID207" "$CATLOG207"
   rm -rf "$ST207"
 else
   assert_pass "TC-LGC4-207: skipped — could not observe the fixture's child pid on this sandbox"
@@ -1759,6 +1818,7 @@ rm -f "$SLOWGC_209"
 # substring containment.
 TIMERBIN210=$(mktemp -d)
 CRONSTORE210=$(mktemp)
+TIMERHOME210=$(mktemp -d)
 cat > "$TIMERBIN210/crontab" <<'EOF'
 #!/bin/bash
 STORE="${CRONTAB_STUB_STORE:?}"
@@ -1774,15 +1834,15 @@ EOF
 chmod +x "$TIMERBIN210/crontab"
 DECOY_LINE_210="# note to self: do not remove the line matching adt-gc-timer (autonomous-dev-team Lane-GC series, do not edit — managed by install-gc-timer.sh) by hand"
 echo "$DECOY_LINE_210" > "$CRONSTORE210"
-PATH="$TIMERBIN210:$PATH" CRONTAB_STUB_STORE="$CRONSTORE210" ADT_STATE_ROOT="$(mktemp -d)" bash "$INSTALL_GC_TIMER" >/dev/null 2>&1
+PATH="$TIMERBIN210:$PATH" CRONTAB_STUB_STORE="$CRONSTORE210" HOME="$TIMERHOME210" ADT_STATE_ROOT="$(mktemp -d)" bash "$INSTALL_GC_TIMER" >/dev/null 2>&1
 assert_contains "TC-LGC4-210a (P2-3): a decoy line mentioning the marker text mid-line survives install" "$DECOY_LINE_210" "$(cat "$CRONSTORE210")"
 MARKER_COUNT_210=$(grep -c 'adt-gc-timer' "$CRONSTORE210")
 assert_eq "TC-LGC4-210b (P2-3): install still adds exactly one REAL managed line alongside the surviving decoy" "2" "$MARKER_COUNT_210"
-PATH="$TIMERBIN210:$PATH" CRONTAB_STUB_STORE="$CRONSTORE210" bash "$INSTALL_GC_TIMER" --uninstall >/dev/null 2>&1
+PATH="$TIMERBIN210:$PATH" CRONTAB_STUB_STORE="$CRONSTORE210" HOME="$TIMERHOME210" bash "$INSTALL_GC_TIMER" --uninstall >/dev/null 2>&1
 assert_contains "TC-LGC4-210c (P2-3): the decoy line ALSO survives --uninstall" "$DECOY_LINE_210" "$(cat "$CRONSTORE210")"
 MARKER_COUNT_210B=$(grep -c 'adt-gc-timer' "$CRONSTORE210")
 assert_eq "TC-LGC4-210d (P2-3): --uninstall removes only the REAL managed line, leaving just the decoy's mention" "1" "$MARKER_COUNT_210B"
-rm -rf "$TIMERBIN210" "$CRONSTORE210"
+rm -rf "$TIMERBIN210" "$CRONSTORE210" "$TIMERHOME210"
 
 # TC-LGC4-211 (P2-4 proof): a path containing '%' is rejected (fail loud),
 # both for adt-gc.sh's own resolved path (via ADT_STATE_ROOT — the
@@ -1800,6 +1860,7 @@ rm -rf "$BADROOT_211" 2>/dev/null || true
 # quotes both the adt-gc.sh path and the logfile path.
 TIMERBIN212=$(mktemp -d)
 CRONSTORE212=$(mktemp)
+TIMERHOME212=$(mktemp -d)
 cp "$TIMERBIN210/crontab" "$TIMERBIN212/crontab" 2>/dev/null || cat > "$TIMERBIN212/crontab" <<'EOF'
 #!/bin/bash
 STORE="${CRONTAB_STUB_STORE:?}"
@@ -1813,11 +1874,11 @@ fi
 exit 1
 EOF
 chmod +x "$TIMERBIN212/crontab"
-PATH="$TIMERBIN212:$PATH" CRONTAB_STUB_STORE="$CRONSTORE212" ADT_STATE_ROOT="$(mktemp -d)" bash "$INSTALL_GC_TIMER" >/dev/null 2>&1
+PATH="$TIMERBIN212:$PATH" CRONTAB_STUB_STORE="$CRONSTORE212" HOME="$TIMERHOME212" ADT_STATE_ROOT="$(mktemp -d)" bash "$INSTALL_GC_TIMER" >/dev/null 2>&1
 INSTALLED_LINE_212=$(grep 'adt-gc-timer' "$CRONSTORE212" | head -1)
 assert_contains "TC-LGC4-212a (P2-4): installed cron entry single-quotes the adt-gc.sh path" "bash '${ADT_GC}'" "$INSTALLED_LINE_212"
 assert_contains "TC-LGC4-212b (P2-4): installed cron entry single-quotes the logfile redirect target" ">> '" "$INSTALLED_LINE_212"
-rm -rf "$TIMERBIN212" "$CRONSTORE212"
+rm -rf "$TIMERBIN212" "$CRONSTORE212" "$TIMERHOME212"
 
 # TC-LGC4-213 (P2-5 proof): grep-pin — the `_gc_rotate_log` call site
 # appears AFTER the singleton lock's `exec 9>`/`flock` acquisition, never

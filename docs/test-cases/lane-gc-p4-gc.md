@@ -15,6 +15,12 @@ under `env -u PROJECT_DIR` for CI parity. Every test isolates
 `$HOME/.local/state` — so this suite is safe to run on a box with a live
 dispatcher.
 
+The PGID decision-table fixtures force `ADT_LANE_BACKEND_OVERRIDE=pgid`,
+independent of host scope eligibility. Negative process assertions reject
+cleanup decisions while permitting diagnostic skip records. TC-LGC4-025 keeps
+a real wrapper alive, validates lane liveness, clears the terminal exemption,
+and raises its daemon above the age floor to exercise live-lane protection.
+
 ## Pass 1 — registry-driven (AC1)
 
 | ID | Scenario | Expected |
@@ -99,6 +105,7 @@ description) so the classification is proven against actual `env_of`/
 | TC-LGC4-081 | Log file grown to 26 MB before a run | rotates to `adt-gc.log.1` (single generation, mode 600 preserved) — mirrors the [INV-68] dispatch-local.sh log-retention pattern |
 | TC-LGC4-082 | `ADT_GC_SUMMARY` line format | matches `ADT_GC_SUMMARY skips=<n> would_kill=<n> killed=<n> would_kill_legacy_signature=<n> unknown_class=<n> live_burner_alerts=<n> elapsed_ms=<n>` — parseable by a simple `key=value` split fixture (the INV-67/INV-70 metrics-collector contract) |
 | TC-LGC4-083 | `metrics_emit` best-effort call | when `lib-metrics.sh` is sourced, an `adt_gc_summary` event lands in that project's `metrics.jsonl`; when NOT sourced (simulated stale/absent lib), `adt-gc.sh` still completes cleanly (no abort) |
+| TC-LGC4-084 | `_gc_now_ms` with a `date` implementation that ignores `%3N` width and emits all 9 nanosecond digits | request seconds and `%N` as separate fields, keep exactly the first 3 numeric nanosecond digits, and fall back to whole-second milliseconds when `%N` is unsupported |
 
 ## `--doctor` (AC per design §4-C5)
 

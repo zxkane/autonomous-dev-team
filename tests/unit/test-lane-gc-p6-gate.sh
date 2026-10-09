@@ -478,11 +478,12 @@ else
 fi
 # [review P2-1] Scoped to the ADMISSION-DECISION code only (never a claim
 # about adt-gc.sh's own, separately-INV-117-governed, reclaim-step side
-# effects — under ADT_GC_ENFORCE=1 that SEPARATE component can kill
-# registry-dead-lane residue, authorized by ITS OWN decision table, not
-# by this gate; see the honest-contract-scope comment in dispatch-local.sh
-# itself). This grep-pin proves the gate's OWN code never issues a kill/
-# pkill/signal to reach its defer-vs-proceed verdict.
+# effects — P8's Linux enforcement candidate remains blocked from production
+# rollout on #384's soak gate; if enforcement is explicitly active, that
+# SEPARATE component can kill registry-dead-lane residue, authorized by ITS
+# OWN decision table, not by this gate; see the honest-contract-scope comment
+# in dispatch-local.sh itself). This grep-pin proves the gate's OWN code never
+# issues a kill/pkill/signal to reach its defer-vs-proceed verdict.
 GATE_CODE=$(grep -v '^\s*#' <<<"$GATE_BLOCK")
 if grep -qE '\bkill\b|\bpkill\b|SIGTERM|SIGKILL' <<<"$GATE_CODE"; then
   assert_fail "TC-LGC6-060: gate's OWN admission-decision code contains a kill/pkill/signal reference (should be pure admission control)"
@@ -1411,14 +1412,16 @@ assert_contains "TC-LGC6-162c: remote DEFERRED age>=threshold + FAILED revert ->
 
 # ===========================================================================
 echo ""
-echo "=== TC-LGC6-120: no forbidden phrases / private-repo references in touched files ==="
+echo "=== TC-LGC6-120: no pasted cross-repository comment references in touched files ==="
 # ===========================================================================
 TOUCHED_FILES=("$LIB_LANE" "$LIB_DISPATCH" "$DISPATCH_LOCAL" "$TICK" "$LIVENESS_DRIVER")
-PRIVATE_HITS=$(grep -niE 'quant-scorer|vidsyllabus|issuecomment-[0-9]+' "${TOUCHED_FILES[@]}" 2>/dev/null || true)
+# User-specific private identifiers belong in machine-local publication policy,
+# not in this public test. Check generic pasted cross-repository references.
+PRIVATE_HITS=$(grep -niE 'issuecomment-[0-9]+|<owner>/<repo>#[0-9]+' "${TOUCHED_FILES[@]}" 2>/dev/null || true)
 if [[ -z "$PRIVATE_HITS" ]]; then
-  assert_pass "TC-LGC6-120: no private-repo references in any touched file"
+  assert_pass "TC-LGC6-120: no pasted cross-repository comment references in any touched file"
 else
-  assert_fail "TC-LGC6-120: found private-repo references: $PRIVATE_HITS"
+  assert_fail "TC-LGC6-120: found pasted cross-repository comment references: $PRIVATE_HITS"
 fi
 # Scoped to this PR's OWN new gate block only — dispatch-local.sh already
 # carries a legitimate pre-existing "codex review round-N" citation
