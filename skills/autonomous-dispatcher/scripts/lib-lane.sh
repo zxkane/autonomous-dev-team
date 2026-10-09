@@ -712,7 +712,7 @@ _lane_backend() {
   fi
 
   local linger
-  linger="$(_lane_bounded 5 loginctl show-user -p Linger --value 2>/dev/null || echo no)"
+  linger="$(_lane_bounded 5 loginctl show-user "${USER:-$(id -un)}" -p Linger --value 2>/dev/null || echo no)"
   if [[ "$linger" != "yes" ]]; then
     _lane_warn "systemd-scope backend requires 'loginctl enable-linger \$USER' (Linger=yes at backend-selection time — without it, the last operator logout cascade-SIGKILLs every enrolled scope), or the linger probe timed out; falling back to pgid"
     echo "pgid"
@@ -1257,6 +1257,23 @@ _lane_scope_kill() {
   [[ -n "$unit" && "$unit" != "-" ]] || return 0
   command -v systemctl >/dev/null 2>&1 || return 0
 
+  _lane_scope_kill_unit "$unit" "$grace"
+  # Parallel agent invocations use distinct scopes; auxiliary lane_spawn
+  # callers retain the original UNIT. Only units beneath this lane's prefix
+  # may be reaped from the agent registry.
+  local agent_unit
+  if [[ -f "$lane_dir/agent-scopes" && ! -L "$lane_dir/agent-scopes" ]]; then
+    while read -r agent_unit; do
+      [[ "$agent_unit" == "$unit"-agent-* && "$agent_unit" =~ ^[a-zA-Z0-9_.-]+$ ]] || continue
+      _lane_scope_kill_unit "$agent_unit" "$grace"
+    done < "$lane_dir/agent-scopes"
+  fi
+  return 0
+}
+
+_lane_scope_kill_unit() {
+  local unit="$1" grace="$2"
+
   local xdg="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
   local unit_scope="${unit}.scope"
 
@@ -1288,6 +1305,140 @@ _lane_scope_kill() {
     done < "${cgdir}/cgroup.procs" 2>/dev/null || true
   fi
   return 0
+}
+
+# Prepare a scope argv prefix only for the lane's recorded eligible backend.
+# The child must establish a waitable PGID and pass the commit handshake below
+# before executing any payload. The existing PGID path remains the fallback.
+_lane_agent_scope_prepare() {
+  local lane_dir="$1"
+  local -n prefix_out="$2" state_out="$3" unit_out="$4"
+  local base
+  [[ -d "$lane_dir" ]] || return 1
+  [[ "$(lane_get "$lane_dir" BACKEND 2>/dev/null)" == systemd-scope ]] || return 1
+  base="$(lane_get "$lane_dir" UNIT 2>/dev/null)" || return 1
+  [[ "$base" == adt-* && "$base" =~ ^[a-zA-Z0-9_.-]+$ ]] || return 1
+  command -v systemd-run >/dev/null 2>&1 && command -v setsid >/dev/null 2>&1 \
+    && command -v flock >/dev/null 2>&1 || return 1
+  state_out="$(mktemp -d "$lane_dir/.agent-scope.XXXXXX")" || return 1
+  unit_out="${base}-agent-${BASHPID}-${RANDOM}-${RANDOM}"
+  prefix_out=(env "XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+    systemd-run --user --scope --collect --quiet --expand-environment=no
+    --unit "$unit_out" -p "TasksMax=${LANE_TASKS_MAX:-512}")
+  [[ -z "${LANE_MEMORY_MAX:-}" ]] || prefix_out+=(-p "MemoryMax=$LANE_MEMORY_MAX")
+  prefix_out+=(--)
+}
+
+# Called with the gated child alive. Return 1 only before acknowledgement
+# (safe fallback), 2 for a closed lane (no new launch), and 3 for an ambiguous
+# acknowledgement failure (never repeat a potentially started payload).
+lane_record_agent_scope() {
+  _lane_agent_launch_commit "$@"
+}
+
+lane_admit_agent_pgid() {
+  _lane_agent_launch_commit "$1" "" "$2" "$3"
+}
+
+_lane_agent_launch_commit() {
+  local lane_dir="$1" unit="$2" pid="$3" state="$4" lock_fd cgdir
+  local ready="" deadline=$((SECONDS + 5))
+  while (( SECONDS < deadline )); do
+    ready="$(cat "$state/ready" 2>/dev/null)"
+    [[ "$ready" == "$pid" ]] && break
+    kill -0 "$pid" 2>/dev/null || return 1
+    sleep 0.01
+  done
+  [[ "$ready" == "$pid" && "$(proc_pgid "$pid")" == "$pid" ]] || return 1
+  if [[ -n "$unit" ]]; then
+    cgdir="$(_lane_cgroup_path "$unit.scope")" || return 1
+    grep -qx "$pid" "$cgdir/cgroup.procs" 2>/dev/null || return 1
+  fi
+  { exec {lock_fd}>>"$lane_dir/reap.lock"; } 2>/dev/null || return 1
+  flock -w 5 "$lock_fd" 2>/dev/null || { exec {lock_fd}>&-; return 1; }
+  if [[ "$(lane_get "$lane_dir" STATE 2>/dev/null)" != live \
+    || -e "$lane_dir/pgids.closed" || -L "$lane_dir/pgids.closed" ]]; then
+    exec {lock_fd}>&-
+    return 2
+  fi
+  lane_record_pgid "$lane_dir" "$pid" "${ADT_LANE_ROLE:-agent}"
+  if ! grep -q "^$pid " "$lane_dir/pgids" 2>/dev/null; then
+    exec {lock_fd}>&-
+    return 1
+  fi
+  if [[ -n "$unit" ]] && { [[ -L "$lane_dir/agent-scopes" ]] \
+    || ! printf '%s\n' "$unit" >> "$lane_dir/agent-scopes"; }; then
+    exec {lock_fd}>&-
+    return 1
+  fi
+  # Parent go and child expiry/abort compete for this one atomic decision.
+  # A confirmed abort is safe to retry; an unreadable/ambiguous decision is not.
+  if ! ln -s go "$state/decision" 2>/dev/null; then
+    local decision
+    decision="$(readlink "$state/decision" 2>/dev/null)"
+    exec {lock_fd}>&-
+    [[ "$decision" != abort ]] || return 1
+    return 3
+  fi
+  exec {lock_fd}>&-
+  return 0
+}
+
+# Stop only this launch's verified child/group. TERM-resistant helpers cannot
+# park the caller before timeout/watchdog enforcement starts. The caller waits
+# only after this function proves the child is dead/zombie; otherwise it refuses
+# a new launch. An acknowledged scope may already contain payload descendants.
+_lane_agent_child_state() {
+  local pid="$1" start="$2" current stat
+  current="$(proc_start_time "$pid")"
+  if [[ -z "$current" ]]; then
+    [[ ! -d "/proc/$pid" ]] && return 1
+    return 2
+  fi
+  [[ -n "$start" ]] || return 2
+  [[ "$current" == "$start" ]] || return 1
+  stat="$(ps -o stat= -p "$pid" 2>/dev/null)"
+  if [[ -z "$stat" ]]; then
+    [[ ! -d "/proc/$pid" ]] && return 1
+    return 2
+  fi
+  [[ "$stat" != *Z* ]] || return 1
+  return 0
+}
+
+_lane_agent_launch_abort() {
+  local state="$1" unit="$2" pid="$3" start="$4" target="$3" deadline status=0
+  ln -s abort "$state/decision" 2>/dev/null || true # A prior go/abort decision remains authoritative.
+  _lane_agent_child_state "$pid" "$start" || status=$?
+  [[ "$status" != 1 ]] || return 0
+  [[ "$status" == 0 ]] || return 1
+  if [[ "$(cat "$state/ready" 2>/dev/null)" == "$pid" && "$(proc_pgid "$pid")" == "$pid" ]]; then
+    target="-$pid"
+  fi
+  kill -TERM -- "$target" 2>/dev/null || true # Best-effort TERM of the verified launch only.
+  deadline=$((SECONDS + 1))
+  while (( SECONDS < deadline )); do
+    status=0
+    _lane_agent_child_state "$pid" "$start" || status=$?
+    [[ "$status" != 2 ]] || return 1
+    [[ "$status" == 0 ]] || break
+    sleep 0.01
+  done
+  if [[ "$target" == -* || "$status" == 0 ]]; then
+    kill -KILL -- "$target" 2>/dev/null || true # Bounded escalation includes surviving owned group members.
+  fi
+  if [[ -n "$unit" && "$(readlink "$state/decision" 2>/dev/null)" == go ]]; then
+    _lane_scope_kill_unit "$unit" 0
+  fi
+  deadline=$((SECONDS + 1))
+  while (( SECONDS < deadline )); do
+    status=0
+    _lane_agent_child_state "$pid" "$start" || status=$?
+    [[ "$status" != 1 ]] || return 0
+    [[ "$status" == 0 ]] || return 1
+    sleep 0.01
+  done
+  return 1
 }
 
 # lane_kill <lane_dir> [grace_secs] — registry-authoritative TERM→grace→KILL

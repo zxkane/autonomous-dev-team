@@ -1,5 +1,41 @@
 # Design: Lane-GC P7 — systemd `--user` scope backend
 
+## Full-wrapper enrollment (#522)
+
+The eligibility probe names the current user explicitly. The real agent
+chokepoint, `_run_with_timeout`, uses the lane's recorded backend; eligibility
+alone is not evidence that an agent entered a scope.
+
+Each agent invocation gets a unique scope beneath the lane's unit-name prefix.
+The existing `UNIT` remains the auxiliary `lane_spawn` scope; successful agent
+scopes are recorded in `agent-scopes`. This supports parallel review members
+without unit-name collisions. Guardian and immediate lane reap visit all of
+these scopes, then retain the unconditional PGID fallback.
+
+A private, bounded readiness/acknowledgement handshake precedes the payload.
+The scoped child establishes its session and reports its PID, but cannot run
+the timeout/credential-scrub/launcher command until the parent has verified its
+PGID and cgroup membership and durably registered the scope. The parent keeps
+the same waitable PID, PID-file and turn-control contracts. Registration,
+membership or registry failure leaves the gate unacknowledged and retries only
+the portable PGID launch. Parent go and bootstrap expiry compete through one
+atomic symlink decision. The fallback also requires locked lane admission; a
+closed lane cannot be reopened by a failed scope attempt. Cleanup uses verified
+owned TERM/KILL targets and waits only for confirmed child termination. Hard
+control refusals preserve rc 93. A payload that has started is never retried, including
+when it exits nonzero or prints a systemd-like diagnostic. Handshake children
+close guardian/control descriptors before starting systemd-run.
+
+Changes to explicit-user probing and full-wrapper launch ship together. The
+host's existing linger state is unchanged. The P8 delayed-GC scope refusal is
+retained; full-wrapper evidence does not by itself authorize widening delayed
+signaling or accept the P8 production observation window.
+
+Acceptance uses the unmodified dev wrapper, a private registry and a fixture
+agent with a re-setsid child. Before SIGKILL, both PIDs must appear in the owned
+scope's cgroup; afterward the guardian must empty it and leave no live fixture
+process. Registration-failure acceptance proves exactly one PGID execution.
+
 **Status:** Implementation notes for issue #383 (Lane-GC series PR-7). Full
 design authority is `docs/designs/lane-containment-gc.md` §4-C1
 (`_lane_backend`), §4-C7 (scope spawn + cgroup fast paths), §9 PR-7. This doc

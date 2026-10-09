@@ -1056,7 +1056,7 @@ _gc_doctor() {
     # `_lane_backend`'s own probe: a wedged user bus must never hang a
     # --doctor invocation (this is a read-only diagnostic, but an operator
     # running it interactively should never see it hang either).
-    linger="$(_lane_bounded 5 loginctl show-user -p Linger --value 2>/dev/null || echo "")"
+    linger="$(_lane_bounded 5 loginctl show-user "${USER:-$(id -un)}" -p Linger --value 2>/dev/null || echo "")"
     if [[ "$linger" == "yes" ]]; then
       echo "[ok]   linger enabled (systemd-scope backend eligible)"
     else
