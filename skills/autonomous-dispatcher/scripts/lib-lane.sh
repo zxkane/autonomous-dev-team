@@ -729,7 +729,7 @@ _lane_backend() {
   fi
 
   local linger
-  linger="$(_lane_bounded 5 loginctl show-user "${USER:-$(id -un)}" -p Linger --value 2>/dev/null || echo no)"
+  linger="$(_lane_bounded 5 loginctl show-user "${USER:-$(id -un)}" -p Linger --value 2>/dev/null || echo no)" # Failed probe refuses scope and retains PGID fallback.
   if [[ "$linger" != "yes" ]]; then
     _lane_warn "systemd-scope backend requires 'loginctl enable-linger \$USER' (Linger=yes at backend-selection time — without it, the last operator logout cascade-SIGKILLs every enrolled scope), or the linger probe timed out; falling back to pgid"
     echo "pgid"
