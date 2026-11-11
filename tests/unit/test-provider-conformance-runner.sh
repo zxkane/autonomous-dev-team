@@ -9,6 +9,11 @@
 
 set -uo pipefail
 
+# This suite checks provider shapes and failure classification. Expected
+# no-hook transport failures must not spend minutes retrying rate limits.
+# Retry-After/backoff behavior is covered by test-lib-gitlab-transport.sh.
+export GL_TRANSPORT_MAX_RETRIES=0
+
 PASS=0
 FAIL=0
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"

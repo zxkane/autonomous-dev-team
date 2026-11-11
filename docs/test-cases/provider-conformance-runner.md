@@ -5,6 +5,12 @@ helper library `tests/provider-conformance/lib-provider-conformance.sh`.
 Driven by `tests/unit/test-provider-conformance-runner.sh`
 ([INV-106](../pipeline/invariants.md#inv-106-provider-conformance-is-spec-defined-and-regression-pinned-by-a-hermetic-provider-parameterized-runner--any-itp-namesh-chp-namesh--caps-pair-must-clear-it)).
 
+The unit driver sets `GL_TRANSPORT_MAX_RETRIES=0` within its own process so
+expected no-hook transport failures do not spend minutes sleeping after rate
+limits. Provider output and failure assertions remain active. Retry-After and
+backoff semantics are covered separately by TC-GLT-030..033 in
+`tests/unit/test-lib-gitlab-transport.sh`; production retry defaults are unchanged.
+
 ## Happy path — github/github
 
 | ID | Scenario | Expected |

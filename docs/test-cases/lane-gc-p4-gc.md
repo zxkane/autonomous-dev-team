@@ -15,6 +15,44 @@ under `env -u PROJECT_DIR` for CI parity. Every test isolates
 `$HOME/.local/state` — so this suite is safe to run on a box with a live
 dispatcher.
 
+## CPU fixture ownership and lifetime (#558)
+
+The two Pass-4 burners use `tests/fixtures/cpu-burner.sh` and its Python
+worker. The worker becomes its own session leader without a forking launcher,
+arms a 45-second kernel wall timer before publishing readiness, and burns CPU
+in the requested hooks directory. The shell records its direct child's `$!`
+and verifies PID, parent, group, session and Linux start ticks. Cleanup uses a
+Linux pidfd after revalidating that identity, then the shell reaps its child.
+No process-name discovery or process-group signal is used. Invalid identity
+fails closed; the independent timer remains the fallback. Python 3.9+ and
+Linux pidfd support are required; unsupported startup is a test failure.
+
+`bash tests/unit/test-cpu-burner-fixture.sh` runs the focused unit and real
+process lifecycle tests under a 60-second external watchdog. Each hazardous
+runner has an isolated session and a 6-second wait bound, each burner has a
+3-second deadline in these tests, and the unrelated sentinel has its own
+finite lifetime. An independent 10-second watchdog pins each worker's pidfd,
+so even a regressed worker timer or loss of the observer cannot leak it. Exit checks
+compare exact PID/start-time identities, not global process names. Normal
+cleanup must reap children; forced runner loss must leave no live burner
+within the deadline plus 2 seconds. The integration observer reaps adopted
+children on Linux. No browser E2E test is applicable.
+
+| ID | Scenario | Expected |
+|----|----------|----------|
+| TC-LGC4-053 | Concurrent candidates ordered both above and below the owned PID | Only the recorded direct child can be signaled; candidate ordering has no influence |
+| TC-LGC4-054 | Empty, zero, malformed or stale identity; wrong parent/group/session/start ticks; caller or unowned group | Rejected without sending a signal; no group-zero fallback |
+| TC-LGC4-055 | Normal completion and early failure | EXIT cleanup terminates and reaps the exact burner; sentinel survives |
+| TC-LGC4-056 | HUP, INT and TERM interruption | Supported traps clean and reap the exact burner; sentinel survives |
+| TC-LGC4-057 | SIGKILL of runner PID and of its isolated process group | Burner exits by its independent deadline; sentinel survives |
+| TC-LGC4-058 | Two overlapping fixture invocations | First cleanup leaves the second burner and sentinel alive; second cleans its own child |
+| TC-LGC4-059 | Startup failure, inherited job control, missing/unregistered cleanup identity, expired worker | Failure is reported; no unrelated signal and no unbounded worker; expiry cannot masquerade as a live worker and is reaped |
+| TC-LGC4-060 | Worker inherits blocked SIGALRM, then runner is killed | Worker unblocks its timer signal and exits within its own deadline, before the independent watchdog |
+
+Regression verification also runs the original TC-LGC4-050/051/052 decision
+table through `bash tests/unit/test-lane-gc-p4-gc.sh`, the repository unit runner,
+and `bash tests/conformance/run-conformance.sh`.
+
 The PGID decision-table fixtures force `ADT_LANE_BACKEND_OVERRIDE=pgid`,
 independent of host scope eligibility. Negative process assertions reject
 cleanup decisions while permitting diagnostic skip records. TC-LGC4-025 keeps
