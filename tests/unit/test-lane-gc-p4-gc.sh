@@ -33,6 +33,8 @@ LIB_LANE="$SCRIPTS/lib-lane.sh"
 ADT_GC="$SCRIPTS/adt-gc.sh"
 INSTALL_GC_TIMER="$SCRIPTS/install-gc-timer.sh"
 DISPATCH_LOCAL="$SCRIPTS/dispatch-local.sh"
+# shellcheck source=../fixtures/cpu-burner.sh
+source "$PROJECT_ROOT/tests/fixtures/cpu-burner.sh"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; NC='\033[0m'
 assert_pass() { echo -e "  ${GREEN}PASS${NC}: $1"; PASS=$((PASS + 1)); }
@@ -67,11 +69,15 @@ TMPROOT=$(mktemp -d)
 # which assertion path ran — never leave a fixture process behind.
 declare -a SPAWNED_PIDS=()
 trap '
+  cpu_burner_cleanup
   for _p in "${SPAWNED_PIDS[@]:-}"; do
     [[ -n "$_p" ]] && kill -9 -- "-$_p" 2>/dev/null; kill -9 "$_p" 2>/dev/null
   done
   rm -rf "$TMPROOT"
 ' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # ===========================================================================
 echo ""
@@ -1117,27 +1123,24 @@ LANE50_DIR=$(bash -c '
   LANE_ID=$(lane_mint p4 dev 50)
   lane_install p4 "$LANE_ID"
 ')
-( cd "$HOOKS_DIR" && setsid bash -c 'exec yes >/dev/null' & disown )
-sleep 0.5
-BURNER_PID=$(pgrep -f '^yes$' | tail -1)
-if [[ -n "$BURNER_PID" ]]; then
-  SPAWNED_PIDS+=("$BURNER_PID")
-  BURNER_PG=$(bash -c 'source "'"$LIB_LANE"'"; proc_pgid "'"$BURNER_PID"'"')
+if cpu_burner_start "$HOOKS_DIR" "$TMPROOT"; then
+  BURNER_PID=$CPU_BURNER_PID
+  BURNER_PG=$BURNER_PID
   bash -c '
     source "'"$LIB_LANE"'"
     lane_record_pgid "'"$LANE50_DIR"'" "'"$BURNER_PG"'" agent
   '
-  sleep 1.5  # let `yes` accumulate CPU
+  sleep 1.5  # let the worker accumulate CPU
   ADT_STATE_ROOT="$ST50" bash "$ADT_GC" --dry-run >/dev/null 2>&1
   LOG50_ROUND1=$(cat "$ST50/adt-gc.log" 2>/dev/null || true)
   assert_not_contains "TC-LGC4-051: first high-CPU observation does not yet alert" "LIVE_BURNER_ALERT" "$LOG50_ROUND1"
   sleep 1.5
   ADT_STATE_ROOT="$ST50" bash "$ADT_GC" --dry-run >/dev/null 2>&1
   LOG50_ROUND2=$(cat "$ST50/adt-gc.log" 2>/dev/null || true)
-  if kill -0 "$BURNER_PID" 2>/dev/null; then
+  if cpu_burner_alive "$BURNER_PID"; then
     assert_pass "TC-LGC4-050b: the flagged live-lane process is STILL ALIVE after Pass 4 (flag-only, never kills)"
   else
-    assert_fail "TC-LGC4-050b: Pass 4 killed a live-lane process — it must be flag-only"
+    assert_fail "TC-LGC4-050b: CPU fixture exited before the live-lane assertion (possible deadline expiry)"
   fi
   if [[ "$LOG50_ROUND2" == *"LIVE_BURNER_ALERT"* ]]; then
     assert_pass "TC-LGC4-050: two consecutive high-CPU ticks under .worktrees/*/hooks/ -> LIVE_BURNER_ALERT emitted"
@@ -1145,9 +1148,9 @@ if [[ -n "$BURNER_PID" ]]; then
     assert_pass "TC-LGC4-050: skipped — CPU sampling window did not observe >80% (load-dependent on this runner, not a rule defect)"
   fi
 else
-  assert_pass "TC-LGC4-050/051: skipped — could not isolate the fixture 'yes' pid on this platform"
+  assert_fail "TC-LGC4-050/051: could not start the owned CPU fixture"
 fi
-kill -9 -- "-${BURNER_PID:-0}" 2>/dev/null || true
+cpu_burner_cleanup || assert_fail "TC-LGC4-050/051: CPU fixture cleanup failed"
 rm -rf "$ST50"
 
 # TC-LGC4-052: same high-CPU-under-.worktrees/*/hooks/ shape, but the lane
@@ -1167,12 +1170,9 @@ LANE52_DIR=$(bash -c '
   lane_set "$LANE_DIR" WRAPPER_PID 999999
   echo "$LANE_DIR"
 ')
-( cd "$HOOKS_DIR52" && setsid bash -c 'exec yes >/dev/null' & disown )
-sleep 0.5
-BURNER52_PID=$(pgrep -f '^yes$' | tail -1)
-if [[ -n "$BURNER52_PID" ]]; then
-  SPAWNED_PIDS+=("$BURNER52_PID")
-  BURNER52_PG=$(bash -c 'source "'"$LIB_LANE"'"; proc_pgid "'"$BURNER52_PID"'"')
+if cpu_burner_start "$HOOKS_DIR52" "$TMPROOT"; then
+  BURNER52_PID=$CPU_BURNER_PID
+  BURNER52_PG=$BURNER52_PID
   bash -c '
     source "'"$LIB_LANE"'"
     lane_record_pgid "'"$LANE52_DIR"'" "'"$BURNER52_PG"'" agent
@@ -1184,9 +1184,9 @@ if [[ -n "$BURNER52_PID" ]]; then
   LOG52=$(cat "$ST52/adt-gc.log" 2>/dev/null || true)
   assert_not_contains "TC-LGC4-052: a DEAD lane's high-CPU member is never alerted by Pass 4 (live-lane-only gate), even across two ticks" "LIVE_BURNER_ALERT" "$LOG52"
 else
-  assert_pass "TC-LGC4-052: skipped — could not isolate the fixture 'yes' pid on this platform"
+  assert_fail "TC-LGC4-052: could not start the owned CPU fixture"
 fi
-kill -9 -- "-${BURNER52_PID:-0}" 2>/dev/null || true
+cpu_burner_cleanup || assert_fail "TC-LGC4-052: CPU fixture cleanup failed"
 rm -rf "$ST52"
 
 # ===========================================================================

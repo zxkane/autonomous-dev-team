@@ -6,6 +6,28 @@ GC), §6 (the normative decision table), §9 PR-4. This doc records only the
 PR-open numbering re-verification and the concrete diff shape; it is not a
 new design — defer to the parent doc for rationale.
 
+## Test CPU worker containment (#558)
+
+The Pass-4 tests own one direct Python child per burner. Python calls `setsid`
+itself, avoiding an external launcher's possible fork, and installs a kernel
+wall timer before publishing PID/parent/PGID/session/start-tick readiness. It
+resets and unblocks SIGALRM so an inherited signal mask cannot disable expiry. The
+shell checks readiness against `$!` and keeps the identity in its own registry.
+Each burner expires after 45 seconds independently of its test runner.
+
+Cleanup opens a Linux pidfd, rechecks the recorded identity and parent, refuses
+the caller's group, and signals only that process through the descriptor. The
+shell then waits for its child. No group signal or global name search is needed
+because the worker has no descendants. A stale or invalid record is refused;
+the timer remains the bounded fallback. EXIT, HUP, INT and TERM invoke cleanup;
+SIGKILL is covered by the child's timer. The production GC policy is unchanged.
+
+The existing lane/guardian helpers supervise production process trees and do
+not provide this fixture's single-child, self-expiring lifecycle. This test-only
+helper requires Python 3.9+ and Linux pidfds, already available in the Linux
+unit-test environment. Tests fail explicitly when those facilities are absent.
+See TC-LGC4-053..060 in `docs/test-cases/lane-gc-p4-gc.md` for bounded verification.
+
 ## Numbering re-verification (design §8/§10 F10 completeness)
 
 The parent design assumed head INV-105 and reserved INV-106..113 (§8) for
